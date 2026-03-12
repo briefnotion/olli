@@ -54,35 +54,6 @@ void TOOL_SET_THINKING_MODE::handle_tool(ollama_system& chat, const std::string&
     }
 }
 
-// ----
-
-void TIMER_SIMPLE::start() {
-    m_startTime = std::chrono::steady_clock::now();
-    m_running = true;
-}
-
-bool TIMER_SIMPLE::isFinished() const {
-    if (!m_running) return false;
-    auto now = std::chrono::steady_clock::now();
-    return (now - m_startTime) >= m_duration;
-}
-
-double TIMER_SIMPLE::getRemainingTime() const {
-    if (!m_running) return 0.0;
-    auto now = std::chrono::steady_clock::now();
-    auto elapsed = now - m_startTime;
-    
-    if (elapsed >= m_duration) return 0.0;
-    
-    std::chrono::duration<double> remaining = m_duration - elapsed;
-    return remaining.count();
-}
-
-std::string TIMER_SIMPLE::getReminder() const 
-{ 
-    return m_reminder; 
-}
-
 // ---
 
 /**
@@ -753,6 +724,101 @@ void TOOL_DELEGATOR::handle_tool(ollama_system& chat, const std::string& name, c
     chat.send_tool_result(tc_id, final_report);
 }
 
+// ----
+
+/**
+ * @brief Helper for case-insensitive string comparison
+ */
+bool TOOL_TASK_RUNNER::iequals(const std::string& a, const std::string& b) {
+    if (a.size() != b.size()) return false;
+    return std::equal(a.begin(), a.end(), b.begin(),
+                        [](unsigned char ca, unsigned char cb) {
+                            return std::tolower(ca) == std::tolower(cb);
+                        });
+}
+
+/**
+ * @brief Registers the task execution tool to the chat instance.
+ */
+void TOOL_TASK_RUNNER::register_tool(ollama_system& chat) {
+    json task_params = {
+        {"type", "object"},
+        {"properties", {
+            {"intent_phrase", {
+                {"type", "string"}, 
+                {"description", "The specific phrase or intent identified (e.g., 'I'm home', 'run diagnostic')."}
+            }}
+        }},
+        {"required", {"intent_phrase"}}
+    };
+
+    chat.add_tool("run_automation_task", 
+        "Use this tool when the user expresses an intent that matches a home automation macro. "
+        "This retrieves a sequence of internal system commands that you must then execute.", 
+        task_params);
+}
+
+/**
+ * @brief Handles the tool call by matching phrases and injecting a user-role instruction.
+ */
+void TOOL_TASK_RUNNER::handle_tool(ollama_system& chat, const std::string& name, const json& args, const std::string& tc_id) {
+    if (name != "run_automation_task") return;
+
+    std::string target = args["intent_phrase"];
+    std::cout << "[TaskRunner] Searching for automation matching: \"" << target << "\"" << std::endl;
+
+    // Search for a matching task using case-insensitive comparison
+    auto it = std::find_if(task_manager.TASK_LIST.begin(), task_manager.TASK_LIST.end(), 
+        [this, &target](const TASK_SIMPLE& t) {
+            return iequals(t.TASK_PHRASE, target);
+        });
+
+    if (it != task_manager.TASK_LIST.end()) {
+        // 1. Acknowledge the tool call
+        chat.send_tool_result(tc_id, "SUCCESS: Automation '" + it->TASK_PHRASE + "' found. Sequence loading...");
+
+        // 2. Build the structured "User Injection"
+        // We use a very strict format to prevent the AI from looping or hallucinating repeated timers
+        std::stringstream ss;
+        ss << "### [SYSTEM DIRECTIVE: EXECUTE SEQUENCE] ###\n";
+        ss << "The user intent '" << it->TASK_PHRASE << "' has triggered the following macro.\n";
+        ss << "INSTRUCTION: You must execute these steps one-by-one using your available tools.\n\n";
+        
+        for (size_t i = 0; i < it->COMMANDS.size(); ++i) {
+            ss << (i + 1) << ". " << it->COMMANDS[i] << "\n";
+        }
+
+        ss << "\nBegin with the first item now. Do not repeat a step once it has been initiated.";
+
+        std::string event_msg = ss.str();
+        std::cout << "[TaskRunner] Injecting sequence for: " << it->TASK_PHRASE << std::endl;
+        
+        // 3. Inject as a USER message
+        chat.send(event_msg, "user");
+
+    } else {
+        // Error feedback with suggested matches
+        std::string error_msg = "ERROR: No automation found for '" + target + "'. ";
+        error_msg += "Available macros in my database: ";
+        for (size_t i = 0; i < task_manager.TASK_LIST.size(); ++i) {
+            error_msg += "\"" + task_manager.TASK_LIST[i].TASK_PHRASE + "\"" + 
+                            (i == task_manager.TASK_LIST.size() - 1 ? "" : ", ");
+        }
+        
+        chat.send_tool_result(tc_id, error_msg);
+    }
+}
+
+/**
+ * @brief Background monitor hook for out-of-loop logic.
+ */
+void TOOL_TASK_RUNNER::monitor_tool(ollama_system& chat) {
+    std::cout << chat.tts_buffer << std::endl;;
+    // Implementation for checking external states or timed events
+}
+
+// ----
+
 /**
  * IMPLEMENTATION NOTE:
  * Since your ollama_system uses a 'chat_thread' and 'is_processing' atomics,
@@ -792,6 +858,9 @@ void TOOL_SYSTEM_CLASS::process(ollama_system& chat)
             } 
             else if (tc.name == "consult_expert") {
                 delegator.handle_tool(chat, tc.name, tc.arguments, tc.id);
+            }
+            else if (tc.name == "run_automation_task") {
+                task_runner.handle_tool(chat, tc.name, tc.arguments, tc.id);
             }
         }
     }

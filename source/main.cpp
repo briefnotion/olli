@@ -34,6 +34,7 @@ int main() {
     tools.thinking.register_tool(chat);
     tools.web.register_tool(chat);
     tools.delegator.register_tool(chat);
+    tools.task_runner.register_tool(chat);
 
     //
 

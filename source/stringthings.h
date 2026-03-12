@@ -16,6 +16,7 @@
 // Standard Header Files
 #include <iostream>
 #include <string>
+#include <vector>
 #include <deque>
 #include <algorithm>
 #include <cctype>
@@ -26,6 +27,11 @@ using namespace std;
 int count_char_in_string(string& Text, char Character);
 
 string char_buf_to_string(char* Buf, int Buf_Len);
+
+/**
+ * @brief Filters out unwanted LLM artifacts like markdown bolding (**) for TTS.
+ */
+std::string tts_filter(const std::string& text);
 
 string filter_non_printable(const string& input);
 // Filter out non printable characters from string by replacing 

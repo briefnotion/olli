@@ -9,6 +9,7 @@
 #include <curl/curl.h>
 
 #include "olla.h"
+#include "tools_helper.h"
 
 class TOOL_SET_THINKING_MODE
 {
@@ -17,30 +18,12 @@ public:
     void handle_tool(ollama_system& chat, const std::string& name, const json& args, const std::string& tc_id);
 };
 
-class TIMER_SIMPLE {
-public:
-    explicit TIMER_SIMPLE(double seconds = 0.0, std::string reminder = "") 
-        : m_duration(seconds), m_reminder(reminder), m_running(false) {}
-    void start();
-    bool isFinished() const;
-    double getRemainingTime() const;
-    std::string getReminder() const;
-
-private:
-    std::chrono::duration<double> m_duration;
-    std::chrono::steady_clock::time_point m_startTime;
-    std::string m_reminder; 
-    bool m_running;
-};
-
-
 class TOOL_GET_CURRENT_TIME
 {
 public:
     void register_tool(ollama_system& chat);
     void handle_tool(ollama_system& chat, const std::string& name, const json& args, const std::string& tc_id);
 };
-
 
 class TOOL_TIMER {
 public:
@@ -77,8 +60,6 @@ class TOOL_HUE
         void handle_tool(ollama_system& chat, const std::string& name, const json& args, const std::string& tc_id);
         void monitor_tool();
 };
-
-
 
 class TOOL_WEB_SEARCH
 {
@@ -119,20 +100,48 @@ class TOOL_WEB_SEARCH
 class TOOL_DELEGATOR {
     private:
     
+    public:
+        // Testing switch: Turn this off to prevent the AI from spawning sub-agents
+        bool enable_delegation = true;
+
+        /**
+         * @brief Registers the delegation tool to the provided chat instance.
+         */
+        void register_tool(ollama_system& chat);
+
+        /**
+         * @brief Handles the tool call and manages the lifecycle of the sub-agent.
+         */
+        void handle_tool(ollama_system& chat, const std::string& name, const json& args, const std::string& tc_id);
+};
+
+class TOOL_TASK_RUNNER 
+{
+private:
+    TASK_SIMPLE_MANAGER task_manager;
+
+    /**
+     * @brief Helper for case-insensitive string comparison
+     */
+    bool iequals(const std::string& a, const std::string& b);
 
 public:
-    // Testing switch: Turn this off to prevent the AI from spawning sub-agents
-    bool enable_delegation = true;
-
     /**
-     * @brief Registers the delegation tool to the provided chat instance.
+    
+    * @brief Registers the task execution tool to the chat instance.
      */
     void register_tool(ollama_system& chat);
-
+    
     /**
-     * @brief Handles the tool call and manages the lifecycle of the sub-agent.
+     * @brief Handles the tool call by matching phrases and injecting a user-role instruction.
      */
     void handle_tool(ollama_system& chat, const std::string& name, const json& args, const std::string& tc_id);
+    
+
+    /**
+     * @brief Background monitor hook for out-of-loop logic.
+     */
+    void monitor_tool(ollama_system& chat);
 };
 
 /**
@@ -144,9 +153,6 @@ public:
  * When creating 'sub_agent', do NOT call 'register_tool' for delegation on the sub-agent 
  * unless you implement a 'depth' counter.
  */
-
-
-
 
 class TOOL_SYSTEM_CLASS
 {
@@ -162,6 +168,7 @@ class TOOL_SYSTEM_CLASS
     TOOL_SET_THINKING_MODE thinking;
     TOOL_WEB_SEARCH web;
     TOOL_DELEGATOR delegator;
+    TOOL_TASK_RUNNER task_runner;
 
     void process(ollama_system& chat);
 

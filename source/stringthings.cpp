@@ -32,6 +32,39 @@ string char_buf_to_string(char Buf[], int Buf_Len)
   //return ret_str;
 }
 
+/**
+ * @brief Filters out unwanted LLM artifacts like markdown formatting for clean TTS output.
+ */
+std::string tts_filter(const std::string& text) {
+    std::string result = text;
+    
+    // 1. Remove Markdown Bold/Italic indicators (** , __ , * , _)
+    const std::vector<std::string> md_artifacts = {"**", "__", "*", "_", "`", "#"};
+    for (const auto& artifact : md_artifacts) {
+        size_t pos = 0;
+        while ((pos = result.find(artifact, pos)) != std::string::npos) {
+            result.erase(pos, artifact.length());
+        }
+    }
+
+    // 2. Clean up excessive whitespace/newlines that cause awkward TTS pauses
+    std::string cleaned;
+    bool last_was_space = false;
+    for (size_t i = 0; i < result.length(); ++i) {
+        if (std::isspace(static_cast<unsigned char>(result[i]))) {
+            if (!last_was_space) {
+                cleaned += ' ';
+                last_was_space = true;
+            }
+        } else {
+            cleaned += result[i];
+            last_was_space = false;
+        }
+    }
+
+    return cleaned;
+}
+
 string filter_non_printable(const std::string& input)
 {
   string result = "";

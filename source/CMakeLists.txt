@@ -30,6 +30,7 @@ add_executable(olli
     ../source/olla.cpp
     ../source/helper_olli.cpp
     ../source/tools.cpp
+    ../source/tools_helper.cpp
     ../source/stringthings.cpp
 )
 

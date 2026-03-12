@@ -405,11 +405,10 @@ void ollama_system::write_to_tts()
         {
             if (!std::filesystem::exists(PROPS.path_output / "output.txt"))
             {
-                // 2. Write the new buffer
                 std::ofstream out(PROPS.path_output / "output.txt");
                 if (out.is_open()) 
                 {
-                    out << tts_buffer;
+                    out << tts_filter(tts_buffer);
                     out.close();
                     tts_buffer.clear();
                 }

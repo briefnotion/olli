@@ -1,0 +1,45 @@
+Setup Instructions for Ubuntu TTS
+
+To use the different engines in your script, you need to install the following packages:
+
+1. SVOX Pico (Highest Quality / Recommended)
+
+This is usually the most natural-sounding local engine.
+
+sudo apt update
+sudo apt install libttspico-utils
+
+
+2. Espeak-NG
+
+Very fast and supports many languages, though sounds more robotic.
+
+sudo apt install espeak-ng
+
+
+3. Festival
+
+A classic Linux TTS system.
+
+sudo apt install festival
+
+
+4. Audio Playback
+
+The script prefers paplay (standard on modern Ubuntu with PulseAudio/PipeWire).
+
+sudo apt install pulseaudio-utils
+
+
+Running the script
+
+You can run the script normally, or pass an engine preference:
+
+# Auto-detect best engine
+python voice_monitor.py
+
+# Force specific engine
+python voice_monitor.py pico2wave
+
+# Cycle through all installed engines for every new file
+python voice_monitor.py cycle

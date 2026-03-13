@@ -17,8 +17,7 @@ int main() {
     Settings setings_vars;
     setings_vars.load_settings();
     tools.web.apiKey = setings_vars.tool_web_search_apiKey;
-    tools.hue.bridge_ip = setings_vars.tool_hue_lights_bridge_ip;
-    tools.hue.api_key = setings_vars.tool_hue_lights_apiKey;
+    tools.hue.set_credentials(setings_vars.tool_hue_lights_bridge_ip, setings_vars.tool_hue_lights_apiKey, (setings_vars.get_settings_path() / "scenes.json").string());
 
     std::filesystem::create_directories(setings_vars.get_settings_path() / "output");
     std::filesystem::create_directories(setings_vars.get_settings_path() / "input");

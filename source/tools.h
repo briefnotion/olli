@@ -11,6 +11,8 @@
 #include "olla.h"
 #include "tools_helper.h"
 
+using json = nlohmann::json;
+
 class TOOL_SET_THINKING_MODE
 {
 public:
@@ -36,26 +38,20 @@ public:
     void monitor_tool(ollama_system& chat);
 };
 
+/**
+ * TOOL_HUE
+ * Interacts with the Ollama Chat System using the HUE_LIGHT_CLASS.
+ */
 class TOOL_HUE 
 {
     private:
-        // Helper to handle CURL responses
-        static size_t WriteCallback(void* contents, size_t size, size_t nmemb, void* userp) {
-            // 1. Cast userp to a std::string pointer
-            // 2. Cast contents to a const char pointer
-            static_cast<std::string*>(userp)->append(static_cast<const char*>(contents), size * nmemb);
-            return size * nmemb;
-        }
-
-        // Generic function to talk to the Bridge
-        std::string make_request(const std::string& method, const std::string& endpoint, const std::string& body);
-        std::pair<double, double> rgbToXY(int r, int g, int b);
+        HUE_LIGHT_CLASS hue;
 
     public:
-        // SET THESE TO YOUR REAL VALUES
-        std::string bridge_ip = ""; // Your Bridge IP  
-        std::string api_key = "";   // Your generated username
+        void set_credentials(const std::string& ip, const std::string& key, const std::string& path);
 
+        // New method to break the conversational loop by reminding the model it must use a tool
+        void refresh_system_prompt(ollama_system& chat);
         void register_tool(ollama_system& chat);
         void handle_tool(ollama_system& chat, const std::string& name, const json& args, const std::string& tc_id);
         void monitor_tool();

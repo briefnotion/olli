@@ -213,157 +213,109 @@ void TOOL_TIMER::monitor_tool(ollama_system& chat) {
     }
 }
 
-// ---
+// ----
 
-
-// Generic function to talk to the Bridge
-std::string TOOL_HUE::make_request(const std::string& method, const std::string& endpoint, const std::string& body = "") {
-    CURL* curl = curl_easy_init();
-    std::string readBuffer;
-    if (curl) {
-        std::string url = "http://" + bridge_ip + "/api/" + api_key + endpoint;
-        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-        curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, method.c_str());
-        
-        if (!body.empty()) {
-            curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
-        }
-
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
-        
-        CURLcode res = curl_easy_perform(curl);
-        if (res != CURLE_OK) {
-            readBuffer = "{\"error\": \"CURL failed\"}";
-        }
-        curl_easy_cleanup(curl);
-    }
-    return readBuffer;
+void TOOL_HUE::set_credentials(const std::string& ip, const std::string& key, const std::string& path) {
+    hue.set_credentials(ip, key, path);
+    hue.refresh_lights();
 }
 
-
-// Helper to convert RGB to XY (CIE 1931) for Philips Hue
-std::pair<double, double> TOOL_HUE::rgbToXY(int r, int g, int b) {
-    // Normalize and Gamma Correction
-    auto adjust = [](double val) {
-        val /= 255.0;
-        return (val > 0.04045) ? pow((val + 0.055) / (1.055), 2.4) : (val / 12.92);
-    };
-
-    double R = adjust(r);
-    double G = adjust(g);
-    double B = adjust(b);
-
-    // Wide RGB D65 conversion
-    double X = R * 0.664511 + G * 0.154324 + B * 0.162028;
-    double Y = R * 0.283881 + G * 0.668433 + B * 0.047685;
-    double Z = R * 0.000088 + G * 0.072310 + B * 0.986039;
-
-    double cx = X / (X + Y + Z);
-    double cy = Y / (X + Y + Z);
-    
-    if (std::isnan(cx)) cx = 0.0;
-    if (std::isnan(cy)) cy = 0.0;
-
-    return {cx, cy};
+// New method to break the conversational loop by reminding the model it must use a tool
+void TOOL_HUE::refresh_system_prompt(ollama_system& chat) {
+    std::stringstream ss;
+    ss << "[SYSTEM COMMAND] You are a logic-first controller. ";
+    ss << "If the user asks to turn lights on/off, set a color, or change a scene, ";
+    ss << "you MUST call the corresponding tool immediately. ";
+    ss << "Do not provide conversational confirmation without also calling the tool.";
+    chat.send(ss.str(), "user"); 
 }
 
 void TOOL_HUE::register_tool(ollama_system& chat) {
     json set_params = {
         {"type", "object"},
         {"properties", {
-            {"light_id", {{"type", "string"}, {"description", "The numeric ID string (e.g., '2')."}}},
-            {"on", {{"type", "boolean"}, {"description", "Power state."}}},
-            {"brightness", {{"type", "integer"}, {"description", "0-254. Use ~254 for vivid colors."}}},
-            {"preset", {
-                {"type", "string"}, 
-                {"enum", {"red", "green", "blue", "yellow", "magenta", "cyan", "orange", "purple", "pink", "white"}},
-                {"description", "Only use for absolute basic colors."}
-            }},
-            {"hex", {
-                {"type", "string"}, 
-                {"description", "Hex code (e.g. #7E60BF). USE THIS for any nuanced colors (e.g. 'Lavender', 'Slate', 'Neon')."}
-            }},
-            {"alert", {
-                {"type", "string"},
-                {"enum", {"none", "select", "lselect"}},
-                {"description", "Effect: 'select' (flash once), 'lselect' (flash 15s)." }
-            }},
-            {"flash_count", {
-                {"type", "integer"},
-                {"description", "Specific number of times to flash. If provided, will automatically stop the 'lselect' alert after the count is reached."}
-            }},
-            {"transition_ms", {
-                {"type", "integer"},
-                {"description", "Transition time in milliseconds. (Default is ~400ms)."}
-            }}
+            {"light_id", {{"type", "string"}, {"description", "ID or Name (e.g., '2' or 'Computer'). Use 'all' to target every light."}}},
+            {"on", {{"type", "boolean"}}},
+            {"brightness", {{"type", "integer"}}},
+            {"preset", {{"type", "string"}, {"enum", {"red", "green", "blue", "yellow", "magenta", "cyan", "orange", "purple", "pink", "white"}}}},
+            {"hex", {{"type", "string"}}},
+            {"alert", {{"type", "string"}, {"enum", {"none", "select", "lselect"}}}},
+            {"flash_count", {{"type", "integer"}}},
+            {"transition_ms", {{"type", "integer"}}}
         }},
         {"required", {"light_id"}} 
     };
 
-    chat.add_tool("set_hue_light", "Controls Hue lights. Priority: 1. Use light_id. 2. Use 'hex' for specific shades.", set_params);
-    chat.add_tool("list_hue_lights", "Returns a list of all connected lights", {{"type", "object"}});
+    json scene_params = {
+        {"type", "object"},
+        {"properties", {
+            {"action", {{"type", "string"}, {"enum", {"save", "load", "remove", "list"}}}},
+            {"name", {{"type", "string"}, {"description", "The name of a SAVED local scene. Do not use for general actions like 'all lights off'."}}}
+        }},
+        {"required", {"action"}}
+    };
+
+    chat.add_tool("set_hue_light", "Controls Hue lights by ID or Name. Use this for general commands like 'turn off all lights' by setting light_id to 'all'.", set_params);
+    chat.add_tool("list_hue_lights", "Returns status of all connected lights", {{"type", "object"}});
+    chat.add_tool("manage_hue_scenes", "Saves, loads, or removes local light scenes. Only use for specific named snapshots (e.g., 'home', 'away').", scene_params);
 }
 
 void TOOL_HUE::handle_tool(ollama_system& chat, const std::string& name, const json& args, const std::string& tc_id) {
     if (name == "list_hue_lights") {
-        std::cout << "[System (list_hue_lights)]" << std::endl;
-        std::string raw_json = make_request("GET", "/lights");
-        try {
-            json lights = json::parse(raw_json);
-            std::stringstream ss;
-            ss << "Lights found: ";
-            for (auto& [id, data] : lights.items()) {
-                ss << id << " (" << data["name"].get<std::string>() << "), ";
-            }
-            chat.send_tool_result(tc_id, ss.str());
-        } catch (...) {
-            chat.send_tool_result(tc_id, "Error: Bridge communication failed.");
-        }
-    } 
-    else if (name == "set_hue_light") {
-        std::cout << "[System (set_hue_light)]" << std::endl;
-        if (!args.contains("light_id")) {
-            chat.send_tool_result(tc_id, "Error: Missing light_id.");
+        if(!hue.refresh_lights()) {
+            chat.send_tool_result(tc_id, "Error: Could not reach the Hue Bridge.");
             return;
         }
-
-        std::string id = args.at("light_id").get<std::string>();
-        if (!id.empty() && !std::isdigit(id[0])) {
-             chat.send_tool_result(tc_id, "Error: Use numeric ID (e.g. '2') not name.");
-             return;
+        auto& lights = hue.get_cached_lights();
+        std::stringstream ss;
+        ss << "Current Lights: ";
+        for (auto const& [id, state] : lights) {
+            ss << "[" << id << "] " << state.name << " (Power: " << (state.on ? "ON" : "OFF") 
+                << ", Bri: " << state.brightness << (state.reachable ? "" : " *UNREACHABLE*") << "), ";
         }
+        chat.send_tool_result(tc_id, ss.str());
+    } 
+    else if (name == "manage_hue_scenes") {
+        std::string action = args.at("action").get<std::string>();
+        std::string scene_name = args.value("name", "");
 
+        if (action == "list") {
+            auto& scenes = hue.get_scenes();
+            if (scenes.empty()) {
+                chat.send_tool_result(tc_id, "No local scenes saved.");
+            } else {
+                std::stringstream ss;
+                ss << "Saved Scenes: ";
+                for (auto const& [sname, scene] : scenes) ss << scene.name << ", ";
+                chat.send_tool_result(tc_id, ss.str());
+            }
+        } else {
+            if (scene_name.empty()) {
+                chat.send_tool_result(tc_id, "Error: Scene name required for " + action);
+                return;
+            }
+            if (action == "save") chat.send_tool_result(tc_id, hue.save_scene(scene_name));
+            else if (action == "load") chat.send_tool_result(tc_id, hue.load_scene(scene_name));
+            else if (action == "remove") chat.send_tool_result(tc_id, hue.remove_scene(scene_name));
+        }
+    }
+    else if (name == "set_hue_light") {
+        std::string target = args.at("light_id").get<std::string>();
         json body;
         
-        // Handle "on" logic
-        if (args.contains("on")) {
-            body["on"] = args.at("on").get<bool>();
-        } else if (!args.contains("alert") && !args.contains("flash_count")) {
-            body["on"] = true;
-        }
+        if (args.contains("on")) body["on"] = args.at("on").get<bool>();
+        else if (!args.contains("alert") && !args.contains("flash_count")) body["on"] = true;
         
         if (args.contains("brightness")) body["bri"] = args.at("brightness");
         
-        // Determine alert mode
         std::string alert_mode = args.value("alert", "none");
         if (args.contains("flash_count")) {
             int count = args.at("flash_count").get<int>();
-            if (count > 1) {
-                alert_mode = "lselect";
-            } else if (count == 1) {
-                alert_mode = "select";
-            }
+            alert_mode = (count > 1) ? "lselect" : "select";
         }
-        
-        if (alert_mode != "none") {
-            body["alert"] = alert_mode;
-        }
+        if (alert_mode != "none") body["alert"] = alert_mode;
 
-        if (args.contains("transition_ms")) {
-            int ms = args.at("transition_ms").get<int>();
-            body["transitiontime"] = ms / 100;
-        }
+        if (args.contains("transition_ms")) body["transitiontime"] = args.at("transition_ms").get<int>() / 100;
 
         bool color_set = false;
         if (args.contains("hex")) {
@@ -372,7 +324,7 @@ void TOOL_HUE::handle_tool(ollama_system& chat, const std::string& name, const j
                 if (hex[0] == '#') hex.erase(0, 1);
                 unsigned int r, g, b;
                 if (sscanf(hex.c_str(), "%02x%02x%02x", &r, &g, &b) == 3) {
-                    auto [x, y] = rgbToXY(static_cast<int>(r), static_cast<int>(g), static_cast<int>(b));
+                    auto [x, y] = hue.rgbToXY(static_cast<int>(r), static_cast<int>(g), static_cast<int>(b));
                     body["xy"] = {x, y};
                     color_set = true;
                 }
@@ -386,49 +338,35 @@ void TOOL_HUE::handle_tool(ollama_system& chat, const std::string& name, const j
                 {"orange", {0.55, 0.41}}, {"purple", {0.27, 0.13}}, {"pink", {0.41, 0.21}},
                 {"white", {0.31, 0.32}}
             };
-            std::string p = args.at("preset").get<std::string>();
-            if (palette.count(p)) {
-                body["xy"] = palette[p];
-                color_set = true;
+            if (palette.count(args.at("preset"))) {
+                body["xy"] = palette[args.at("preset")];
             }
         }
 
-        // Execute the initial request
-        std::string res = make_request("PUT", "/lights/" + id + "/state", body.dump());
+        std::string res = hue.set_light(target, body);
         
-        // Handle timed stop if flash_count was provided
         if (args.contains("flash_count") && args.at("flash_count").get<int>() > 1) {
-            std::cout << "[System (flash_count)]" << std::endl;
             int count = args.at("flash_count").get<int>();
-            // Hue "lselect" flashes roughly once per second. 
-            // We spawn a thread to stop it after X seconds so we don't block the main tool handler.
-            std::thread([this, id, count]() {
-                std::this_thread::sleep_for(std::chrono::seconds(count));
-                json stop_body = {{"alert", "none"}};
-                make_request("PUT", "/lights/" + id + "/state", stop_body.dump());
-            }).detach();
+            std::string resolved_id = hue.resolve_id(target);
+            if(!resolved_id.empty() && resolved_id != "all") {
+                std::thread([this, resolved_id, count]() {
+                    std::this_thread::sleep_for(std::chrono::seconds(count));
+                    this->hue.set_light(resolved_id, {{"alert", "none"}});
+                }).detach();
+            }
         }
 
-        chat.send_tool_result(tc_id, "Sent to ID " + id + ". Response: " + res);
+        chat.send_tool_result(tc_id, "Command sent to " + target + ". Result: " + res);
     }
 }
 
-/**
- * Proactive Monitoring
- * This runs in your main loop to handle background tasks or system alerts.
- */
-void TOOL_HUE::monitor_tool() {
-    // Example: Heartbeat check every X iterations
+void TOOL_HUE::monitor_tool() 
+{
     static int counter = 0;
-    if (++counter % 5000 == 0) { 
-        // In a real app, you might ping the bridge here.
-        // If the bridge goes offline, you could inject a system message:
-        // if (!bridge_reachable && !is_processing) {
-        //    chat.inject_system_message("ALERT: Philips Hue Bridge is no longer reachable on the network.");
-        // }
-    }
+    if (++counter % 10000 == 0) hue.refresh_lights();
 }
 
+// ----
 
 
 /**
@@ -844,7 +782,7 @@ void TOOL_SYSTEM_CLASS::process(ollama_system& chat)
                 // Assuming tc.arguments is already parsed as json
                 timer.handle_tool(chat, tc.name, tc.arguments, tc.id);
             }
-            else if (tc.name == "set_hue_light" || tc.name == "list_hue_lights") {
+            else if (tc.name == "set_hue_light" || tc.name == "list_hue_lights" || tc.name == "manage_hue_scenes") {
                 hue.handle_tool(chat, tc.name, tc.arguments, tc.id);
             }
             else if (tc.name == "set_thinking_mode") {

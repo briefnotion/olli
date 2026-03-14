@@ -15,16 +15,7 @@ void ollama_system::open()
     {
         //history.push_back({"system", "You are a helpful assistant with access to tools."
 
-        history.push_back({"system", 
-            "You are a helpful assistant with access to tools. "
-            "1. For delayed requests, use set_timer. Always summarize the "
-            "user's intent in the 'reminder' field (e.g., 'Turn off "
-            "the living room fan'). "
-            "2. When the system sends a message starting "
-            "with 'SYSTEM NOTIFICATION: Timer Expired', look at the "
-            "associated reminder and immediately call the relevant tool "
-            "to fulfill that action without asking for further confirmation."
-        });
+        history.push_back({"system", OLLAMA_OPENING});
     }
 }
 
@@ -273,13 +264,13 @@ void ollama_system::history_write(std::string Directory) {
 
 /**
  * Standalone Consolidation Function
- * Processes the chat history to merge groups of messages into single summaries based on levels.
- * This version protects foundational system messages at Level 0 and keeps them at the very top.
+ * @param kb Reference to the keyboard input object for activity monitoring.
  */
-void consolidate(std::vector<Message>& chat_history, ollama_system& config) {
+void consolidate(std::vector<Message>& chat_history, ollama_system& config, KEYBOARD_INPUT& kb) {
     if (chat_history.empty()) return;
 
     ollama_system consolidate_client;
+    // Copy necessary props...
     consolidate_client.PROPS.host = config.PROPS.host;
     consolidate_client.PROPS.port = config.PROPS.port;
     consolidate_client.PROPS.model = config.PROPS.model;
@@ -291,57 +282,48 @@ void consolidate(std::vector<Message>& chat_history, ollama_system& config) {
     size_t sizes = static_cast<size_t>(config.consolitation_sizes); 
 
     int current_level = 0;
-    const int MAX_SUPPORTED_LEVEL = 10;
-
-    while (current_level < MAX_SUPPORTED_LEVEL) {
-        if (config.status.interrupt_signal.load()) break;
+    while (current_level < 10) {
+        // DIRECT ABORT CHECK: Checks the public boolean flags directly via reference
+        if (config.status.interrupt_signal.load() || kb.INTERRUPTED || kb.IS_TYPING) {
+            std::cout << "[Consolidation] Aborted: User activity detected." << std::endl;
+            return; 
+        }
 
         std::vector<size_t> target_indices;
         {
             std::lock_guard<std::mutex> lock(history_mutex);
             for (size_t i = 0; i < chat_history.size(); ++i) {
-                // PROTECTION: Level 0 System messages are the "Rules". Never consolidate them.
-                if (current_level == 0 && chat_history[i].role == "system") {
+                // Keep the foundational rules (Level 0) and sync them with latest OLLAMA_OPENING
+                if (current_level == 0 && chat_history[i].role == "system" && chat_history[i].consolidation_level == 0) {
+                    chat_history[i].content = config.OLLAMA_OPENING;
                     continue;
                 }
-
                 if (chat_history[i].consolidation_level == current_level) {
                     target_indices.push_back(i);
                 }
             }
         }
 
-        // Check if we have enough messages at this level to trigger consolidation
         if (target_indices.size() >= (starts_at + sizes)) {
             std::vector<size_t> merge_batch;
-            
-            for (size_t i = 0; i < sizes; ++i) {
-                merge_batch.push_back(target_indices[i]);
-            }
+            for (size_t i = 0; i < sizes; ++i) merge_batch.push_back(target_indices[i]);
 
-            std::string prompt = "Summarize the following " + std::to_string(merge_batch.size()) + 
-                                 " entries into a single concise paragraph. This is part of a Level " + 
-                                 std::to_string(current_level) + " context history.\n";
-            
+            std::string prompt = "Summarize the following history concisely:\n";
             {
                 std::lock_guard<std::mutex> lock(history_mutex);
-                for (size_t idx : merge_batch) {
-                    prompt += "\n[" + chat_history[idx].role + "]: " + chat_history[idx].content;
-                }
+                for (size_t idx : merge_batch) prompt += "\n[" + chat_history[idx].role + "]: " + chat_history[idx].content;
             }
 
             consolidate_client.history.clear();
             consolidate_client.send(prompt, "system");
 
             std::string summary_text = consolidate_client.last_received.response;
-            if (summary_text.empty() && !consolidate_client.last_received.thinking.empty()) {
-                summary_text = consolidate_client.last_received.thinking;
-            }
+            if (summary_text.empty()) summary_text = consolidate_client.last_received.thinking;
 
-            if (!consolidate_client.status.interrupt_signal.load() && 
-                consolidate_client.last_received.complete && 
-                !summary_text.empty()) {
+            // Final check before modifying shared history
+            bool aborted_during_llm = config.status.interrupt_signal.load() || kb.INTERRUPTED || kb.IS_TYPING;
 
+            if (!aborted_during_llm && consolidate_client.last_received.complete && !summary_text.empty()) {
                 Message summary_msg;
                 summary_msg.role = "system";
                 summary_msg.content = "Context Summary: " + summary_text;
@@ -349,8 +331,6 @@ void consolidate(std::vector<Message>& chat_history, ollama_system& config) {
 
                 {
                     std::lock_guard<std::mutex> lock(history_mutex);
-                    
-                    // 1. Erase the old messages safely by iterating backwards
                     std::vector<size_t> erase_indices = merge_batch;
                     std::sort(erase_indices.rbegin(), erase_indices.rend());
                     
@@ -358,43 +338,21 @@ void consolidate(std::vector<Message>& chat_history, ollama_system& config) {
                         chat_history.erase(chat_history.begin() + static_cast<std::ptrdiff_t>(idx));
                     }
 
-                    // 2. Find insertion point. 
-                    // We must ensure foundational system messages (Level 0) stay at indices 0, 1, etc.
-                    // Find the first index after the foundational "Rules".
-                    size_t first_non_foundational_idx = 0;
-                    while (first_non_foundational_idx < chat_history.size() && 
-                           chat_history[first_non_foundational_idx].role == "system" && 
-                           chat_history[first_non_foundational_idx].consolidation_level == 0) {
-                        first_non_foundational_idx++;
-                    }
-
-                    // Now find the insertion point within the "Summary" block (Level 1+)
-                    size_t insert_pos = first_non_foundational_idx;
-                    for (size_t i = first_non_foundational_idx; i < chat_history.size(); ++i) {
-                        // Keep higher levels at the top of the summary block
-                        if (chat_history[i].consolidation_level >= summary_msg.consolidation_level) {
-                            insert_pos = i + 1;
-                        } else {
-                            break;
-                        }
+                    size_t insert_pos = 0;
+                    while (insert_pos < chat_history.size() && 
+                           chat_history[insert_pos].role == "system" && 
+                           chat_history[insert_pos].consolidation_level == 0) {
+                        insert_pos++;
                     }
                     
                     chat_history.insert(chat_history.begin() + static_cast<std::ptrdiff_t>(insert_pos), summary_msg);
                 }
-
-                std::cout << "[Consolidation] Merged " << sizes << " messages from L" << current_level 
-                          << " into L" << (current_level + 1) << std::endl;
-                
                 current_level++; 
-            } else {
-                std::cout << "[Consolidation] Failed to get summary. Aborting." << std::endl;
-                break;
-            }
-        } else {
-            break; 
-        }
+            } else break;
+        } else break; 
     }
 }
+
 
 void ollama_system::write_to_tts() 
 {

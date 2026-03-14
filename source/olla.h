@@ -85,11 +85,23 @@ class OLLAMA_SYSTEM_PROPERTIES
 
 class ollama_system {
     private:
-
     public:
 
-    OLLAMA_SYSTEM_PROPERTIES PROPS;
+    std::string OLLAMA_OPENING =             
+            //"You are a helpful assistant with access to tools. "
+            //"1. For delayed requests, use set_timer. Always summarize the "
+            //"user's intent in the 'reminder' field (e.g., 'Turn off "
+            //"the living room fan'). "
+            //"2. When the system sends a message starting "
+            //"with 'SYSTEM NOTIFICATION: Timer Expired', look at the "
+            //"associated reminder and immediately call the relevant tool "
+            //"to fulfill that action without asking for further confirmation.";
 
+            "You are a assistant with access to tools. "
+            "You will responses will be short and sweet. ";
+
+
+    OLLAMA_SYSTEM_PROPERTIES PROPS;
 
     // Use Atomics for thread safety to avoid data races
     std::thread chat_thread;
@@ -135,6 +147,6 @@ class ollama_system {
 // This prevents the "multiple definition" error during linking.
 static std::mutex history_mutex;
 
-void consolidate(std::vector<Message>& chat_history, ollama_system& config);
+void consolidate(std::vector<Message>& chat_history, ollama_system& config, KEYBOARD_INPUT& kb);
 
 #endif

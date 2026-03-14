@@ -138,6 +138,7 @@ class KEYBOARD_INPUT
         std::string LINE = "";
         bool ENTER_PRESSED = false;
         bool INTERRUPTED = false;
+        bool IS_TYPING = false;
 
         // Voca
         VOCA_CONTROL VOCA;

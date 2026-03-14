@@ -50,12 +50,17 @@ void TASK_SIMPLE_MANAGER::load_all_task()
     TASK_SIMPLE tmp_task;
 
     tmp_task.TASK_PHRASE = "I'm home";
-    tmp_task.COMMANDS.push_back("Load the home scene.");
+    tmp_task.COMMANDS.push_back("Load the repose scene.");
     TASK_LIST.push_back(tmp_task);
 
     tmp_task.clear();
     tmp_task.TASK_PHRASE = "I'm leaving";
-    tmp_task.COMMANDS.push_back("Load the away scene.");
+    tmp_task.COMMANDS.push_back("Load the labor scene.");
+    TASK_LIST.push_back(tmp_task);
+
+    tmp_task.clear();
+    tmp_task.TASK_PHRASE = "I'm sleeping";
+    tmp_task.COMMANDS.push_back("Load the slumber scene.");
     TASK_LIST.push_back(tmp_task);
 
     tmp_task.clear();
@@ -209,6 +214,13 @@ std::string HUE_LIGHT_CLASS::set_light(const std::string& id_or_name, const json
 // --- Scene Logic ---
 
 std::string HUE_LIGHT_CLASS::save_scene(const std::string& name) {
+    std::string lower_name = to_lower(name);
+    
+    // Check if the scene already exists in the local map
+    if (local_scenes.find(lower_name) != local_scenes.end()) {
+        return "Scene '" + name + "' already exists. Please remove it first or use a different name.";
+    }
+
     if (!refresh_lights()) return "Failed to refresh lights for scene capture.";
     
     HUE_SCENE new_scene;
@@ -222,7 +234,7 @@ std::string HUE_LIGHT_CLASS::save_scene(const std::string& name) {
         new_scene.light_states[id] = state_json;
     }
 
-    local_scenes[to_lower(name)] = new_scene;
+    local_scenes[lower_name] = new_scene;
     save_scenes_to_disk();
     return "Scene '" + name + "' saved to disk.";
 }

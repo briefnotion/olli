@@ -767,7 +767,7 @@ void TOOL_TASK_RUNNER::monitor_tool(ollama_system& chat) {
  * unless you implement a 'depth' counter.
  */
 
-void TOOL_SYSTEM_CLASS::process(ollama_system& chat)
+void TOOL_SYSTEM_CLASS::process(ollama_system& chat, KEYBOARD_INPUT& Keyboard_Input)
 {
     // 2. Tool Handling (only if not currently busy sending a new message)
     if (!chat.is_processing && chat.last_received.complete && !chat.last_received.tool_calls.empty()) {
@@ -814,22 +814,25 @@ void TOOL_SYSTEM_CLASS::process(ollama_system& chat)
 
     // 4. Maintenance (Consolidation)
     auto now = std::chrono::steady_clock::now();
-    if (!chat.is_processing && std::chrono::duration_cast<std::chrono::seconds>(now - last_consolidation).count() > 60) {
-        chat.is_processing = true;
-        last_consolidation = now; // Update the timer
-        chat.status.interrupt_signal = false; 
-        
-        bool tmp_is_processing = chat.is_processing;
-        chat.chat_thread = std::thread([&chat, &tmp_is_processing]() {
-            try {
-                consolidate(chat.history, chat); 
-            } catch (...) {
-                std::cerr << "[System] Consolidation error." << std::endl;
-            }
-            chat.is_processing = false;
-        });
 
-        if (chat.chat_thread.joinable()) chat.chat_thread.detach(); 
+    // Start only if idle, not interrupted, and NOT currently typing
+    if (!chat.is_processing && !chat.status.interrupt_signal.load() && !Keyboard_Input.IS_TYPING) {
+        if (std::chrono::duration_cast<std::chrono::seconds>(now - last_consolidation).count() > 60) {
+            chat.is_processing = true;
+            last_consolidation = now; 
+            
+            chat.chat_thread = std::thread([&chat, &Keyboard_Input]() {
+                try {
+                    // Pass by reference to keep consistency with your process() function
+                    consolidate(chat.history, chat, Keyboard_Input); 
+                } catch (...) {
+                    std::cerr << "[System] Consolidation error." << std::endl;
+                }
+                chat.is_processing = false;
+            });
+
+            if (chat.chat_thread.joinable()) chat.chat_thread.detach(); 
+        }
     }
     
     // 5. Monitor background events (like timers)

@@ -56,7 +56,7 @@ int main() {
         key_input.keyboard_input();
 
         chat.input(key_input);
-        tools.process(chat);
+        tools.process(chat, key_input);
 
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }

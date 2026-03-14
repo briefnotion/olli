@@ -166,7 +166,7 @@ class TOOL_SYSTEM_CLASS
     TOOL_DELEGATOR delegator;
     TOOL_TASK_RUNNER task_runner;
 
-    void process(ollama_system& chat);
+    void process(ollama_system& chat, KEYBOARD_INPUT& Keyboard_Input);
 
 };
 

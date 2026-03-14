@@ -344,6 +344,8 @@ void KEYBOARD_INPUT::keyboard_input()
 
     // or get text from voca
     getNextInteraction(PROPS.path_input);
+
+    IS_TYPING = !LINE.empty();
 }
 
 

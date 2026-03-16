@@ -71,7 +71,9 @@ string filter_non_printable(const std::string& input)
 
   for (char c : input) 
   {
-    if (isprint(static_cast<unsigned char>(c)) || c == '\n')
+    if (isprint(static_cast<unsigned char>(c))
+          || c == '\n'
+          || c == '\r')
     {
       result += c;
     }

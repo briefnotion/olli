@@ -35,6 +35,9 @@ void ollama_system::add_tool(const std::string& name, const std::string& descrip
 void ollama_system::send(const std::string& user_input, const std::string& role) {
     // Reset interrupt state for a new request 
     ///
+
+    std::string new_user_input = filter_non_printable(user_input);
+
     //bool was_interrupted = last_received.interrupted;
     //status.interrupt_signal = false;
     status.is_active = true;
@@ -44,12 +47,12 @@ void ollama_system::send(const std::string& user_input, const std::string& role)
         if (role == "user")
         {
             // user roles (system/tool) pushed normally
-            history.push_back({"user", user_input});
+            history.push_back({"user", new_user_input});
         }
         else
         {
             // Non-user roles (system/tool) pushed normally
-            history.push_back({role, user_input});
+            history.push_back({role, new_user_input});
         }
     }
     
@@ -74,9 +77,9 @@ void ollama_system::send(const std::string& user_input, const std::string& role)
         {"messages", messages_json},
         {"stream", PROPS.stream_output},
         {"think", PROPS.use_thinking},
-        // Add the options block here
         {"options", {
-            {"num_ctx", PROPS.num_ctx} 
+            {"num_ctx", PROPS.num_ctx},
+            {"temperature", 0} // <--- Forces deterministic tool calling
         }}
     };
 

@@ -770,34 +770,50 @@ void TOOL_TASK_RUNNER::monitor_tool(ollama_system& chat) {
 void TOOL_SYSTEM_CLASS::process(ollama_system& chat, KEYBOARD_INPUT& Keyboard_Input)
 {
     // 2. Tool Handling (only if not currently busy sending a new message)
-    if (!chat.is_processing && chat.last_received.complete && !chat.last_received.tool_calls.empty()) {
+    if (!chat.is_processing && chat.last_received.complete && !chat.last_received.tool_calls.empty()) 
+    {
         auto calls = chat.last_received.tool_calls;
         chat.last_received.tool_calls.clear(); // Clear so we don't repeat
         
         for (auto& tc : calls) {
-            if (tc.name == "get_current_time") {
+            if (tc.name == "get_current_time") 
+            {
+                std::cout << "[" << tc.name << "]" << std::endl;
                 current_time.handle_tool(chat, tc.name, tc.arguments, tc.id);
             } 
-            else if (tc.name == "set_timer" || tc.name == "check_timer") {
-                // Assuming tc.arguments is already parsed as json
+            else if (tc.name == "set_timer" || tc.name == "check_timer") 
+            {
+                std::cout << "[" << tc.name << "]" << std::endl;
                 timer.handle_tool(chat, tc.name, tc.arguments, tc.id);
             }
-            else if (tc.name == "set_hue_light" || tc.name == "list_hue_lights" || tc.name == "manage_hue_scenes") {
+            else if (tc.name == "set_hue_light" || tc.name == "list_hue_lights" || tc.name == "manage_hue_scenes") 
+            {
+                std::cout << "[" << tc.name << "]" << std::endl;
                 hue.handle_tool(chat, tc.name, tc.arguments, tc.id);
             }
-            else if (tc.name == "set_thinking_mode") {
+            else if (tc.name == "set_thinking_mode") 
+            {
+                std::cout << "[" << tc.name << "]" << std::endl;
                 thinking.handle_tool(chat, tc.name, tc.arguments, tc.id);
             } 
-            else if (tc.name == "set_thinking_mode") {
+            else if (tc.name == "set_thinking_mode") 
+            {
+                std::cout << "[" << tc.name << "]" << std::endl;
                 thinking.handle_tool(chat, tc.name, tc.arguments, tc.id);
             } 
-            else if (tc.name == "web_search" || tc.name == "fetch_website_content") {
+            else if (tc.name == "web_search" || tc.name == "fetch_website_content") 
+            {
+                std::cout << "[" << tc.name << "]" << std::endl;
                 web.handle_tool(chat, tc.name, tc.arguments, tc.id);
             } 
-            else if (tc.name == "consult_expert") {
+            else if (tc.name == "consult_expert") 
+            {
+                std::cout << "[" << tc.name << "]" << std::endl;
                 delegator.handle_tool(chat, tc.name, tc.arguments, tc.id);
             }
-            else if (tc.name == "run_automation_task") {
+            else if (tc.name == "run_automation_task") 
+            {
+                std::cout << "[" << tc.name << "]" << std::endl;
                 task_runner.handle_tool(chat, tc.name, tc.arguments, tc.id);
             }
         }

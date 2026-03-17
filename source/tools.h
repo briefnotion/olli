@@ -166,7 +166,7 @@ class TOOL_SYSTEM_CLASS
     TOOL_DELEGATOR delegator;
     TOOL_TASK_RUNNER task_runner;
 
-    void process(ollama_system& chat, KEYBOARD_INPUT& Keyboard_Input);
+    void process(ollama_system& chat, std::vector<std::unique_ptr<ollama_system>>& tasks, KEYBOARD_INPUT& Keyboard_Input);
 
 };
 

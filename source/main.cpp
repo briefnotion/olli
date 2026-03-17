@@ -12,6 +12,7 @@ int main() {
     //CLASS_SYSTEM system;
 
     ollama_system chat;
+    std::vector<std::unique_ptr<ollama_system>> tasks;
     TOOL_SYSTEM_CLASS tools;
     
     Settings setings_vars;
@@ -56,7 +57,7 @@ int main() {
         key_input.keyboard_input();
 
         chat.input(key_input);
-        tools.process(chat, key_input);
+        tools.process(chat, tasks, key_input);
 
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }

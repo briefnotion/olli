@@ -32,14 +32,25 @@ void ollama_system::add_tool(const std::string& name, const std::string& descrip
 }
 
 
+/**
+ * NEW: INTEGRATE_TOOL_RESULT
+ * This function takes raw tool data and asks the model to "speak" it 
+ * in the context of the current conversation/persona.
+ */
+void ollama_system::integrate_tool_result(const std::string& raw_result) {
+    // We initiate a secondary background "thought" to wrap the data
+    std::string prompt = "The user requested information and the system returned this raw data: '" + raw_result + "'. "
+                         "Rewrite this information to fit naturally into our current conversation and persona. "
+                         "Be concise and do not mention that you are a tool.";
+    
+    // We use the internal send_task logic so this rewrite happens 
+    // without blocking the main chat UI.
+    this->send(prompt, "system");
+}
+
+
 void ollama_system::send(const std::string& user_input, const std::string& role) {
-    // Reset interrupt state for a new request 
-    ///
-
     std::string new_user_input = filter_non_printable(user_input);
-
-    //bool was_interrupted = last_received.interrupted;
-    //status.interrupt_signal = false;
     status.is_active = true;
 
     {
@@ -193,13 +204,93 @@ void ollama_system::send(const std::string& user_input, const std::string& role)
     status.is_active = false;
 }
 
+/**
+ * REFINED: SEND_TOOL_RESULT (For your main ollama_system class)
+ * This version updates the history but allows the Integration Task
+ * to handle the actual conversational output.
+ */
 void ollama_system::send_tool_result(const std::string& tool_call_id, const std::string& result) {
     Message msg;
     msg.role = "tool";
     msg.content = result;
     msg.tool_call_id = tool_call_id;
     history.push_back(msg);
-    send("", "tool"); 
+    
+    // We NO LONGER call send("", "tool") here.
+    // This prevents the raw data from being printed to the console.
+}
+
+
+/**
+ * MODIFIED OLLAMA_SYSTEM::SEND_TASK
+ * Simplified version of send() for background tasks.
+ */
+void ollama_system::send_task(const std::string& input, const std::string& system_prompt) {
+    // Ensure any previous thread is joined before starting a new one on this instance
+    if (chat_thread.joinable()) {
+        chat_thread.join();
+    }
+
+    is_processing = true;
+    last_received.complete = false;
+    last_received.response = "";
+    last_received.tool_calls.clear();
+
+    chat_thread = std::thread([this, input, system_prompt]() {
+        json messages_json = json::array();
+        if (!system_prompt.empty()) {
+            messages_json.push_back({{"role", "system"}, {"content", system_prompt}});
+        }
+        
+        // Fix for signed/unsigned comparison and old-style casts
+        size_t h_size = history.size();
+        size_t history_start = (h_size > 2) ? (h_size - 2) : 0;
+        
+        for(size_t i = history_start; i < h_size; ++i) {
+            // Explicitly convert Message struct to json object
+            messages_json.push_back({
+                {"role", history[i].role},
+                {"content", history[i].content}
+            });
+        }
+
+        messages_json.push_back({{"role", "user"}, {"content", input}});
+
+        json body = {
+            {"model", PROPS.model},
+            {"messages", messages_json},
+            {"stream", false},
+            {"options", {{"temperature", 0.7}, {"num_ctx", PROPS.num_ctx}}}
+        };
+
+        if (!tools.empty()) body["tools"] = tools;
+
+        try {
+            httplib::Client cli(PROPS.host, PROPS.port);
+            cli.set_read_timeout(120);
+            auto res = cli.Post("/api/chat", body.dump(), "application/json");
+
+            if (res && res->status == 200) {
+                auto j_res = json::parse(res->body);
+                auto msg_obj = j_res["message"];
+                last_received.response = msg_obj.value("content", "");
+                
+                if (msg_obj.contains("tool_calls")) {
+                    for (auto& tc : msg_obj["tool_calls"]) {
+                        last_received.tool_calls.push_back({
+                            tc.value("id", ""),
+                            tc["function"].value("name", ""),
+                            tc["function"]["arguments"]
+                        });
+                    }
+                }
+                last_received.complete = true;
+            }
+        } catch (...) {
+            last_received.response = "Task Error";
+        }
+        is_processing = false;
+    });
 }
 
 void ollama_system::stop()

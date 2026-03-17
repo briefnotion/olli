@@ -125,8 +125,10 @@ class ollama_system {
 
     void open();
     void add_tool(const std::string& name, const std::string& description, json parameters);
+    void integrate_tool_result(const std::string& raw_result);
     void send(const std::string& user_input, const std::string& role = "user");
     void send_tool_result(const std::string& tool_call_id, const std::string& result);
+    void send_task(const std::string& input, const std::string& system_prompt);
     
     // Helper to reset the signal
     void stop();

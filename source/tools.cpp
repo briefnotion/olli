@@ -74,37 +74,32 @@ void TOOL_GET_CURRENT_TIME::register_tool(ollama_system& chat) {
     chat.add_tool("get_current_time", "Returns the current system date and time", get_time_params);
 }
 
+
+
 /**
- * @brief Refactored TOOL_GET_CURRENT_TIME class to match the TOOL_TIMER handle_tool signature.
+ * REFINED CLOCK TOOL
+ * Now uses the integrate_tool_result pattern and correctly handles args.
  */
 void TOOL_GET_CURRENT_TIME::handle_tool(ollama_system& chat, const std::string& name, const json& args, const std::string& tc_id) {
     if (name == "get_current_time") {
-        // Get the current system time
         auto now = std::chrono::system_clock::now();
         std::time_t now_time = std::chrono::system_clock::to_time_t(now);
         
-        // Convert to local time string
-        std::stringstream ss;
-        ss << std::put_time(std::localtime(&now_time), "%Y-%m-%d %H:%M:%S");
-        std::string current_time_str = ss.str();
-
-        // Optional: Check for format arguments if your tool schema supports them
-        if (args.contains("format")) {
-            std::string format = args["format"];
-            // Logic to handle custom formatting could go here
+        // Use args to determine format if provided, otherwise default
+        std::string format = "%Y-%m-%d %H:%M:%S";
+        if (args.contains("format") && args["format"].is_string()) {
+            format = args["format"];
         }
 
-        // Log to console for system monitoring
-        std::cout << "[System] Tool 'get_current_time' called. Result: " << current_time_str << std::endl;
+        std::stringstream ss;
+        ss << std::put_time(std::localtime(&now_time), format.c_str());
+        std::string current_time_str = ss.str();
 
-        // Send the result back to the chat system using the provided tool call ID
-        chat.send_tool_result(tc_id, "The current system time is: " + current_time_str);
-    } 
-    else {
-        // Handle unknown tool names for this specific tool class
-        std::string error_msg = "Error: Tool '" + name + "' not recognized by TOOL_GET_CURRENT_TIME.";
-        std::cerr << "[System] " << error_msg << std::endl;
-        chat.send_tool_result(tc_id, error_msg);
+        // 1. Acknowledge the tool call internally
+        chat.send_tool_result(tc_id, "System Time: " + current_time_str);
+
+        // 2. INTEGRATION: Ask the instance to wrap this in persona
+        chat.integrate_tool_result("Current Time is " + current_time_str);
     }
 }
 
@@ -135,13 +130,16 @@ void TOOL_TIMER::register_tool(ollama_system& chat) {
     chat.add_tool("check_timer", "Checks if a specific named timer has finished", check_timer_params);
 }
 
+/**
+ * REFINED TIMER TOOL
+ * Handles timer logic and persona-based notifications.
+ */
 void TOOL_TIMER::handle_tool(ollama_system& chat, const std::string& name, const json& args, const std::string& tc_id) {
     if (name == "set_timer") {
         std::cout << "[System (set_timer)]" << std::endl;
         std::string label = args["label"];
         double seconds = args["seconds"];
         
-        // Handle optional reminder field
         std::string reminder = "";
         if (args.contains("reminder") && !args["reminder"].is_null()) {
             reminder = args["reminder"];
@@ -153,15 +151,21 @@ void TOOL_TIMER::handle_tool(ollama_system& chat, const std::string& name, const
 
         std::string res = "Timer '" + label + "' set for " + std::to_string(seconds) + " seconds.";
         if (!reminder.empty()) {
-            res += " I will " + reminder + " when it expires.";
+            res += " Reminder set: " + reminder;
         }
+
+        // 1. Silent history record
         chat.send_tool_result(tc_id, res);
+
+        // 2. Persona Integration
+        chat.integrate_tool_result(res);
     }
     else if (name == "check_timer") {
-        // ... (remains the same)
         std::string label = args["label"];
         if (active_timers.find(label) == active_timers.end()) {
-            chat.send_tool_result(tc_id, "Error: No timer found with label '" + label + "'.");
+            std::string err = "Error: No timer found with label '" + label + "'.";
+            chat.send_tool_result(tc_id, err);
+            chat.integrate_tool_result(err);
             return;
         }
         bool finished = active_timers[label].isFinished();
@@ -172,13 +176,15 @@ void TOOL_TIMER::handle_tool(ollama_system& chat, const std::string& name, const
         } else {
             ss << "The timer '" << label << "' is still running. " << std::fixed << std::setprecision(1) << remaining << "s remaining.";
         }
-        chat.send_tool_result(tc_id, ss.str());
+        std::string res = ss.str();
+        chat.send_tool_result(tc_id, res);
+        chat.integrate_tool_result(res);
     }
 }
 
 /**
- * @brief Monitors active timers and alerts the system when they finish.
- * Updated to be more resilient to background processing states.
+ * REFINED TIMER MONITOR
+ * Alerts the system via persona when a timer expires.
  */
 void TOOL_TIMER::monitor_tool(ollama_system& chat) {
     if (!chat.is_processing) {
@@ -188,21 +194,19 @@ void TOOL_TIMER::monitor_tool(ollama_system& chat) {
                 std::string label = it->first;
                 std::string action = it->second.getReminder();
 
-                /* * NEW PROMPT STRATEGY:
-                 * We act as the User. We explicitly tell the AI that the 
-                 * timer is GONE and it is now time to act.
-                 */
                 std::stringstream ss;
-                ss << "[COMMAND] The wait time for '" << label << "' is complete.\n";
-                ss << "Proceed immediately to the scheduled action: " << action << ".\n";
-                ss << "Use the appropriate tool now.";
+                ss << "### [TIMER EXPIRED] ###\n";
+                ss << "The wait time for '" << label << "' is complete.\n";
+                if (!action.empty()) {
+                    ss << "Target action: " << action << ".\n";
+                }
+                ss << "Inform the user in character.";
 
                 std::string event_msg = ss.str();
-                std::cout << "[Event] Triggering injection: " << label << std::endl;
+                std::cout << "[Event] Triggering persona alert: " << label << std::endl;
                 
-                // Switching role to 'user' is critical for Llama/Mistral/Ollama models 
-                // to break out of an assistant repetition loop.
-                chat.send(event_msg, "user");
+                // Integrate via persona to maintain conversation flow
+                chat.integrate_tool_result(event_msg);
 
                 // Remove the finished timer
                 it = active_timers.erase(it);
@@ -260,10 +264,16 @@ void TOOL_HUE::register_tool(ollama_system& chat) {
     chat.add_tool("manage_hue_scenes", "Saves, loads, or removes local light scenes. Only use for specific named snapshots (e.g., 'home', 'away').", scene_params);
 }
 
+/**
+ * REFINED HUE TOOL
+ * Applies the integration pattern to lighting controls.
+ */
 void TOOL_HUE::handle_tool(ollama_system& chat, const std::string& name, const json& args, const std::string& tc_id) {
     if (name == "list_hue_lights") {
         if(!hue.refresh_lights()) {
-            chat.send_tool_result(tc_id, "Error: Could not reach the Hue Bridge.");
+            std::string err = "Error: Could not reach the Hue Bridge.";
+            chat.send_tool_result(tc_id, err);
+            chat.integrate_tool_result(err);
             return;
         }
         auto& lights = hue.get_cached_lights();
@@ -273,7 +283,9 @@ void TOOL_HUE::handle_tool(ollama_system& chat, const std::string& name, const j
             ss << "[" << id << "] " << state.name << " (Power: " << (state.on ? "ON" : "OFF") 
                 << ", Bri: " << state.brightness << (state.reachable ? "" : " *UNREACHABLE*") << "), ";
         }
-        chat.send_tool_result(tc_id, ss.str());
+        std::string result = ss.str();
+        chat.send_tool_result(tc_id, result);
+        chat.integrate_tool_result(result);
     } 
     else if (name == "manage_hue_scenes") {
         std::string action = args.at("action").get<std::string>();
@@ -282,21 +294,31 @@ void TOOL_HUE::handle_tool(ollama_system& chat, const std::string& name, const j
         if (action == "list") {
             auto& scenes = hue.get_scenes();
             if (scenes.empty()) {
-                chat.send_tool_result(tc_id, "No local scenes saved.");
+                std::string msg = "No local scenes saved.";
+                chat.send_tool_result(tc_id, msg);
+                chat.integrate_tool_result(msg);
             } else {
                 std::stringstream ss;
                 ss << "Saved Scenes: ";
                 for (auto const& [sname, scene] : scenes) ss << scene.name << ", ";
-                chat.send_tool_result(tc_id, ss.str());
+                std::string result = ss.str();
+                chat.send_tool_result(tc_id, result);
+                chat.integrate_tool_result(result);
             }
         } else {
             if (scene_name.empty()) {
-                chat.send_tool_result(tc_id, "Error: Scene name required for " + action);
+                std::string err = "Error: Scene name required for " + action;
+                chat.send_tool_result(tc_id, err);
+                chat.integrate_tool_result(err);
                 return;
             }
-            if (action == "save") chat.send_tool_result(tc_id, hue.save_scene(scene_name));
-            else if (action == "load") chat.send_tool_result(tc_id, hue.load_scene(scene_name));
-            else if (action == "remove") chat.send_tool_result(tc_id, hue.remove_scene(scene_name));
+            std::string res;
+            if (action == "save") res = hue.save_scene(scene_name);
+            else if (action == "load") res = hue.load_scene(scene_name);
+            else if (action == "remove") res = hue.remove_scene(scene_name);
+            
+            chat.send_tool_result(tc_id, res);
+            chat.integrate_tool_result("Scene " + action + " operation: " + res);
         }
     }
     else if (name == "set_hue_light") {
@@ -356,7 +378,9 @@ void TOOL_HUE::handle_tool(ollama_system& chat, const std::string& name, const j
             }
         }
 
-        chat.send_tool_result(tc_id, "Command sent to " + target + ". Result: " + res);
+        std::string summary = "Light command for " + target + " processed. Result: " + res;
+        chat.send_tool_result(tc_id, summary);
+        chat.integrate_tool_result(summary);
     }
 }
 
@@ -519,28 +543,41 @@ void TOOL_WEB_SEARCH::register_tool(ollama_system& chat) {
 }
 
 /**
- * @brief Handles the execution of tool calls.
+ * REFINED WEB SEARCH TOOL
+ * Integrates search results and page content into the persona.
  */
 void TOOL_WEB_SEARCH::handle_tool(ollama_system& chat, const std::string& name, const json& args, const std::string& tc_id) {
     if (name == "web_search") {
         if (!args.contains("query")) {
-             chat.send_tool_result(tc_id, "Error: Missing query.");
-             return;
+            std::string err = "Error: Missing query.";
+            chat.send_tool_result(tc_id, err);
+            chat.integrate_tool_result(err);
+            return;
         }
         std::string query = args.at("query").get<std::string>();
         std::string result = perform_actual_search(query);
-        std::cout << "[System (web_search)]" << std::endl;
+        
+        // Internal record
         chat.send_tool_result(tc_id, result);
+        
+        // Persona response
+        chat.integrate_tool_result("Search results for '" + query + "': " + result);
     } 
     else if (name == "fetch_website_content") {
         if (!args.contains("url")) {
-             chat.send_tool_result(tc_id, "Error: Missing URL.");
-             return;
+            std::string err = "Error: Missing URL.";
+            chat.send_tool_result(tc_id, err);
+            chat.integrate_tool_result(err);
+            return;
         }
         std::string url = args.at("url").get<std::string>();
-        std::cout << "[System fetch_website_content]: " << make_clickable(url, url) << std::endl;
         std::string result = fetch_url_content(url);
-        chat.send_tool_result(tc_id, "Cleaned Page Content:\n" + result);
+        
+        // Internal record
+        chat.send_tool_result(tc_id, "Cleaned Page Content from " + url + ":\n" + result);
+        
+        // Persona response
+        chat.integrate_tool_result("I have fetched and processed the content from " + url + ". Here is the information retrieved: " + result);
     }
     else {
         chat.send_tool_result(tc_id, "Error: Unknown tool.");
@@ -570,13 +607,16 @@ void TOOL_DELEGATOR::register_tool(ollama_system& chat)
 }
 
 /**
- * @brief Handles the tool call and manages the lifecycle of the sub-agent.
+ * REFINED DELEGATOR TOOL
+ * Handles the expert consultation and integrates the report via persona.
  */
 void TOOL_DELEGATOR::handle_tool(ollama_system& chat, const std::string& name, const json& args, const std::string& tc_id) {
     if (name != "consult_expert") return;
 
     if (!enable_delegation) {
-        chat.send_tool_result(tc_id, "Error: The expert consultation module is currently disabled.");
+        std::string err = "Error: The expert consultation module is currently disabled.";
+        chat.send_tool_result(tc_id, err);
+        chat.integrate_tool_result(err);
         return;
     }
 
@@ -596,9 +636,6 @@ void TOOL_DELEGATOR::handle_tool(ollama_system& chat, const std::string& name, c
 
     std::string parent_thinking = chat.last_received.thinking;
     
-    // REFINED: Added explicit formatting instructions to the sub-agent 
-    // to prevent it from being overly conversational, which helps the 
-    // primary agent integrate the data better.
     std::string system_prompt = 
         "You are a specialized offline reasoning module. Persona: " + specialty + ".\n"
         "Goal: Provide high-quality, expert analysis or creative output.\n"
@@ -616,11 +653,10 @@ void TOOL_DELEGATOR::handle_tool(ollama_system& chat, const std::string& name, c
     // 3. Send the task
     sub_agent->send("Generate response.", "user");
 
-    // 4. Wait for completion (Improved Logic)
-    // Give the thread a moment to initialize the is_processing state
+    // 4. Wait for completion
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
-    int wait_limit = 600; // Increased to 60 seconds for complex reasoning tasks
+    int wait_limit = 600; 
     int count = 0;
 
     if (sub_agent->is_processing) {
@@ -632,7 +668,6 @@ void TOOL_DELEGATOR::handle_tool(ollama_system& chat, const std::string& name, c
     }
 
     // 5. Retrieve result
-    // Priority: Response field, fallback to Thinking field
     std::string result = sub_agent->last_received.response; 
     
     if (result.empty() && !sub_agent->last_received.thinking.empty()) {
@@ -647,19 +682,14 @@ void TOOL_DELEGATOR::handle_tool(ollama_system& chat, const std::string& name, c
         std::cout << "[Delegator] Task complete. Length: " << result.length() << std::endl;
     }
     
-    // REFINED COORDINATION INSTRUCTION:
-    // We tell the primary LLM that the task is FINISHED. This prevents it 
-    // from re-writing the code itself and makes it act as a relay.
+    // 6. Integration: Store silent history and speak via persona
     std::string final_report = 
         "### [SYSTEM NOTIFICATION: TASK COMPLETE] ###\n"
-        "The following data was generated by the [" + specialty + "] specialist.\n"
-        "INSTRUCTION TO ASSISTANT: Relay this expert data to the user immediately. "
-        "Do not modify the code. Do not generate your own version of the answer.\n\n"
-        "### EXPERT_DATA_START ###\n" + 
-        result + 
-        "\n### EXPERT_DATA_END ###";
+        "Specialist: [" + specialty + "]\n"
+        "Expert Data:\n" + result;
                                 
     chat.send_tool_result(tc_id, final_report);
+    chat.integrate_tool_result("The " + specialty + " expert has finished their analysis. Here is the report: " + result);
 }
 
 // ----
@@ -697,7 +727,8 @@ void TOOL_TASK_RUNNER::register_tool(ollama_system& chat) {
 }
 
 /**
- * @brief Handles the tool call by matching phrases and injecting a user-role instruction.
+ * REFINED TASK RUNNER TOOL
+ * Handles the automation sequence by injecting a directive into the persona flow.
  */
 void TOOL_TASK_RUNNER::handle_tool(ollama_system& chat, const std::string& name, const json& args, const std::string& tc_id) {
     if (name != "run_automation_task") return;
@@ -705,45 +736,32 @@ void TOOL_TASK_RUNNER::handle_tool(ollama_system& chat, const std::string& name,
     std::string target = args["intent_phrase"];
     std::cout << "[TaskRunner] Searching for automation matching: \"" << target << "\"" << std::endl;
 
-    // Search for a matching task using case-insensitive comparison
     auto it = std::find_if(task_manager.TASK_LIST.begin(), task_manager.TASK_LIST.end(), 
         [this, &target](const TASK_SIMPLE& t) {
             return iequals(t.TASK_PHRASE, target);
         });
 
     if (it != task_manager.TASK_LIST.end()) {
-        // 1. Acknowledge the tool call
+        // 1. Silent history record
         chat.send_tool_result(tc_id, "SUCCESS: Automation '" + it->TASK_PHRASE + "' found. Sequence loading...");
 
-        // 2. Build the structured "User Injection"
-        // We use a very strict format to prevent the AI from looping or hallucinating repeated timers
+        // 2. Build the directive
         std::stringstream ss;
         ss << "### [SYSTEM DIRECTIVE: EXECUTE SEQUENCE] ###\n";
-        ss << "The user intent '" << it->TASK_PHRASE << "' has triggered the following macro.\n";
-        ss << "INSTRUCTION: You must execute these steps one-by-one using your available tools.\n\n";
-        
+        ss << "Trigger: '" << it->TASK_PHRASE << "'.\n";
+        ss << "Commands:\n";
         for (size_t i = 0; i < it->COMMANDS.size(); ++i) {
             ss << (i + 1) << ". " << it->COMMANDS[i] << "\n";
         }
+        ss << "\nInitiate the first step and narrate your progress.";
 
-        ss << "\nBegin with the first item now. Do not repeat a step once it has been initiated.";
-
-        std::string event_msg = ss.str();
-        std::cout << "[TaskRunner] Injecting sequence for: " << it->TASK_PHRASE << std::endl;
-        
-        // 3. Inject as a USER message
-        chat.send(event_msg, "user");
+        // 3. Integration via persona
+        chat.integrate_tool_result(ss.str());
 
     } else {
-        // Error feedback with suggested matches
         std::string error_msg = "ERROR: No automation found for '" + target + "'. ";
-        error_msg += "Available macros in my database: ";
-        for (size_t i = 0; i < task_manager.TASK_LIST.size(); ++i) {
-            error_msg += "\"" + task_manager.TASK_LIST[i].TASK_PHRASE + "\"" + 
-                            (i == task_manager.TASK_LIST.size() - 1 ? "" : ", ");
-        }
-        
         chat.send_tool_result(tc_id, error_msg);
+        chat.integrate_tool_result(error_msg);
     }
 }
 
@@ -757,106 +775,87 @@ void TOOL_TASK_RUNNER::monitor_tool(ollama_system& chat) {
 
 // ----
 
-/**
- * IMPLEMENTATION NOTE:
- * Since your ollama_system uses a 'chat_thread' and 'is_processing' atomics,
- * ensure that 'handle_tool' is called from a context where it's safe to block, 
- * or adapt the polling loop to be non-blocking.
- * * To prevent the "Ouroboros" (Infinite Recursion):
- * When creating 'sub_agent', do NOT call 'register_tool' for delegation on the sub-agent 
- * unless you implement a 'depth' counter.
- */
 
-void TOOL_SYSTEM_CLASS::process(ollama_system& chat, KEYBOARD_INPUT& Keyboard_Input)
+/**
+ * UPDATED TOOL_SYSTEM_CLASS::PROCESS
+ * Now handles a vector of background tasks stored as unique_ptrs to avoid
+ * move/copy errors with atomics and threads.
+ */
+void TOOL_SYSTEM_CLASS::process(ollama_system& chat, std::vector<std::unique_ptr<ollama_system>>& tasks, KEYBOARD_INPUT& Keyboard_Input)
 {
-    // 2. Tool Handling (only if not currently busy sending a new message)
-    if (!chat.is_processing && chat.last_received.complete && !chat.last_received.tool_calls.empty()) 
-    {
-        auto calls = chat.last_received.tool_calls;
-        chat.last_received.tool_calls.clear(); // Clear so we don't repeat
-        
-        for (auto& tc : calls) {
-            if (tc.name == "get_current_time") 
-            {
-                std::cout << "[" << tc.name << "]" << std::endl;
-                current_time.handle_tool(chat, tc.name, tc.arguments, tc.id);
-            } 
-            else if (tc.name == "set_timer" || tc.name == "check_timer") 
-            {
-                std::cout << "[" << tc.name << "]" << std::endl;
-                timer.handle_tool(chat, tc.name, tc.arguments, tc.id);
+    // --- PART A: Handle Tools for ALL active instances (Main + Tasks) ---
+    auto handle_instance_tools = [&](ollama_system& instance) {
+        if (!instance.is_processing && instance.last_received.complete && !instance.last_received.tool_calls.empty()) 
+        {
+            auto calls = instance.last_received.tool_calls;
+            instance.last_received.tool_calls.clear(); 
+            
+            for (auto& tc : calls) {
+                // Logic remains same, but operates on 'instance' instead of 'chat'
+                if (tc.name == "get_current_time") current_time.handle_tool(instance, tc.name, tc.arguments, tc.id);
+                else if (tc.name == "set_timer" || tc.name == "check_timer") timer.handle_tool(instance, tc.name, tc.arguments, tc.id);
+                else if (tc.name == "set_hue_light" || tc.name == "list_hue_lights" || tc.name == "manage_hue_scenes") hue.handle_tool(instance, tc.name, tc.arguments, tc.id);
+                else if (tc.name == "set_thinking_mode") thinking.handle_tool(instance, tc.name, tc.arguments, tc.id);
+                else if (tc.name == "web_search" || tc.name == "fetch_website_content") web.handle_tool(instance, tc.name, tc.arguments, tc.id);
+                else if (tc.name == "consult_expert") delegator.handle_tool(instance, tc.name, tc.arguments, tc.id);
+                else if (tc.name == "run_automation_task") task_runner.handle_tool(instance, tc.name, tc.arguments, tc.id);
             }
-            else if (tc.name == "set_hue_light" || tc.name == "list_hue_lights" || tc.name == "manage_hue_scenes") 
-            {
-                std::cout << "[" << tc.name << "]" << std::endl;
-                hue.handle_tool(chat, tc.name, tc.arguments, tc.id);
+        }
+    };
+
+    // Process main chat tools
+    handle_instance_tools(chat);
+
+    // Process tools and cleanup for background tasks
+    for (auto it = tasks.begin(); it != tasks.end(); ) {
+        ollama_system& task_instance = **it; // Dereference unique_ptr
+
+        // 1. Handle tool calls requested by the background task
+        handle_instance_tools(task_instance);
+
+        // 2. Join the thread if the task finished its network call
+        if (!task_instance.is_processing && task_instance.chat_thread.joinable()) {
+            task_instance.chat_thread.join();
+        }
+
+        // 3. Check if the task is "Done" (No more tools to call, and response is ready)
+        if (!task_instance.is_processing && task_instance.last_received.complete && task_instance.last_received.tool_calls.empty()) {
+            // INJECT RESULT BACK TO MAIN CHAT
+            if (!task_instance.last_received.response.empty()) {
+                std::string task_report = "[Task Update]: " + task_instance.last_received.response;
+                chat.send(task_report, "system"); 
             }
-            else if (tc.name == "set_thinking_mode") 
-            {
-                std::cout << "[" << tc.name << "]" << std::endl;
-                thinking.handle_tool(chat, tc.name, tc.arguments, tc.id);
-            } 
-            else if (tc.name == "set_thinking_mode") 
-            {
-                std::cout << "[" << tc.name << "]" << std::endl;
-                thinking.handle_tool(chat, tc.name, tc.arguments, tc.id);
-            } 
-            else if (tc.name == "web_search" || tc.name == "fetch_website_content") 
-            {
-                std::cout << "[" << tc.name << "]" << std::endl;
-                web.handle_tool(chat, tc.name, tc.arguments, tc.id);
-            } 
-            else if (tc.name == "consult_expert") 
-            {
-                std::cout << "[" << tc.name << "]" << std::endl;
-                delegator.handle_tool(chat, tc.name, tc.arguments, tc.id);
-            }
-            else if (tc.name == "run_automation_task") 
-            {
-                std::cout << "[" << tc.name << "]" << std::endl;
-                task_runner.handle_tool(chat, tc.name, tc.arguments, tc.id);
-            }
+            
+            it = tasks.erase(it); // Remove finished task (unique_ptr deletes the object)
+        } else {
+            ++it;
         }
     }
 
-    // 3. Cleanup finished threads
+    // --- PART B: Main Chat Maintenance (Thread joining for user messages) ---
     if (!chat.is_processing && chat.chat_thread.joinable()) {
         chat.chat_thread.join();
-        
         chat.update_status();
         chat.history_write(chat.PROPS.path_history);
         std::cout << "You: " << std::flush;
     }
 
-    // 4. Maintenance (Consolidation)
+    // --- PART C: Maintenance & Monitors ---
     auto now = std::chrono::steady_clock::now();
-
-    // Start only if idle, not interrupted, and NOT currently typing
     if (!chat.is_processing && !chat.status.interrupt_signal.load() && !Keyboard_Input.IS_TYPING) {
         if (std::chrono::duration_cast<std::chrono::seconds>(now - last_consolidation).count() > 60) {
             chat.is_processing = true;
             last_consolidation = now; 
-            
             chat.chat_thread = std::thread([&chat, &Keyboard_Input]() {
-                try {
-                    // Pass by reference to keep consistency with your process() function
-                    consolidate(chat.history, chat, Keyboard_Input); 
-                } catch (...) {
-                    std::cerr << "[System] Consolidation error." << std::endl;
-                }
+                try { consolidate(chat.history, chat, Keyboard_Input); } catch (...) {}
                 chat.is_processing = false;
             });
-
             if (chat.chat_thread.joinable()) chat.chat_thread.detach(); 
         }
     }
     
-    // 5. Monitor background events (like timers)
-    //timer.monitor_tool(chat, chat.is_processing);
     timer.monitor_tool(chat);
     hue.monitor_tool();
-
-    // 6. Other
     chat.write_to_tts();
 }
 

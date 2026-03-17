@@ -64,7 +64,7 @@ void TASK_SIMPLE_MANAGER::load_all_task()
     TASK_LIST.push_back(tmp_task);
 
     tmp_task.clear();
-    tmp_task.TASK_PHRASE = "run diagnostic";
+    tmp_task.TASK_PHRASE = "run system test";
     tmp_task.COMMANDS.push_back("show the numbers 1 through 10");
     tmp_task.COMMANDS.push_back("what is the opposite of up?");
     tmp_task.COMMANDS.push_back("what is 2 + 2?");

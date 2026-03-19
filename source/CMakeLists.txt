@@ -31,6 +31,7 @@ add_executable(olli
     ../source/helper_olli.cpp
     ../source/tools_helper.cpp
     ../source/stringthings.cpp
+    ../source/audio_control.cpp
 
     ../source/threading.cpp
     ../source/fled_time.cpp

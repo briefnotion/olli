@@ -350,6 +350,7 @@ void TIMED_IS_READY::set(double current_time, double delay)
 {
   TRIGGERED_TIME  = current_time;
   INTREVAL        = delay;
+  READY_TIME = current_time + INTREVAL;
 }
 
 void TIMED_IS_READY::set(double delay)
@@ -377,7 +378,6 @@ bool TIMED_IS_READY::is_ready(double current_time)
   if(current_time >= READY_TIME)
   {
     TRIGGERED_TIME = current_time;
-    READY_TIME = current_time + INTREVAL;
     return true;
   }
   else

@@ -27,6 +27,10 @@ int main() {
     chat.PROPS.model = "qwen3:8b"; 
     chat.open();
 
+    AUDIO_CONTROL_CLASS audio_control;
+    audio_control.settings_path = setings_vars.get_settings_path();
+    audio_control.thread_start();
+
 
     //
 
@@ -57,6 +61,7 @@ int main() {
 
     std::cout << "\n--- Chat Ended ---" << std::endl;
 
+    audio_control.thread_stop();
     setings_vars.save_settings();
 
     return 0;

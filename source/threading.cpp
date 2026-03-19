@@ -58,29 +58,37 @@ bool THREADING_INFO::check_to_run_routine_on_thread(double Time_Frame)
 
 void THREADING_INFO::start_render_thread(std::function<void()> Function)
 {
-  RENDER_THREAD = async(launch::async, Function);
-  IS_RUNNING = true;
+  try
+  {
+    RENDER_THREAD = async(launch::async, Function);
+    IS_RUNNING = true;
+  }
+  catch (const std::system_error& e)
+  {
+    cout << "Error: Could not start thread. What: " << e.what() << endl;
+    IS_RUNNING = false;
+  }
 }
 
-void THREADING_INFO::wait_for_thread_to_finish(string Name_Or_Description)
+void THREADING_INFO::wait_for_thread_to_finish()
 {
   if(IS_RUNNING == true)
   // Check to see if render thread was started before checking the completion status.
   {
-    cout  << "Closing open threads ... (" << Name_Or_Description << ")" << endl;
+    cout << "Closing open threads ..." << endl;
 
     while(RENDER_THREAD.wait_for(10ms) != future_status::ready)
     {
       //cout << "Waiting for Render Thread to finish" << endl;
     }
 
-    cout << "  Thread Closed"  << endl;
+    cout << "  Thread Closed" << endl << endl;
 
     IS_RUNNING = false;
   }
   else
   {
-    cout << "No open threads to close ... (" << Name_Or_Description << ")" << endl;
+    cout << "No open threads to close" << endl << endl;
   }
 }
 

@@ -54,7 +54,7 @@ class THREADING_INFO
 
   // Waits for the rendering thread to finish its execution.
   // Call at program closing.
-  void wait_for_thread_to_finish(string Name_Or_Description);
+  void wait_for_thread_to_finish();
 };
 
 // ------------------------------------------------------------------------- //

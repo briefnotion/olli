@@ -12,13 +12,11 @@ int main() {
     //CLASS_SYSTEM system;
 
     ollama_system chat;
-    std::vector<std::unique_ptr<ollama_system>> tasks;
-    TOOL_SYSTEM_CLASS tools;
     
     Settings setings_vars;
     setings_vars.load_settings();
-    tools.web.apiKey = setings_vars.tool_web_search_apiKey;
-    tools.hue.set_credentials(setings_vars.tool_hue_lights_bridge_ip, setings_vars.tool_hue_lights_apiKey, (setings_vars.get_settings_path() / "scenes.json").string());
+    chat.set_web_api_key(setings_vars.tool_web_search_apiKey);
+    chat.set_hue_credentials(setings_vars.tool_hue_lights_bridge_ip, setings_vars.tool_hue_lights_apiKey, (setings_vars.get_settings_path() / "scenes.json").string());
 
     std::filesystem::create_directories(setings_vars.get_settings_path() / "output");
     std::filesystem::create_directories(setings_vars.get_settings_path() / "input");
@@ -28,13 +26,7 @@ int main() {
     chat.PROPS.use_thinking = false;
     chat.PROPS.model = "qwen3:8b"; 
     chat.open();
-    tools.current_time.register_tool(chat);
-    tools.timer.register_tool(chat); 
-    tools.hue.register_tool(chat);
-    tools.thinking.register_tool(chat);
-    tools.web.register_tool(chat);
-    tools.delegator.register_tool(chat);
-    tools.task_runner.register_tool(chat);
+
 
     //
 
@@ -57,7 +49,8 @@ int main() {
         key_input.keyboard_input();
 
         chat.input(key_input);
-        tools.process(chat, tasks, key_input);
+        chat.process();
+        chat.consolidate_check(key_input);
 
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }

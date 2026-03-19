@@ -66,6 +66,7 @@ void TASK_SIMPLE_MANAGER::load_all_task()
     tmp_task.clear();
     tmp_task.TASK_PHRASE = "run system test";
     tmp_task.COMMANDS.push_back("show the numbers 1 through 10");
+    tmp_task.COMMANDS.push_back("what time is it?");
     tmp_task.COMMANDS.push_back("what is the opposite of up?");
     tmp_task.COMMANDS.push_back("what is 2 + 2?");
     tmp_task.COMMANDS.push_back("how many eggs are in a dozon eggs.");

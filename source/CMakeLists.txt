@@ -29,9 +29,11 @@ add_executable(olli
     ../source/main.cpp
     ../source/olla.cpp
     ../source/helper_olli.cpp
-    ../source/tools.cpp
     ../source/tools_helper.cpp
     ../source/stringthings.cpp
+
+    ../source/threading.cpp
+    ../source/fled_time.cpp
 )
 
 # 5. Compiler-Specific Strict Warning Flags

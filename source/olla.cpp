@@ -728,7 +728,7 @@ void TOOL_TASK_RUNNER::register_tool(json& tools) {
         {"properties", {
             {"intent_phrase", {
                 {"type", "string"}, 
-                {"description", "The specific phrase or intent identified (e.g., 'I'm home', 'run system test')."}
+                {"description", "The specific phrase or intent identified (e.g.,  'I'm leaving', 'I'm home', 'I'm sleeping', 'run system test')."}
             }}
         }},
         {"required", {"intent_phrase"}}
@@ -799,8 +799,6 @@ void TOOL_TASK_RUNNER::handle_tool(
         std::string success_log = "SUCCESS: Automation found. Sequence loading...";
         main_instance.send_tool_result(call_id, success_log);
 
-
-
         // List each command numerically
         for (const auto& cmd : found_task.COMMANDS) {
             //std::cout <<" Command: " << cmd << endl;
@@ -809,10 +807,6 @@ void TOOL_TASK_RUNNER::handle_tool(
             instance.last_received.complete = false;
             //std::cout << "AI Result: " << instance.last_received.response << std::endl;
         }
-
-
-
-
 
         // C. GATHER RESULTS FROM HISTORY
         // We compile all 'assistant' responses generated since we started the loop.
@@ -827,7 +821,6 @@ void TOOL_TASK_RUNNER::handle_tool(
                 gathered_any = true;
             }
         }
-
 
         if (!gathered_any) {
             task_report << "(Task completed. No status messages recorded.)";
@@ -851,9 +844,6 @@ void TOOL_TASK_RUNNER::handle_tool(
         // We use the internal send_task logic so this rewrite happens 
         // without blocking the main chat UI.
         main_instance.send(prompt, "system");
-
-
-
 
         //directive << "\nInstruction: Initiate the first step and narrate your progress.";
 
@@ -913,9 +903,8 @@ void ollama_system::handle_instance_tools()
             //    delegator.handle_tool(*this, tc.name, tc.arguments, tc.id);
             } else if (tc.name == "run_automation_task") {
                 auto new_instance_ptr = std::make_unique<ollama_system>();
-                new_instance_ptr->PROPS = this->PROPS;
                 new_instance_ptr->PROPS.stream_output = false;
-                new_instance_ptr->open();
+                new_instance_ptr->open(this->PROPS);
                 background_tasks.push_back(std::move(new_instance_ptr));
                 auto& inst = *background_tasks.back();
                 task_runner.handle_tool(*this, inst, tc.name, tc.arguments, tc.id);
@@ -928,6 +917,9 @@ void ollama_system::open()
 {
     std::cout << "[System] Connecting to " << PROPS.host << ":" << PROPS.port << " (" << PROPS.model << ")" << std::endl;
     
+    web.apiKey = PROPS.web_search_api_key;
+    hue.set_credentials(PROPS.hue_ip, PROPS.hue_key, PROPS.hue_path);
+
     current_time.register_tool(tools);
     timer.register_tool(tools); 
     hue.register_tool(tools);
@@ -943,6 +935,12 @@ void ollama_system::open()
 
         history.push_back({"system", OLLAMA_OPENING});
     }
+}
+
+void ollama_system::open(OLLAMA_SYSTEM_PROPERTIES Properties)
+{
+    PROPS = Properties;
+    open();
 }
 
 /**

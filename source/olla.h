@@ -216,6 +216,10 @@ class OLLAMA_SYSTEM_PROPERTIES
     bool stream_output = true; 
     bool use_thinking = true;
 
+    string web_search_api_key = "Enter_API_key_for_serpapi.com";
+    std::string hue_ip = "127.0.0.1";
+    std::string hue_key = "Enter_Hue_Bridge_API_Key";
+    std::string hue_path = "scenes.json";
 };
 
 class ollama_system {
@@ -238,11 +242,6 @@ class ollama_system {
 
     public:
 
-    void set_web_api_key(const std::string web_api_key)
-    {   web.apiKey = web_api_key;}
-    void set_hue_credentials(const std::string& ip, const std::string& key, const std::string& path)
-    {   hue.set_credentials(ip, key, path);}
-
     std::string OLLAMA_OPENING =             
             //"You are a helpful assistant with access to tools. "
             //"1. For delayed requests, use set_timer. Always summarize the "
@@ -264,7 +263,6 @@ class ollama_system {
     std::atomic<bool> is_processing{false};
     std::atomic<bool> running{true};
 
-
     std::queue<ToolCall> pending_tool_calls;
 
     // parameters
@@ -279,6 +277,7 @@ class ollama_system {
     std::string tts_buffer = "";
 
     void open();
+    void open(OLLAMA_SYSTEM_PROPERTIES Properties);
     
     void integrate_tool_result(const std::string& raw_result);
     void send(const std::string& user_input, const std::string& role = "user");

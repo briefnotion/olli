@@ -7,7 +7,6 @@
 #include <filesystem>
 
 
-
 int main() {
     //CLASS_SYSTEM system;
 
@@ -15,11 +14,12 @@ int main() {
     
     Settings setings_vars;
     setings_vars.load_settings();
-    chat.set_web_api_key(setings_vars.tool_web_search_apiKey);
-    chat.set_hue_credentials(setings_vars.tool_hue_lights_bridge_ip, setings_vars.tool_hue_lights_apiKey, (setings_vars.get_settings_path() / "scenes.json").string());
-
     std::filesystem::create_directories(setings_vars.get_settings_path() / "output");
     std::filesystem::create_directories(setings_vars.get_settings_path() / "input");
+    chat.PROPS.web_search_api_key = setings_vars.tool_web_search_apiKey;
+    chat.PROPS.hue_ip = setings_vars.tool_hue_lights_bridge_ip;
+    chat.PROPS.hue_key = setings_vars.tool_hue_lights_apiKey;
+    chat.PROPS.hue_path = (setings_vars.get_settings_path() / "scenes.json").string(); 
     chat.PROPS.path_output = setings_vars.get_settings_path() / "output";
     chat.PROPS.path_history = ".";
 
@@ -27,12 +27,8 @@ int main() {
     chat.PROPS.model = "qwen3:8b"; 
     chat.open();
 
-    AUDIO_CONTROL_CLASS audio_control;
-    audio_control.settings_path = setings_vars.get_settings_path();
+    AUDIO_CONTROL_CLASS audio_control(setings_vars.get_settings_path());
     audio_control.thread_start();
-
-
-    //
 
     //
     KEYBOARD_INPUT key_input;
@@ -44,7 +40,7 @@ int main() {
     std::cout << "You: " << std::flush;
 
     //
-
+    // Main loop: runs until user types 'bye' or 'quit' or 'Goodbye.'
     while (chat.running) 
     {
         // 1. Non-blocking check for user input

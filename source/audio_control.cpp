@@ -3,10 +3,39 @@
 
 #include "audio_control.h"
 
-
 void AUDIO_CONTROL_CLASS::adjust_audio_files()
 {
-    //std::cout << "." << std::flush;
+    if (checkAndLoadFile(settings_path / "lira_control.json", LIRA_lastKnownTime, LIRA_SETTINGS)) 
+    {
+        //if (checkAndLoadFile(settings_path / "lira_control.json", VOCA_lastKnownTime, VOCA_SETTINGS))
+        //{
+        //    ... maybe later
+        //}
+
+        if (LIRA_SETTINGS.is_speaking)
+        {
+            VOCA_COMMAND_SETTINGS.command = "pause";
+            VOCA_COMMAND_SETTINGS.last_update = 0;
+            writeFile(settings_path / "voca_command.json", VOCA_COMMAND_SETTINGS);
+        }
+        else
+        {
+            VOCA_COMMAND_SETTINGS.command = "listen";
+            VOCA_COMMAND_SETTINGS.last_update = 0;
+            writeFile(settings_path / "voca_command.json", VOCA_COMMAND_SETTINGS);
+        }
+    }
+}
+
+AUDIO_CONTROL_CLASS::AUDIO_CONTROL_CLASS(const std::filesystem::path& filePath)
+{
+    settings_path =  filePath;
+    if (std::filesystem::exists(settings_path / "lira_control.json")) {
+        LIRA_lastKnownTime = std::filesystem::last_write_time(settings_path / "lira_control.json");
+    }
+    if (std::filesystem::exists(settings_path / "voca_status.json")) {
+        LIRA_lastKnownTime = std::filesystem::last_write_time(settings_path / "voca_status.json");
+    }
 }
 
 void AUDIO_CONTROL_CLASS::thread_main()

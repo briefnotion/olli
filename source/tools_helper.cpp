@@ -71,6 +71,9 @@ void TASK_SIMPLE_MANAGER::load_all_task()
     tmp_task.COMMANDS.push_back("what time is it?");
     tmp_task.COMMANDS.push_back("what is the opposite of up?");
     tmp_task.COMMANDS.push_back("what is 2 + 2?");
+    tmp_task.COMMANDS.push_back("Ask the user for the name of a dog.");
+    tmp_task.COMMANDS.push_back("[[ASK]]What is a name for a dog?");
+    tmp_task.COMMANDS.push_back("what was the previous word?");
     tmp_task.COMMANDS.push_back("what is the weather like in New York City right now?");
     tmp_task.COMMANDS.push_back("how many eggs are in a dozon eggs.");
     tmp_task.COMMANDS.push_back("turn all the lights back on.");

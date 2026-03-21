@@ -82,6 +82,8 @@ class AUDIO_CONTROL_CLASS
 
         VOCA_COMMAND_CONFIG VOCA_COMMAND_SETTINGS;
 
+        TIMED_IS_READY  RESUME_TIMER;
+
         /**
          * @brief Templated function to check and load configuration from JSON file.
          * @tparam T The type of configuration struct to load.
@@ -146,7 +148,7 @@ class AUDIO_CONTROL_CLASS
             }
         }
 
-        void adjust_audio_files();
+        void adjust_audio_files(double Time);
 
     public:
         bool RUN = false;

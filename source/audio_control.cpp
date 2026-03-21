@@ -3,27 +3,30 @@
 
 #include "audio_control.h"
 
-void AUDIO_CONTROL_CLASS::adjust_audio_files()
+void AUDIO_CONTROL_CLASS::adjust_audio_files(double Time)
 {
+    checkAndLoadFile(settings_path / "voca_status.json", VOCA_lastKnownTime, VOCA_SETTINGS);
+
     if (checkAndLoadFile(settings_path / "lira_control.json", LIRA_lastKnownTime, LIRA_SETTINGS)) 
     {
-        //if (checkAndLoadFile(settings_path / "lira_control.json", VOCA_lastKnownTime, VOCA_SETTINGS))
-        //{
-        //    ... maybe later
-        //}
-
         if (LIRA_SETTINGS.is_speaking)
         {
             VOCA_COMMAND_SETTINGS.command = "pause";
-            VOCA_COMMAND_SETTINGS.last_update = 0;
             writeFile(settings_path / "voca_command.json", VOCA_COMMAND_SETTINGS);
+            RESUME_TIMER.set(Time, 60000);
         }
         else
         {
             VOCA_COMMAND_SETTINGS.command = "listen";
-            VOCA_COMMAND_SETTINGS.last_update = 0;
             writeFile(settings_path / "voca_command.json", VOCA_COMMAND_SETTINGS);
+            RESUME_TIMER.set(Time, 30000);
         }
+    }
+
+    if (VOCA_SETTINGS.is_awake && RESUME_TIMER.is_ready(Time))
+    {
+        VOCA_COMMAND_SETTINGS.command = "sleep";
+        writeFile(settings_path / "voca_command.json", VOCA_COMMAND_SETTINGS);
     }
 }
 
@@ -51,7 +54,7 @@ void AUDIO_CONTROL_CLASS::thread_main()
         thread_time.setframetime();
         frame_limit.set(thread_time.current_frame_time(), INTERVAL);
 
-        adjust_audio_files();
+        adjust_audio_files(thread_time.current_frame_time());
 
         //sleep thread
         thread_time.request_ready_time(frame_limit.get_ready_time());

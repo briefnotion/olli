@@ -34,6 +34,7 @@ int main() {
     KEYBOARD_INPUT key_input;
     key_input.PROPS.path_input = setings_vars.get_settings_path() / "input";
     key_input.PROPS.lira_control_file = setings_vars.get_settings_path() / "lira_control.json";
+    key_input.PROPS.ENABLED = true;
 
     //
     std::cout << "\n--- Chat Started (Type 'bye' or 'quit' or 'Goodbye.' to stop) ---\n" << std::endl;
@@ -49,7 +50,7 @@ int main() {
         key_input.keyboard_input();
 
         chat.input(key_input);
-        chat.process();
+        chat.process(key_input);
         chat.consolidate_check(key_input);
 
         std::this_thread::sleep_for(std::chrono::milliseconds(20));

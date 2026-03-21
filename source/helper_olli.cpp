@@ -314,38 +314,45 @@ KEYBOARD_INPUT::~KEYBOARD_INPUT() {
 
 void KEYBOARD_INPUT::keyboard_input()
 {
-    char ch;
-    // read() will now return 0 if no character is waiting
-    while (read(STDIN_FILENO, &ch, 1) > 0) 
+    if (PROPS.ENABLED)
     {
-        //std::cout << static_cast<int>(ch) << std::endl;
-        if (ch == 10 || ch == 13 || ch == '\r') 
+        char ch;
+        // read() will now return 0 if no character is waiting
+        while (read(STDIN_FILENO, &ch, 1) > 0) 
         {
-            LINE += '\n';
-            std::cout << "\r\n" << std::flush;
-            INTERRUPTED = true;
-            ENTER_PRESSED = true;
-        }
-        else if ((ch == 127 || ch == 8)) 
-        {
-            if (!LINE.empty()) 
+            //std::cout << static_cast<int>(ch) << std::endl;
+            if (ch == 10 || ch == 13 || ch == '\r') 
             {
-                LINE.pop_back();
-                std::cout << "\b \b" << std::flush;
+                LINE += '\n';
+                std::cout << "\r\n" << std::flush;
+                INTERRUPTED = true;
+                ENTER_PRESSED = true;
+            }
+            else if ((ch == 127 || ch == 8)) 
+            {
+                if (!LINE.empty()) 
+                {
+                    LINE.pop_back();
+                    std::cout << "\b \b" << std::flush;
+                }
+            }
+            else 
+            {
+                LINE += ch;
+                std::cout << ch << std::flush;
+                INTERRUPTED = true;
             }
         }
-        else 
+
+        // or get text from voca
+        
+        if (PROPS.ENABLE_LIRA_VOCA)
         {
-            LINE += ch;
-            std::cout << ch << std::flush;
-            INTERRUPTED = true;
+            getNextInteraction(PROPS.path_input);
         }
+
+        IS_TYPING = !LINE.empty();
     }
-
-    // or get text from voca
-    getNextInteraction(PROPS.path_input);
-
-    IS_TYPING = !LINE.empty();
 }
 
 

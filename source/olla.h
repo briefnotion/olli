@@ -238,7 +238,7 @@ class ollama_system {
     //TOOL_DELEGATOR delegator;
     TOOL_TASK_RUNNER task_runner;
 
-    void handle_instance_tools();
+    void handle_instance_tools(KEYBOARD_INPUT& Keyboard_Input);
 
     public:
 
@@ -297,7 +297,7 @@ class ollama_system {
 
     void input(KEYBOARD_INPUT& Key_Input);
     
-    void process();
+    void process(KEYBOARD_INPUT& Keyboard_Input);
 
     void consolidate_check(KEYBOARD_INPUT& Keyboard_Input);
 

@@ -121,6 +121,9 @@ class KEYBOARD_INPUT_PROPERTIES
 
     std::filesystem::path path_input = "";
     std::filesystem::path lira_control_file = "";
+
+    bool ENABLED = false;
+    bool ENABLE_LIRA_VOCA = true;
 };
 
 class KEYBOARD_INPUT

@@ -756,6 +756,15 @@ void TOOL_TASK_RUNNER::handle_tool(
     const json& tool_args, 
     const std::string& call_id) 
 {
+    KEYBOARD_INPUT keyboard_input;
+    keyboard_input.PROPS.ENABLED = false;
+    keyboard_input.PROPS.ENABLE_LIRA_VOCA = false;
+
+    // Preparation: Create a new instance to run the automation sequence without blocking the main chat flow.
+    instance.PROPS.stream_output = false;
+    //instance.OLLAMA_OPENING; // place for custoom opening if needed
+    instance.open(main_instance.PROPS);
+
     // ---------------------------------------------------------
     // 1. GUARD CLAUSE
     // Verify this is the specific tool we are meant to handle.
@@ -764,6 +773,11 @@ void TOOL_TASK_RUNNER::handle_tool(
     {
         return;
     }
+
+    cout << instance.PROPS.web_search_api_key << endl;
+    cout << instance.PROPS.hue_ip << endl;
+    cout << instance.PROPS.hue_key << endl;
+    cout << instance.PROPS.hue_path << endl;
 
     // ---------------------------------------------------------
     // 2. EXTRACT INPUT
@@ -802,8 +816,23 @@ void TOOL_TASK_RUNNER::handle_tool(
         // List each command numerically
         for (const auto& cmd : found_task.COMMANDS) {
             //std::cout <<" Command: " << cmd << endl;
-            instance.send(cmd, "user");
-            instance.process();
+            if (starts_with(cmd, "[[ASK]]"))
+            {
+                //cout << cmd << endl;
+                keyboard_input.PROPS.ENABLED = true;
+                while(keyboard_input.ENTER_PRESSED == false)
+                {
+                    keyboard_input.keyboard_input();
+                }
+                keyboard_input.PROPS.ENABLED = false;
+                instance.send(keyboard_input.LINE, "user");
+            }
+            else
+            {
+                instance.send(cmd, "user");
+            }
+
+            instance.process(keyboard_input);
             instance.last_received.complete = false;
             //std::cout << "AI Result: " << instance.last_received.response << std::endl;
         }
@@ -826,30 +855,40 @@ void TOOL_TASK_RUNNER::handle_tool(
             task_report << "(Task completed. No status messages recorded.)";
         }
 
-        //cout << task_report.str() << endl;
+        /*
+        {
+            //cout << task_report.str() << endl;
 
-        success_log = "SUCCESS: Automation Complete";
-        main_instance.send_tool_result(call_id, success_log);
+            success_log = "SUCCESS: Automation Complete";
+            main_instance.send_tool_result(call_id, success_log);
 
-        //main_instance.send(task_report.str());
+            //main_instance.send(task_report.str());
 
 
-        // We initiate a secondary background "thought" to wrap the data
-        std::string prompt = "The user requested information and the system returned this raw data: '" + task_report.str() + "'. "
-                            "Rewrite this information to fit naturally into our current conversation and persona. "
-                            "Be concise and do not mention that you are a tool.";
+            // We initiate a secondary background "thought" to wrap the data
+            std::string prompt = "The user requested information and the system returned this raw data: '" + task_report.str() + "'. "
+                                "Rewrite this information to fit naturally into our current conversation and persona. "
+                                "Be concise and do not mention that you are a tool.";
 
-        //std::string prompt = "say everything ran ok.";
-        
-        // We use the internal send_task logic so this rewrite happens 
-        // without blocking the main chat UI.
-        main_instance.send(prompt, "system");
+            //std::string prompt = "say everything ran ok.";
+            
+            // We use the internal send_task logic so this rewrite happens 
+            // without blocking the main chat UI.
+            main_instance.send(prompt, "system");
 
-        //directive << "\nInstruction: Initiate the first step and narrate your progress.";
+            //directive << "\nInstruction: Initiate the first step and narrate your progress.";
 
-        // C. Inject the directive into the persona flow
-        // This ensures the AI "sees" these commands as its next priority.
-        //chat.integrate_tool_result(directive.str());
+            // C. Inject the directive into the persona flow
+            // This ensures the AI "sees" these commands as its next priority.
+            //chat.integrate_tool_result(directive.str());
+        }
+        */
+
+        {
+            success_log = "SUCCESS: Automation Complete";
+            main_instance.send_tool_result(call_id, success_log);
+            main_instance.integrate_tool_result(task_report.str());
+        }
     } 
     else 
     {
@@ -877,7 +916,7 @@ void TOOL_TASK_RUNNER::monitor_tool(ollama_system& instance) {
 // Checks if an instance (Main or Task) has pending tool 
 // requests and routes them to the correct tool handlers.
 // ---------------------------------------------------------
-void ollama_system::handle_instance_tools() 
+void ollama_system::handle_instance_tools(KEYBOARD_INPUT& Keyboard_Input) 
 {
     bool is_ready_for_tools = !is_processing && 
                               last_received.complete && 
@@ -903,11 +942,11 @@ void ollama_system::handle_instance_tools()
             //    delegator.handle_tool(*this, tc.name, tc.arguments, tc.id);
             } else if (tc.name == "run_automation_task") {
                 auto new_instance_ptr = std::make_unique<ollama_system>();
-                new_instance_ptr->PROPS.stream_output = false;
-                new_instance_ptr->open(this->PROPS);
+                ollama_system* raw_ptr = new_instance_ptr.get(); // Get the address before moving it
                 background_tasks.push_back(std::move(new_instance_ptr));
-                auto& inst = *background_tasks.back();
-                task_runner.handle_tool(*this, inst, tc.name, tc.arguments, tc.id);
+                Keyboard_Input.PROPS.ENABLED = false; // Disable keyboard input for the task instance
+                task_runner.handle_tool(*this, *raw_ptr, tc.name, tc.arguments, tc.id);
+                Keyboard_Input.PROPS.ENABLED = true;
             }
         }
     }
@@ -948,16 +987,67 @@ void ollama_system::open(OLLAMA_SYSTEM_PROPERTIES Properties)
  * This function takes raw tool data and asks the model to "speak" it 
  * in the context of the current conversation/persona.
  */
-void ollama_system::integrate_tool_result(const std::string& raw_result) {
-    // We initiate a secondary background "thought" to wrap the data
-    std::string prompt = "The user requested information and the system returned this raw data: '" + raw_result + "'. "
-                         "Rewrite this information to fit naturally into our current conversation and persona. "
-                         "Be concise and do not mention that you are a tool.";
+void ollama_system::integrate_tool_result(const std::string& raw_result) 
+{
+    //  Why this is the "Road Less Trodden"
+
+    /*
+    // the original.
+    {
+        // We initiate a secondary background "thought" to wrap the data
+        std::string prompt = "The user requested information and the system returned this raw data: '" + raw_result + "'. "
+                            "Rewrite this information to fit naturally into our current conversation and persona. "
+                            "Be concise and do not mention that you are a tool.";
+        
+        // We use the internal send_task logic so this rewrite happens 
+        // without blocking the main chat UI.
+        this->send(prompt, "system");
+    }
+    */
+
+    // AI1 suggestion:
+    /*
+    {
+        std::string prompt =
+            "[REWRITE]\n"
+            "Raw data: '" + raw_result + "'.\n"
+            "Rewrite this naturally in the assistant's voice. "
+            "Do not mention tools, raw data, or internal processing.";
+
+        this->send(prompt, "user");
+    }
+    */
     
-    // We use the internal send_task logic so this rewrite happens 
-    // without blocking the main chat UI.
-    this->send(prompt, "system");
+
+    // AI2 suggestion:
+    /**
+     * REFINED: INTEGRATE_TOOL_RESULT
+     * Uses a 'system' whisper to transform raw data into persona-driven speech.
+     */
+    {
+        // 1. Construct a "Director's Note" prompt. 
+        // We use clear delimiters like [DATA] to help the model parse quickly.
+        std::string prompt = 
+            "[DIRECTOR_NOTE]\n"
+            "The following raw data was just retrieved: '" + raw_result + "'.\n"
+            "TASK: Acknowledge this info as the Assistant. Stay in persona.\n"
+            "CONSTRAINTS: Be concise. No technical jargon. Do NOT say 'The system found' or 'Rewriting data'.\n"
+            "Begin speaking now:";
+
+        // 2. We use "system" here. 
+        // This prevents the "What was the last thing I said?" confusion 
+        // because the model treats this as a 'state' rather than 'user input'.
+        this->send(prompt, "system");
+        
+        // 3. Logic Note:
+        // If your 'send' function adds the prompt to the history vector, 
+        // I recommend adding a 'pop_back()' or a flag to your Message class 
+        // called 'is_transient' so this prompt doesn't bloat your VRAM 
+        // over a long session.
+    }
 }
+
+
 
 void ollama_system::send(const std::string& user_input, const std::string& role) {
     std::string new_user_input = filter_non_printable(user_input);
@@ -1285,12 +1375,12 @@ void ollama_system::input(KEYBOARD_INPUT& Key_Input)
  * 4. Trigger background consolidation (memory cleanup) every 60 seconds.
  */
 
-void ollama_system::process() 
+void ollama_system::process(KEYBOARD_INPUT& Keyboard_Input) 
 {
     // ---------------------------------------------------------
     // PART 1: PROCESS MAIN CHAT TOOLS
     // ---------------------------------------------------------
-    handle_instance_tools();
+    handle_instance_tools(Keyboard_Input);
 
     // ---------------------------------------------------------
     // PART 2: MANAGE BACKGROUND TASKS
@@ -1301,7 +1391,7 @@ void ollama_system::process()
         ollama_system& task_instance = **it; // Access the object inside unique_ptr
 
         // A. Handle any tool calls requested by the background task
-        handle_instance_tools();
+        handle_instance_tools(Keyboard_Input);
 
         // B. Thread Management: Join finished network threads
         if (!task_instance.is_processing && task_instance.chat_thread.joinable()) {

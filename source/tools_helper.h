@@ -32,6 +32,8 @@ struct TASK_SIMPLE
 {
     public:
         std::string TASK_PHRASE = "";
+        std::string TASK_PURPOSE = "";
+        std::string TASK_DIRECTORY = "";
         std::vector<std::string> COMMANDS;
         void clear();
 };
@@ -40,9 +42,7 @@ class TASK_SIMPLE_MANAGER
 {
     public:
         std::vector<TASK_SIMPLE> TASK_LIST;
-
         TASK_SIMPLE_MANAGER();
-
         void load_all_task();
 };
 

@@ -14,14 +14,11 @@ int main() {
     
     Settings setings_vars;
     setings_vars.load_settings();
-    std::filesystem::create_directories(setings_vars.get_settings_path() / "output");
-    std::filesystem::create_directories(setings_vars.get_settings_path() / "input");
+    
+    chat.PROPS.OLLI_DIERCTORY = setings_vars.get_settings_path();
     chat.PROPS.web_search_api_key = setings_vars.tool_web_search_apiKey;
     chat.PROPS.hue_ip = setings_vars.tool_hue_lights_bridge_ip;
     chat.PROPS.hue_key = setings_vars.tool_hue_lights_apiKey;
-    chat.PROPS.hue_path = (setings_vars.get_settings_path() / "scenes.json").string(); 
-    chat.PROPS.path_output = setings_vars.get_settings_path() / "output";
-    chat.PROPS.path_history = ".";
 
     chat.PROPS.use_thinking = false;
     chat.PROPS.model = "qwen3:8b"; 

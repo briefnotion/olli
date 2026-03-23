@@ -728,7 +728,7 @@ void TOOL_TASK_RUNNER::register_tool(json& tools) {
         {"properties", {
             {"intent_phrase", {
                 {"type", "string"}, 
-                {"description", "The specific phrase or intent identified (e.g.,  'I'm leaving', 'I'm home', 'I'm sleeping', 'run system test')."}
+                {"description", "The specific phrase or intent identified (e.g.,  'I'm leaving', 'I'm home', 'I'm sleeping', 'run system test', 'run process resume')."}
             }}
         }},
         {"required", {"intent_phrase"}}
@@ -756,6 +756,9 @@ void TOOL_TASK_RUNNER::handle_tool(
     const json& tool_args, 
     const std::string& call_id) 
 {
+    bool running_directory = false;
+    std::filesystem::path working_dir;
+
     KEYBOARD_INPUT keyboard_input;
     keyboard_input.PROPS.ENABLED = false;
     keyboard_input.PROPS.ENABLE_LIRA_VOCA = false;
@@ -808,6 +811,14 @@ void TOOL_TASK_RUNNER::handle_tool(
     {
         const auto& found_task = *task_it;
 
+        // Create directory if needed.
+        if (found_task.TASK_DIRECTORY != "")
+        {
+            working_dir = OLLI_DIRECTORY / found_task.TASK_DIRECTORY;
+            std::filesystem::create_directories(working_dir);
+            running_directory = true;
+        }
+
         // A. Confirm to the system that the tool executed successfully
         //std::string success_log = "SUCCESS: Automation '" + found_task.TASK_PHRASE + "' found. Sequence loading...";
         std::string success_log = "SUCCESS: Automation found. Sequence loading...";
@@ -815,20 +826,33 @@ void TOOL_TASK_RUNNER::handle_tool(
 
         // List each command numerically
         for (const auto& cmd : found_task.COMMANDS) {
-            //std::cout <<" Command: " << cmd << endl;
-            if (starts_with(cmd, "[[ASK]]"))
+            
+            if (starts_with(cmd, "[[ENTER TO CONTINUE]]"))
             {
-                //cout << cmd << endl;
+                cout << "\n---------------------------\nPRESS ENTER TO CONTINUE" << endl;
                 keyboard_input.PROPS.ENABLED = true;
                 while(keyboard_input.ENTER_PRESSED == false)
                 {
                     keyboard_input.keyboard_input();
                 }
+                keyboard_input.ENTER_PRESSED = false;
+                keyboard_input.PROPS.ENABLED = false;
+            }
+            else if (starts_with(cmd, "[[ASK]]"))
+            {
+                std::cout <<"\n---------------------------\nREQUEST: " << cmd << std::endl;
+                keyboard_input.PROPS.ENABLED = true;
+                while(keyboard_input.ENTER_PRESSED == false)
+                {
+                    keyboard_input.keyboard_input();
+                }
+                keyboard_input.ENTER_PRESSED = false;
                 keyboard_input.PROPS.ENABLED = false;
                 instance.send(keyboard_input.LINE, "user");
             }
             else
             {
+                std::cout <<"\n---------------------------\nINPUT: " << cmd << std::endl;
                 instance.send(cmd, "user");
             }
 
@@ -888,6 +912,12 @@ void TOOL_TASK_RUNNER::handle_tool(
             success_log = "SUCCESS: Automation Complete";
             main_instance.send_tool_result(call_id, success_log);
             main_instance.integrate_tool_result(task_report.str());
+        }
+
+        if (running_directory) 
+        {
+            //cout << "REMOVE ALL: " << working_dir << endl;
+            std::filesystem::remove_all(working_dir);
         }
     } 
     else 
@@ -956,8 +986,16 @@ void ollama_system::open()
 {
     std::cout << "[System] Connecting to " << PROPS.host << ":" << PROPS.port << " (" << PROPS.model << ")" << std::endl;
     
+    std::filesystem::create_directories(PROPS.OLLI_DIERCTORY / "output");
+    std::filesystem::create_directories(PROPS.OLLI_DIERCTORY / "input");
+    
     web.apiKey = PROPS.web_search_api_key;
     hue.set_credentials(PROPS.hue_ip, PROPS.hue_key, PROPS.hue_path);
+    task_runner.OLLI_DIRECTORY = PROPS.OLLI_DIERCTORY;
+
+    PROPS.hue_path = (PROPS.OLLI_DIERCTORY / "scenes.json").string(); 
+    PROPS.path_output = PROPS.OLLI_DIERCTORY / "output";
+    PROPS.path_history = ".";
 
     current_time.register_tool(tools);
     timer.register_tool(tools); 
@@ -971,7 +1009,6 @@ void ollama_system::open()
     if (history.empty()) 
     {
         //history.push_back({"system", "You are a helpful assistant with access to tools."
-
         history.push_back({"system", OLLAMA_OPENING});
     }
 }

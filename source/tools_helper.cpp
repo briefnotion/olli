@@ -65,7 +65,9 @@ void TASK_SIMPLE_MANAGER::load_all_task()
 
     tmp_task.clear();
     tmp_task.TASK_PHRASE = "run system test";
-    tmp_task.COMMANDS.push_back("set a timer for 10 seconds.");
+    tmp_task.TASK_PURPOSE = "This is a series of a few simple questions to check responses.";
+    tmp_task.TASK_DIRECTORY = "system_test";
+    tmp_task.COMMANDS.push_back("Set a timer for 30 seconds and when the timer goes off, blink any light.");
     tmp_task.COMMANDS.push_back("turn off all the lights.");
     tmp_task.COMMANDS.push_back("show the numbers 1 through 10");
     tmp_task.COMMANDS.push_back("what time is it?");
@@ -77,6 +79,26 @@ void TASK_SIMPLE_MANAGER::load_all_task()
     tmp_task.COMMANDS.push_back("what is the weather like in New York City right now?");
     tmp_task.COMMANDS.push_back("how many eggs are in a dozon eggs.");
     tmp_task.COMMANDS.push_back("turn all the lights back on.");
+    tmp_task.COMMANDS.push_back("[[ENTER TO CONTINUE]]wait");
+    tmp_task.COMMANDS.push_back("Announce the system test is complete.");
+    TASK_LIST.push_back(tmp_task);
+
+    tmp_task.clear();
+    tmp_task.TASK_PHRASE = "run process resume";
+    tmp_task.TASK_PURPOSE = "This is to arrange documents for a resume review.";
+    tmp_task.TASK_DIRECTORY = "resume process";
+
+    tmp_task.COMMANDS.push_back("Ask the user for the resume file.");
+    tmp_task.COMMANDS.push_back("[[ASK]]");
+    
+    tmp_task.COMMANDS.push_back("Ask the user for the job description.");
+    tmp_task.COMMANDS.push_back("[[ASK]]");
+
+    tmp_task.COMMANDS.push_back("Generate a concise 1-paragraph evaluation explaining how well the applicant’s resume matches the job description. Highlight the strongest points of alignment, reference specific skills or achievements, and keep the tone professional and neutral.");
+    tmp_task.COMMANDS.push_back("[[ENTER TO CONTINUE]]");
+    
+    tmp_task.COMMANDS.push_back("Using the applicant’s resume and the job description, generate a short professional cover letter (3–4 paragraphs) explaining why the applicant is a strong fit for the role. Keep the tone confident but not overly formal, and reference specific experience from the resume.");
+    tmp_task.COMMANDS.push_back("[[ENTER TO CONTINUE]]");
     TASK_LIST.push_back(tmp_task);
 }
 

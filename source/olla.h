@@ -179,8 +179,10 @@ private:
     bool iequals(const std::string& a, const std::string& b);
 
 public:
-    /**
     
+    std::filesystem::path OLLI_DIRECTORY;    
+
+    /**    
     * @brief Registers the task execution tool to the chat instance.
      */
     void register_tool(json& tools);
@@ -206,6 +208,7 @@ class OLLAMA_SYSTEM_PROPERTIES
 {
     public:
 
+    std::filesystem::path OLLI_DIERCTORY = "";
     std::filesystem::path path_output = "";
     std::filesystem::path path_history = "";
 

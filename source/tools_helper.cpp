@@ -85,8 +85,11 @@ void TASK_SIMPLE_MANAGER::load_all_task()
 
     tmp_task.clear();
     tmp_task.TASK_PHRASE = "run process resume";
-    tmp_task.TASK_PURPOSE = "This is to arrange documents for a resume review.";
-    tmp_task.TASK_DIRECTORY = "resume process";
+    tmp_task.TASK_PURPOSE = "You arrange documents for a resume review.  You will "
+                            "be running a short script of predetermined commands, so, there "
+                            "is no need to ask for clarification. Just run through the "
+                            "commands one by one.";
+    tmp_task.TASK_DIRECTORY = "resume_process";
 
     tmp_task.COMMANDS.push_back("Ask the user for the resume file.");
     tmp_task.COMMANDS.push_back("[[ASK]]");
@@ -94,10 +97,18 @@ void TASK_SIMPLE_MANAGER::load_all_task()
     tmp_task.COMMANDS.push_back("Ask the user for the job description.");
     tmp_task.COMMANDS.push_back("[[ASK]]");
 
-    tmp_task.COMMANDS.push_back("Generate a concise 1-paragraph evaluation explaining how well the applicant’s resume matches the job description. Highlight the strongest points of alignment, reference specific skills or achievements, and keep the tone professional and neutral.");
+    tmp_task.COMMANDS.push_back("Generate a concise 1-paragraph evaluation explaining how well "
+                                "the applicant’s resume matches the job description. "
+                                "Highlight the strongest points of alignment, reference "
+                                "specific skills or achievements, and keep the tone "
+                                "professional and neutral.");
     tmp_task.COMMANDS.push_back("[[ENTER TO CONTINUE]]");
     
-    tmp_task.COMMANDS.push_back("Using the applicant’s resume and the job description, generate a short professional cover letter (3–4 paragraphs) explaining why the applicant is a strong fit for the role. Keep the tone confident but not overly formal, and reference specific experience from the resume.");
+    tmp_task.COMMANDS.push_back("Using the applicant’s resume and the job description, generate "
+                                "a short professional cover letter (3–4 paragraphs) explaining "
+                                "why the applicant is a strong fit for the role. Keep the tone "
+                                "confident but not overly formal, and reference specific "
+                                "experience from the resume.");
     tmp_task.COMMANDS.push_back("[[ENTER TO CONTINUE]]");
     TASK_LIST.push_back(tmp_task);
 }

@@ -763,11 +763,6 @@ void TOOL_TASK_RUNNER::handle_tool(
     keyboard_input.PROPS.ENABLED = false;
     keyboard_input.PROPS.ENABLE_LIRA_VOCA = false;
 
-    // Preparation: Create a new instance to run the automation sequence without blocking the main chat flow.
-    instance.PROPS.stream_output = false;
-    //instance.OLLAMA_OPENING; // place for custoom opening if needed
-    instance.open(main_instance.PROPS);
-
     // ---------------------------------------------------------
     // 1. GUARD CLAUSE
     // Verify this is the specific tool we are meant to handle.
@@ -811,10 +806,19 @@ void TOOL_TASK_RUNNER::handle_tool(
     {
         const auto& found_task = *task_it;
 
+        // Preparation: Create a new instance to run the automation sequence without blocking the main chat flow.
+        if (!instance.OLLAMA_OPENING.empty())
+            instance.OLLAMA_OPENING = found_task.TASK_PURPOSE; // place for custoom opening if needed
+
+        instance.PROPS.stream_output = false;
+        instance.task_runner.enabled = false;
+        instance.web.enabled = false;
+        instance.open(main_instance.PROPS);
+
         // Create directory if needed.
         if (found_task.TASK_DIRECTORY != "")
         {
-            working_dir = OLLI_DIRECTORY / found_task.TASK_DIRECTORY;
+            working_dir = OLLI_DIRECTORY / (found_task.TASK_DIRECTORY + "_" + call_id);
             std::filesystem::create_directories(working_dir);
             running_directory = true;
         }
@@ -825,11 +829,13 @@ void TOOL_TASK_RUNNER::handle_tool(
         main_instance.send_tool_result(call_id, success_log);
 
         // List each command numerically
-        for (const auto& cmd : found_task.COMMANDS) {
+        //for (const auto& cmd : found_task.COMMANDS) 
+        for (size_t i = 0; i < found_task.COMMANDS.size(); ++i) 
+        {
             
-            if (starts_with(cmd, "[[ENTER TO CONTINUE]]"))
+            if (starts_with(found_task.COMMANDS[i], "[[ENTER TO CONTINUE]]"))
             {
-                cout << "\n---------------------------\nPRESS ENTER TO CONTINUE" << endl;
+                cout << "\n-" << i << "--------------------------\nPRESS ENTER TO CONTINUE" << endl;
                 keyboard_input.PROPS.ENABLED = true;
                 while(keyboard_input.ENTER_PRESSED == false)
                 {
@@ -838,9 +844,9 @@ void TOOL_TASK_RUNNER::handle_tool(
                 keyboard_input.ENTER_PRESSED = false;
                 keyboard_input.PROPS.ENABLED = false;
             }
-            else if (starts_with(cmd, "[[ASK]]"))
+            else if (starts_with(found_task.COMMANDS[i], "[[ASK]]"))
             {
-                std::cout <<"\n---------------------------\nREQUEST: " << cmd << std::endl;
+                std::cout <<"\n-" << i << "--------------------------\nREQUEST: " << found_task.COMMANDS[i] << std::endl;
                 keyboard_input.PROPS.ENABLED = true;
                 while(keyboard_input.ENTER_PRESSED == false)
                 {
@@ -852,8 +858,8 @@ void TOOL_TASK_RUNNER::handle_tool(
             }
             else
             {
-                std::cout <<"\n---------------------------\nINPUT: " << cmd << std::endl;
-                instance.send(cmd, "user");
+                std::cout <<"\n-" << i << "--------------------------\nINPUT: " << found_task.COMMANDS[i] << std::endl;
+                instance.send(found_task.COMMANDS[i]);
             }
 
             instance.process(keyboard_input);
@@ -878,35 +884,6 @@ void TOOL_TASK_RUNNER::handle_tool(
         if (!gathered_any) {
             task_report << "(Task completed. No status messages recorded.)";
         }
-
-        /*
-        {
-            //cout << task_report.str() << endl;
-
-            success_log = "SUCCESS: Automation Complete";
-            main_instance.send_tool_result(call_id, success_log);
-
-            //main_instance.send(task_report.str());
-
-
-            // We initiate a secondary background "thought" to wrap the data
-            std::string prompt = "The user requested information and the system returned this raw data: '" + task_report.str() + "'. "
-                                "Rewrite this information to fit naturally into our current conversation and persona. "
-                                "Be concise and do not mention that you are a tool.";
-
-            //std::string prompt = "say everything ran ok.";
-            
-            // We use the internal send_task logic so this rewrite happens 
-            // without blocking the main chat UI.
-            main_instance.send(prompt, "system");
-
-            //directive << "\nInstruction: Initiate the first step and narrate your progress.";
-
-            // C. Inject the directive into the persona flow
-            // This ensures the AI "sees" these commands as its next priority.
-            //chat.integrate_tool_result(directive.str());
-        }
-        */
 
         {
             success_log = "SUCCESS: Automation Complete";
@@ -977,6 +954,12 @@ void ollama_system::handle_instance_tools(KEYBOARD_INPUT& Keyboard_Input)
                 Keyboard_Input.PROPS.ENABLED = false; // Disable keyboard input for the task instance
                 task_runner.handle_tool(*this, *raw_ptr, tc.name, tc.arguments, tc.id);
                 Keyboard_Input.PROPS.ENABLED = true;
+            }else {
+                // Build error message
+                std::string error_msg = 
+                    "Error: Tool '" + tc.name + "' is not recognized by the system.";
+                // Return structured error to the model
+                send_tool_result(tc.id, error_msg);
             }
         }
     }
@@ -997,13 +980,26 @@ void ollama_system::open()
     PROPS.path_output = PROPS.OLLI_DIERCTORY / "output";
     PROPS.path_history = ".";
 
-    current_time.register_tool(tools);
-    timer.register_tool(tools); 
-    hue.register_tool(tools);
-    thinking.register_tool(tools);
-    web.register_tool(tools);
+    if (current_time.enabled)
+        current_time.register_tool(tools);
+
+    if (timer.enabled)
+        timer.register_tool(tools); 
+
+    if (hue.enabled)
+        hue.register_tool(tools);
+
+    if (thinking.enabled)
+        thinking.register_tool(tools);
+    
+    if (web.enabled)
+        web.register_tool(tools);
+
+    //if (current_time.enabled)
     //delegator.register_tool(tools);
-    task_runner.register_tool(tools);
+
+    if (task_runner.enabled)
+        task_runner.register_tool(tools);
 
     // 
     if (history.empty()) 

@@ -74,8 +74,6 @@ void add_tool(json& tools, const std::string& name, const std::string& descripti
 class TOOL_SET_THINKING_MODE
 {
     public:
-        bool enabled = true; // Default state
-        
         void register_tool(json& tools);
         void handle_tool(ollama_system& chat, const std::string& name, const json& args, const std::string& tc_id);
 };
@@ -83,16 +81,12 @@ class TOOL_SET_THINKING_MODE
 class TOOL_GET_CURRENT_TIME
 {
     public:
-        bool enabled = true; // Default state
-        
         void register_tool(json& tools);
         void handle_tool(ollama_system& chat, const std::string& name, const json& args, const std::string& tc_id);
 };
 
 class TOOL_TIMER {
     public:
-        bool enabled = true; // Default state
-        
         std::map<std::string, TIMER_SIMPLE> active_timers;
 
         void register_tool(json& tools);
@@ -111,9 +105,7 @@ class TOOL_HUE
     private:
         HUE_LIGHT_CLASS hue;
 
-    public:
-        bool enabled = true; // Default state
-    
+    public:    
         void set_credentials(const std::string& ip, const std::string& key, const std::string& path);
 
         // New method to break the conversational loop by reminding the model it must use a tool
@@ -142,8 +134,6 @@ class TOOL_WEB_SEARCH
         }
 
     public:
-        bool enabled = true; // Default state
-
         std::string apiKey = "Enter_API_key_for_serpapi.com";
 
         void register_tool(json& tools);
@@ -187,9 +177,7 @@ class TOOL_TASK_RUNNER
          */
         bool iequals(const std::string& a, const std::string& b);
 
-    public:
-        bool enabled = true; // Default state
-    
+    public:    
         std::filesystem::path OLLI_DIRECTORY;    
 
         /**    
@@ -212,7 +200,6 @@ class TOOL_TASK_RUNNER
          */
         void monitor_tool(ollama_system& instance);
 };
-
 
 class OLLAMA_SYSTEM_PROPERTIES
 {
@@ -242,8 +229,6 @@ class ollama_system {
         json tools = json::array();
         std::chrono::steady_clock::time_point last_consolidation = std::chrono::steady_clock::now();
 
-    public:
-
         TOOL_GET_CURRENT_TIME current_time;
         TOOL_TIMER timer;
         TOOL_HUE hue;
@@ -251,6 +236,8 @@ class ollama_system {
         TOOL_WEB_SEARCH web;
         //TOOL_DELEGATOR delegator;
         TOOL_TASK_RUNNER task_runner;
+
+    public:
 
         void handle_instance_tools(KEYBOARD_INPUT& Keyboard_Input);
 
@@ -269,6 +256,7 @@ class ollama_system {
 
 
         OLLAMA_SYSTEM_PROPERTIES PROPS;
+        TOOL_PERMISSIONS_CLASS TOOL_PERMISSIONS;
 
         // Use Atomics for thread safety to avoid data races
         std::thread chat_thread;

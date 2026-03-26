@@ -16,6 +16,7 @@
 
 #include "system.h"
 #include "stringthings.h"
+#include "fled_time.h"
 
 // ----
 
@@ -131,6 +132,7 @@ class KEYBOARD_INPUT
     private:
 
         struct termios oldt, newt;
+        EFFICIANTCY_TIMER_EASY enter_ready;
 
         void getNextInteraction(std::filesystem::path& folderPath);
 

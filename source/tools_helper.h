@@ -11,6 +11,18 @@
 
 using json = nlohmann::json;
 
+class TOOL_PERMISSIONS_CLASS
+{
+    public:
+    bool CURRENT_TIME = false;
+    bool TIMER = false;
+    bool HUE = false;
+    bool THINKING = false;
+    bool WEB = false;
+    bool DELEGATOR = false;
+    bool TASK_RUNNER = false;
+};
+
 class TIMER_SIMPLE 
 {
     public:
@@ -34,6 +46,7 @@ struct TASK_SIMPLE
         std::string TASK_PHRASE = "";
         std::string TASK_PURPOSE = "";
         std::string TASK_DIRECTORY = "";
+        TOOL_PERMISSIONS_CLASS TOOL_PERMISSIONS;
         std::vector<std::string> COMMANDS;
         void clear();
 };

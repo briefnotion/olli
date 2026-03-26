@@ -20,6 +20,14 @@ int main() {
     chat.PROPS.hue_ip = setings_vars.tool_hue_lights_bridge_ip;
     chat.PROPS.hue_key = setings_vars.tool_hue_lights_apiKey;
 
+    chat.TOOL_PERMISSIONS.CURRENT_TIME = true;
+    chat.TOOL_PERMISSIONS.TIMER = true;
+    chat.TOOL_PERMISSIONS.HUE = true;
+    chat.TOOL_PERMISSIONS.THINKING = true;
+    chat.TOOL_PERMISSIONS.WEB = true;
+    chat.TOOL_PERMISSIONS.DELEGATOR = true;
+    chat.TOOL_PERMISSIONS.TASK_RUNNER = true;
+
     chat.PROPS.use_thinking = false;
     chat.PROPS.model = "qwen3:8b"; 
     chat.open();

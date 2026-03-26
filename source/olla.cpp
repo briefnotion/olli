@@ -772,11 +772,6 @@ void TOOL_TASK_RUNNER::handle_tool(
         return;
     }
 
-    cout << instance.PROPS.web_search_api_key << endl;
-    cout << instance.PROPS.hue_ip << endl;
-    cout << instance.PROPS.hue_key << endl;
-    cout << instance.PROPS.hue_path << endl;
-
     // ---------------------------------------------------------
     // 2. EXTRACT INPUT
     // Get the search phrase (the user's intent) from the JSON arguments.
@@ -811,8 +806,10 @@ void TOOL_TASK_RUNNER::handle_tool(
             instance.OLLAMA_OPENING = found_task.TASK_PURPOSE; // place for custoom opening if needed
 
         instance.PROPS.stream_output = false;
-        instance.task_runner.enabled = false;
-        instance.web.enabled = false;
+        instance.TOOL_PERMISSIONS = found_task.TOOL_PERMISSIONS;
+        
+        // NONE
+        
         instance.open(main_instance.PROPS);
 
         // Create directory if needed.
@@ -935,26 +932,82 @@ void ollama_system::handle_instance_tools(KEYBOARD_INPUT& Keyboard_Input)
         last_received.tool_calls.clear(); 
         
         for (auto& tc : pending_calls) {
-            if (tc.name == "get_current_time") {
-                current_time.handle_tool(*this, tc.name, tc.arguments, tc.id);
-            } else if (tc.name == "set_timer" || tc.name == "check_timer") {
-                timer.handle_tool(*this, tc.name, tc.arguments, tc.id);
-            } else if (tc.name == "set_hue_light" || tc.name == "list_hue_lights" || tc.name == "manage_hue_scenes") {
-                hue.handle_tool(*this, tc.name, tc.arguments, tc.id);
-            } else if (tc.name == "set_thinking_mode") {
-                thinking.handle_tool(*this, tc.name, tc.arguments, tc.id);
-            } else if (tc.name == "web_search" || tc.name == "fetch_website_content") {
-                web.handle_tool(*this, tc.name, tc.arguments, tc.id);
-            //} else if (tc.name == "consult_expert") {
-            //    delegator.handle_tool(*this, tc.name, tc.arguments, tc.id);
-            } else if (tc.name == "run_automation_task") {
-                auto new_instance_ptr = std::make_unique<ollama_system>();
-                ollama_system* raw_ptr = new_instance_ptr.get(); // Get the address before moving it
-                background_tasks.push_back(std::move(new_instance_ptr));
-                Keyboard_Input.PROPS.ENABLED = false; // Disable keyboard input for the task instance
-                task_runner.handle_tool(*this, *raw_ptr, tc.name, tc.arguments, tc.id);
-                Keyboard_Input.PROPS.ENABLED = true;
-            }else {
+            if (tc.name == "get_current_time") 
+            {
+                if (TOOL_PERMISSIONS.CURRENT_TIME)
+                    current_time.handle_tool(*this, tc.name, tc.arguments, tc.id);
+                else
+                {
+                    std::string error_msg = 
+                    "Error: Tool '" + tc.name + "' is not enabled.";
+                    send_tool_result(tc.id, error_msg);
+
+                }
+            } 
+            else if (tc.name == "set_timer" || tc.name == "check_timer") 
+            {
+                if (TOOL_PERMISSIONS.TIMER)
+                    timer.handle_tool(*this, tc.name, tc.arguments, tc.id);
+                else
+                {
+                    std::string error_msg = 
+                    "Error: Tool '" + tc.name + "' is not enabled.";
+                    send_tool_result(tc.id, error_msg);
+                }
+            }
+            else if (tc.name == "set_hue_light" || tc.name == "list_hue_lights" || tc.name == "manage_hue_scenes") 
+            {
+                if (TOOL_PERMISSIONS.HUE)
+                    hue.handle_tool(*this, tc.name, tc.arguments, tc.id);
+                else
+                {                   
+                    std::string error_msg = 
+                    "Error: Tool '" + tc.name + "' is not enabled.";
+                    send_tool_result(tc.id, error_msg);}
+            }
+            else if (tc.name == "set_thinking_mode") 
+            {
+                if (TOOL_PERMISSIONS.THINKING)
+                    thinking.handle_tool(*this, tc.name, tc.arguments, tc.id);
+                else
+                {
+                    std::string error_msg = 
+                    "Error: Tool '" + tc.name + "' is not enabled.";
+                    send_tool_result(tc.id, error_msg);
+                }
+            } 
+            else if (tc.name == "web_search" || tc.name == "fetch_website_content") 
+            {
+                if (TOOL_PERMISSIONS.WEB)
+                    web.handle_tool(*this, tc.name, tc.arguments, tc.id);
+                
+                else
+                {
+                    std::string error_msg = 
+                    "Error: Tool '" + tc.name + "' is not enabled.";
+                    send_tool_result(tc.id, error_msg);
+                }
+            } 
+            else if (tc.name == "run_automation_task") 
+            {
+                if (TOOL_PERMISSIONS.TASK_RUNNER)
+                {
+                    auto new_instance_ptr = std::make_unique<ollama_system>();
+                    ollama_system* raw_ptr = new_instance_ptr.get(); // Get the address before moving it
+                    background_tasks.push_back(std::move(new_instance_ptr));
+                    Keyboard_Input.PROPS.ENABLED = false; // Disable keyboard input for the task instance
+                    task_runner.handle_tool(*this, *raw_ptr, tc.name, tc.arguments, tc.id);
+                    Keyboard_Input.PROPS.ENABLED = true;
+                }
+                else
+                {
+                    std::string error_msg = 
+                    "Error: Tool '" + tc.name + "' is not enabled.";
+                    send_tool_result(tc.id, error_msg);
+                }
+            }
+            else 
+            {
                 // Build error message
                 std::string error_msg = 
                     "Error: Tool '" + tc.name + "' is not recognized by the system.";
@@ -980,25 +1033,25 @@ void ollama_system::open()
     PROPS.path_output = PROPS.OLLI_DIERCTORY / "output";
     PROPS.path_history = ".";
 
-    if (current_time.enabled)
+    if (TOOL_PERMISSIONS.CURRENT_TIME)
         current_time.register_tool(tools);
 
-    if (timer.enabled)
+    if (TOOL_PERMISSIONS.TIMER)
         timer.register_tool(tools); 
 
-    if (hue.enabled)
+    if (TOOL_PERMISSIONS.HUE)
         hue.register_tool(tools);
 
-    if (thinking.enabled)
+    if (TOOL_PERMISSIONS.THINKING)
         thinking.register_tool(tools);
     
-    if (web.enabled)
+    if (TOOL_PERMISSIONS.WEB)
         web.register_tool(tools);
 
-    //if (current_time.enabled)
+    //if (TOOL_PERMISSIONS.DELEGATOR)
     //delegator.register_tool(tools);
 
-    if (task_runner.enabled)
+    if (TOOL_PERMISSIONS.TASK_RUNNER)
         task_runner.register_tool(tools);
 
     // 
@@ -1461,14 +1514,19 @@ void ollama_system::process(KEYBOARD_INPUT& Keyboard_Input)
         std::cout << "You: " << std::flush;
     }
 
-
-    
     // ---------------------------------------------------------
     // PART 5: ACTIVE MONITORS
     // Continuous checks for time-based triggers or hardware state.
     // ---------------------------------------------------------
-    timer.monitor_tool(*this);   // Checks if timers have expired
-    hue.monitor_tool();         // Synchronizes light states
+    if (TOOL_PERMISSIONS.TIMER)
+        timer.monitor_tool(*this);   // Checks if timers have expired
+    if (TOOL_PERMISSIONS.HUE)
+        hue.monitor_tool();         // Synchronizes light states
+
+    // ---------------------------------------------------------
+    // PART 6: TTS OUTPUT
+    // If there's new text in the TTS buffer, write it to the output file for the TTS engine to read.
+    // ---------------------------------------------------------
     write_to_tts();        // Pushes new text to Speech engine
 }
 

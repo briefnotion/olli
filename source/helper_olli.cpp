@@ -317,16 +317,24 @@ void KEYBOARD_INPUT::keyboard_input()
     if (PROPS.ENABLED)
     {
         char ch;
+
+
         // read() will now return 0 if no character is waiting
         while (read(STDIN_FILENO, &ch, 1) > 0) 
         {
+            
+            double gap_time = enter_ready.elapsed_time();
+
             //std::cout << static_cast<int>(ch) << std::endl;
             if (ch == 10 || ch == 13 || ch == '\r') 
             {
                 LINE += '\n';
                 std::cout << "\r\n" << std::flush;
-                INTERRUPTED = true;
-                ENTER_PRESSED = true;
+                if (gap_time > 0.1)
+                {
+                    INTERRUPTED = true;
+                    ENTER_PRESSED = true;
+                }
             }
             else if ((ch == 127 || ch == 8)) 
             {
@@ -342,6 +350,9 @@ void KEYBOARD_INPUT::keyboard_input()
                 std::cout << ch << std::flush;
                 INTERRUPTED = true;
             }
+
+            
+            enter_ready.start_timer(); // Reset the timer on each key press
         }
 
         // or get text from voca

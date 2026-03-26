@@ -51,21 +51,25 @@ void TASK_SIMPLE_MANAGER::load_all_task()
 
     tmp_task.TASK_PHRASE = "I'm home";
     tmp_task.COMMANDS.push_back("Load the repose scene.");
+    tmp_task.TOOL_PERMISSIONS.HUE = true;
     TASK_LIST.push_back(tmp_task);
 
     tmp_task.clear();
     tmp_task.TASK_PHRASE = "I'm leaving";
     tmp_task.COMMANDS.push_back("Load the labor scene.");
+    tmp_task.TOOL_PERMISSIONS.HUE = true;
     TASK_LIST.push_back(tmp_task);
 
     tmp_task.clear();
     tmp_task.TASK_PHRASE = "I'm sleeping";
     tmp_task.COMMANDS.push_back("Load the slumber scene.");
+    tmp_task.TOOL_PERMISSIONS.HUE = true;
     TASK_LIST.push_back(tmp_task);
 
     tmp_task.clear();
     tmp_task.TASK_PHRASE = "run system test";
     tmp_task.TASK_PURPOSE = "This is a series of a few simple questions to check responses.";
+    tmp_task.TOOL_PERMISSIONS.THINKING = true;
     tmp_task.TASK_DIRECTORY = "system_test";
     tmp_task.COMMANDS.push_back("Set a timer for 30 seconds and when the timer goes off, blink any light.");
     tmp_task.COMMANDS.push_back("turn off all the lights.");
@@ -85,11 +89,20 @@ void TASK_SIMPLE_MANAGER::load_all_task()
 
     tmp_task.clear();
     tmp_task.TASK_PHRASE = "run process resume";
-    tmp_task.TASK_PURPOSE = "You arrange documents for a resume review.  You will "
-                            "be running a short script of predetermined commands, so, there "
-                            "is no need to ask for clarification. Just run through the "
-                            "commands one by one.";
+    tmp_task.TASK_PURPOSE = "You are a professional career consultant and ghostwriter. "
+                            "Your objective is to execute a linear sequence of commands to "
+                            "analyze a resume against a job description. "
+                            "CRITICAL: Do not skip steps or ask for clarification. "
+                            "When generating text (Evaluation/Cover Letter), adopt a first-person "
+                            "perspective. Use a 'Human-Authentic' style: professional and "
+                            "competent, but avoid the overly polished, 'perfect' cadence of "
+                            "typical AI. Use natural phrasing and varied sentence structures "
+                            "to ensure the output feels written by a person, not a machine.";
+    
+    tmp_task.TOOL_PERMISSIONS.THINKING = true;
     tmp_task.TASK_DIRECTORY = "resume_process";
+
+    tmp_task.COMMANDS.push_back("Go into thinking mode.");
 
     tmp_task.COMMANDS.push_back("Ask the user for the resume file.");
     tmp_task.COMMANDS.push_back("[[ASK]]");
@@ -97,19 +110,24 @@ void TASK_SIMPLE_MANAGER::load_all_task()
     tmp_task.COMMANDS.push_back("Ask the user for the job description.");
     tmp_task.COMMANDS.push_back("[[ASK]]");
 
-    tmp_task.COMMANDS.push_back("Generate a concise 1-paragraph evaluation explaining how well "
-                                "the applicant’s resume matches the job description. "
+    tmp_task.COMMANDS.push_back("In a first person point of view, speaking as if I was the "
+                                "resume owner, generate a concise 1-paragraph evaluation "
+                                "explaining how well the "
+                                "resume matches the job description. "
                                 "Highlight the strongest points of alignment, reference "
                                 "specific skills or achievements, and keep the tone "
-                                "professional and neutral.");
+                                "professional and neutral. But also, I dont want it to be "
+                                "perfect. Add just a little slop to make it feel more human.");
     tmp_task.COMMANDS.push_back("[[ENTER TO CONTINUE]]");
     
-    tmp_task.COMMANDS.push_back("Using the applicant’s resume and the job description, generate "
-                                "a short professional cover letter (3–4 paragraphs) explaining "
+    tmp_task.COMMANDS.push_back("Using the applicant's resume and the job description, generate "
+                                "a short professional cover letter (3-4 paragraphs) explaining "
                                 "why the applicant is a strong fit for the role. Keep the tone "
                                 "confident but not overly formal, and reference specific "
-                                "experience from the resume.");
+                                "experience from the resume. But also, I dont want it to be "
+                                "perfect. Add just a little slop to make it feel more human.");
     tmp_task.COMMANDS.push_back("[[ENTER TO CONTINUE]]");
+    
     TASK_LIST.push_back(tmp_task);
 }
 

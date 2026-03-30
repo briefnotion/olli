@@ -49,23 +49,6 @@ void TASK_SIMPLE_MANAGER::load_all_task()
 {
     TASK_SIMPLE tmp_task;
 
-    tmp_task.TASK_PHRASE = "I'm home";
-    tmp_task.COMMANDS.push_back("Load the repose scene.");
-    tmp_task.TOOL_PERMISSIONS.HUE = true;
-    TASK_LIST.push_back(tmp_task);
-
-    tmp_task.clear();
-    tmp_task.TASK_PHRASE = "I'm leaving";
-    tmp_task.COMMANDS.push_back("Load the labor scene.");
-    tmp_task.TOOL_PERMISSIONS.HUE = true;
-    TASK_LIST.push_back(tmp_task);
-
-    tmp_task.clear();
-    tmp_task.TASK_PHRASE = "I'm sleeping";
-    tmp_task.COMMANDS.push_back("Load the slumber scene.");
-    tmp_task.TOOL_PERMISSIONS.HUE = true;
-    TASK_LIST.push_back(tmp_task);
-
     tmp_task.clear();
     tmp_task.TASK_PHRASE = "run system test";
     tmp_task.TASK_PURPOSE = "This is a series of a few simple questions to check responses.";

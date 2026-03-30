@@ -13,6 +13,7 @@
 #include "httplib.h"
 #include <nlohmann/json.hpp>
 
+#include "system.h"
 #include "helper_olli.h"
 #include "tools_helper.h"
 #include "stringthings.h"
@@ -295,7 +296,8 @@ class ollama_system {
 
         void write_to_tts();
 
-        void input(KEYBOARD_INPUT& Key_Input);
+        bool jump_input(CLASS_SYSTEM& System);
+        void input(CLASS_SYSTEM& System);
         
         void process(KEYBOARD_INPUT& Keyboard_Input);
 

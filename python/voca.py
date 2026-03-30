@@ -47,9 +47,10 @@ INTERACTIONS_DIR = os.path.join(OLLI_DIR, "input")
 STATUS_FILE = os.path.join(OLLI_DIR, "voca_status.json")
 COMMAND_FILE = os.path.join(OLLI_DIR, "voca_command.json")
 
-WAKE_PHRASES = ["start listening", "started listening", "start listener", "star listening"] 
-SLEEP_PHRASE = "stop listening"
-INTERRUPT_PHRASE = "stop talking"
+WAKE_PHRASES = ["hey voca", "hey voka", "hey boca", "hey vocer", "hey volca", "hey vocaah", "voca", "voka"]
+SLEEP_PHRASES = ["sleep voca", "sleep voka", "sleep boca", "voca rest", "voka rest", "voca stop", "voka stop"]
+INTERRUPT_PHRASES = ["stop talking", "stop speaking", "stop now"]
+
 AUTO_SLEEP_TIMEOUT = 300  # 5 minutes
 CLEANUP_INTERVAL = 3600   # Check for old files every hour
 
@@ -220,7 +221,8 @@ class VocaNode:
 
                 # 1. INTERRUPT CHECK
                 if self.is_busy:
-                    if INTERRUPT_PHRASE in clean_text:
+                    found_phrase = next((p for p in INTERRUPT_PHRASES if p in clean_text), None)
+                    if found_phrase:
                         print(f"\n{C_RED}[INTERRUPT]{C_RESET} Signaling host...")
                         self.save_transcription(full_text, is_interrupt=True)
                     continue
@@ -245,7 +247,8 @@ class VocaNode:
                         continue
                 
                 # 3. SLEEP PHRASE CHECK
-                if SLEEP_PHRASE in clean_text:
+                found_phrase = next((p for p in SLEEP_PHRASES if p in clean_text), None)
+                if found_phrase:
                     make_beep(440, 0.1)
                     self.is_awake = False
                     print(f"\n{C_YELLOW}[SLEEP]{C_RESET} Manual sleep.")

@@ -12,6 +12,10 @@
 #include "fled_time.h"
 #include "threading.h"
 
+#define DEF_VOCA_SLEEP  0
+#define DEF_VOCA_PAUSE  1
+#define DEF_VOCA_LISTEN 2
+
 /**
  * @file audio_control.h
  * @brief Header file for audio control functionality.
@@ -84,6 +88,8 @@ class AUDIO_CONTROL_CLASS
 
         TIMED_IS_READY  RESUME_TIMER;
 
+        int VOCA_REQUESTED_CHANGE = -1;
+
         /**
          * @brief Templated function to check and load configuration from JSON file.
          * @tparam T The type of configuration struct to load.
@@ -148,12 +154,17 @@ class AUDIO_CONTROL_CLASS
             }
         }
 
+        void VOCA_set(double Time, int Command);
         void adjust_audio_files(double Time);
 
     public:
         bool RUN = false;
 
-        AUDIO_CONTROL_CLASS(const std::filesystem::path& filePath);
+        AUDIO_CONTROL_CLASS();
+
+        void create(const std::filesystem::path& filePath);
+
+        void VOCA_manual_set(int Command);
 
         void thread_main();
 

@@ -8,17 +8,16 @@
 
 
 int main() {
-    //CLASS_SYSTEM system;
+    CLASS_SYSTEM system;
 
     ollama_system chat;
     
-    Settings setings_vars;
-    setings_vars.load_settings();
+    system.setings_vars.load_settings();
     
-    chat.PROPS.OLLI_DIERCTORY = setings_vars.get_settings_path();
-    chat.PROPS.web_search_api_key = setings_vars.tool_web_search_apiKey;
-    chat.PROPS.hue_ip = setings_vars.tool_hue_lights_bridge_ip;
-    chat.PROPS.hue_key = setings_vars.tool_hue_lights_apiKey;
+    chat.PROPS.OLLI_DIERCTORY = system.setings_vars.get_settings_path();
+    chat.PROPS.web_search_api_key = system.setings_vars.tool_web_search_apiKey;
+    chat.PROPS.hue_ip = system.setings_vars.tool_hue_lights_bridge_ip;
+    chat.PROPS.hue_key = system.setings_vars.tool_hue_lights_apiKey;
 
     chat.TOOL_PERMISSIONS.CURRENT_TIME = true;
     chat.TOOL_PERMISSIONS.TIMER = true;
@@ -32,14 +31,13 @@ int main() {
     chat.PROPS.model = "qwen3:8b"; 
     chat.open();
 
-    AUDIO_CONTROL_CLASS audio_control(setings_vars.get_settings_path());
-    audio_control.thread_start();
+    system.audio_control.create(system.setings_vars.get_settings_path());
+    system.audio_control.thread_start();
 
     //
-    KEYBOARD_INPUT key_input;
-    key_input.PROPS.path_input = setings_vars.get_settings_path() / "input";
-    key_input.PROPS.lira_control_file = setings_vars.get_settings_path() / "lira_control.json";
-    key_input.PROPS.ENABLED = true;
+    system.key_input.PROPS.path_input = system.setings_vars.get_settings_path() / "input";
+    system.key_input.PROPS.lira_control_file = system.setings_vars.get_settings_path() / "lira_control.json";
+    system.key_input.PROPS.ENABLED = true;
 
     //
     std::cout << "\n--- Chat Started (Type 'bye' or 'quit' or 'Goodbye.' to stop) ---\n" << std::endl;
@@ -52,19 +50,19 @@ int main() {
         // 1. Non-blocking check for user input
 
         // process text from keyboard
-        key_input.keyboard_input();
+        system.key_input.keyboard_input();
 
-        chat.input(key_input);
-        chat.process(key_input);
-        chat.consolidate_check(key_input);
+        chat.input(system);
+        chat.process(system.key_input);
+        chat.consolidate_check(system.key_input);
 
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
 
     std::cout << "\n--- Chat Ended ---" << std::endl;
 
-    audio_control.thread_stop();
-    setings_vars.save_settings();
+    system.audio_control.thread_stop();
+    system.setings_vars.save_settings();
 
     return 0;
 }

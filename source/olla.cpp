@@ -722,13 +722,16 @@ bool TOOL_TASK_RUNNER::iequals(const std::string& a, const std::string& b) {
 /**
  * @brief Registers the task execution tool to the chat instance.
  */
-void TOOL_TASK_RUNNER::register_tool(json& tools) {
+void TOOL_TASK_RUNNER::register_tool(json& tools) 
+{
+    // ...
+
     json task_params = {
         {"type", "object"},
         {"properties", {
             {"intent_phrase", {
                 {"type", "string"}, 
-                {"description", "The specific phrase or intent identified (e.g.,  'I'm leaving', 'I'm home', 'I'm sleeping', 'run system test', 'run process resume')."}
+                {"description", "The specific phrase or intent identified (e.g.,  'run system test', 'run process resume')."}
             }}
         }},
         {"required", {"intent_phrase"}}
@@ -1404,13 +1407,75 @@ void ollama_system::write_to_tts()
     }
 }
 
-void ollama_system::input(KEYBOARD_INPUT& Key_Input)
+bool ollama_system::jump_input(CLASS_SYSTEM& System)
+{
+    if (trim(System.key_input.LINE) == "bye" || trim(System.key_input.LINE) == "quit" || trim(System.key_input.LINE) == "Goodbye.")
+    {
+        System.key_input.reset();
+        running = false;
+        if (is_processing) stop();
+        if (chat_thread.joinable()) chat_thread.join();
+        return true;
+    }
+    else if (trim(System.key_input.LINE) == "I'm home." || trim(System.key_input.LINE) == "I'm leaving." || trim(System.key_input.LINE) == "I'm sleeping.")
+    {
+        ollama_system jump_instance;
+
+        jump_instance.OLLAMA_OPENING = "Run any task given without question or hesitation. "
+                                        "Responses or input from user will not be capable.";
+
+        jump_instance.PROPS.stream_output = false;
+
+        // ----
+        cout << "[JUMP] " << flush;
+
+        if (trim(System.key_input.LINE) == "I'm home.")
+        {
+            cout << "[I'm home.] " << flush;
+            System.audio_control.VOCA_manual_set(DEF_VOCA_SLEEP);
+            jump_instance.TOOL_PERMISSIONS.HUE = true;
+            jump_instance.open(PROPS);
+            jump_instance.send("Load the repose scene.");
+            jump_instance.process(System.key_input);
+        }
+        else if (trim(System.key_input.LINE) == "I'm leaving.")
+        {
+            cout << "[I'm leaving.] " << flush;
+            System.audio_control.VOCA_manual_set(DEF_VOCA_SLEEP);
+            jump_instance.TOOL_PERMISSIONS.HUE = true;
+            jump_instance.open(PROPS);
+            jump_instance.send("Load the labor scene.");
+            jump_instance.process(System.key_input);
+        }
+        else if (trim(System.key_input.LINE) == "I'm sleeping.")
+        {
+            cout << "[I'm sleeping.] " << flush;
+            System.audio_control.VOCA_manual_set(DEF_VOCA_SLEEP);
+            jump_instance.TOOL_PERMISSIONS.HUE = true;
+            jump_instance.open(PROPS);
+            jump_instance.send("Load the slumber scene.");
+            jump_instance.process(System.key_input);
+        }
+
+        cout << "[JUMP EXIT]" << endl;
+
+        System.key_input.reset();
+        
+        return true;
+    }
+    else
+    {
+        return false;
+    }
+}
+
+void ollama_system::input(CLASS_SYSTEM& System)
 {
 
-    if (is_processing && Key_Input.INTERRUPTED) 
+    if (is_processing && System.key_input.INTERRUPTED) 
     {
         std::cout<< "." << std::flush;
-        Key_Input.reset();
+        System.key_input.reset();
         // If the assistant is currently talking and we get NEW input, 
         // we trigger the interrupt.
         stop();
@@ -1419,20 +1484,19 @@ void ollama_system::input(KEYBOARD_INPUT& Key_Input)
         std::cout << "\n[Interrupting for new input...]" << std::endl;
     }
 
-    if (Key_Input.ENTER_PRESSED) {
-        if (trim(Key_Input.LINE) == "bye" || trim(Key_Input.LINE) == "quit" || trim(Key_Input.LINE) == "Goodbye.") {
-            Key_Input.reset();
-            running = false;
-            if (is_processing) stop();
-            if (chat_thread.joinable()) chat_thread.join();
+    if (System.key_input.ENTER_PRESSED) 
+    {
+        if (jump_input(System)) 
+        {
+
         }
         else 
         {
             status.interrupt_signal = false;
             // Process the user message in a background thread
             is_processing = true;
-            std::string tmp_line = Key_Input.LINE;
-            Key_Input.reset();
+            std::string tmp_line = System.key_input.LINE;
+            System.key_input.reset();
             bool tmp_is_processing = is_processing;
             // Capture chat by reference, user_input by value, and is_processing by reference
             chat_thread = std::thread([this, tmp_line, &tmp_is_processing]() 

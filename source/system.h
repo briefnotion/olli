@@ -3,14 +3,18 @@
 
 #include <string>
 
+#include "helper_olli.h"
+#include "audio_control.h"
+
 class CLASS_SYSTEM
 {
   private:
 
   public:
 
-  //std::string folder_interactios = "/home/delmanel/olli_files/input";
-  //std::string folder_working = "./working";
+    Settings setings_vars;
+    KEYBOARD_INPUT key_input;
+    AUDIO_CONTROL_CLASS audio_control;
 };
 
 #endif

@@ -18,7 +18,8 @@
 #include "helper_olli.h"
 //#include "tools.h"
 #include "stringthings.h"
-#include "audio_control.h"
+//#include "audio_control.h"
+#include "sidetrack.h"
 
 using json = nlohmann::json;
 

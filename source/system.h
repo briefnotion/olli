@@ -8,13 +8,13 @@
 
 class CLASS_SYSTEM
 {
-  private:
+    private:
 
-  public:
+    public:
+        Settings setings_vars;
+        KEYBOARD_INPUT key_input;
 
-    Settings setings_vars;
-    KEYBOARD_INPUT key_input;
-    AUDIO_CONTROL_CLASS audio_control;
+        AUDIO_CONTROL_CLASS audio_control;
 };
 
 #endif

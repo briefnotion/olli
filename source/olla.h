@@ -280,7 +280,8 @@ class ollama_system {
         void open();
         void open(OLLAMA_SYSTEM_PROPERTIES Properties);
         
-        void integrate_tool_result(const std::string& raw_result);
+        string gather_history();
+        void integrate_tool_result(std::string Special_Instruction, const std::string& raw_result);
         void send(const std::string& user_input, const std::string& role = "user");
         void send_tool_result(const std::string& tool_call_id, const std::string& result);
 

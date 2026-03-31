@@ -107,7 +107,7 @@ void TOOL_GET_CURRENT_TIME::handle_tool(ollama_system& chat, const std::string& 
         chat.send_tool_result(tc_id, "System Time: " + current_time_str);
 
         // 2. INTEGRATION: Ask the instance to wrap this in persona
-        chat.integrate_tool_result("Current Time is " + current_time_str);
+        chat.integrate_tool_result("", "Current Time is " + current_time_str);
     }
 }
 
@@ -166,14 +166,14 @@ void TOOL_TIMER::handle_tool(ollama_system& chat, const std::string& name, const
         chat.send_tool_result(tc_id, res);
 
         // 2. Persona Integration
-        chat.integrate_tool_result(res);
+        chat.integrate_tool_result("", res);
     }
     else if (name == "check_timer") {
         std::string label = args["label"];
         if (active_timers.find(label) == active_timers.end()) {
             std::string err = "Error: No timer found with label '" + label + "'.";
             chat.send_tool_result(tc_id, err);
-            chat.integrate_tool_result(err);
+            chat.integrate_tool_result("", err);
             return;
         }
         bool finished = active_timers[label].isFinished();
@@ -186,7 +186,7 @@ void TOOL_TIMER::handle_tool(ollama_system& chat, const std::string& name, const
         }
         std::string res = ss.str();
         chat.send_tool_result(tc_id, res);
-        chat.integrate_tool_result(res);
+        chat.integrate_tool_result("", res);
     }
 }
 
@@ -214,7 +214,7 @@ void TOOL_TIMER::monitor_tool(ollama_system& chat) {
                 std::cout << "[Event] Triggering persona alert: " << label << std::endl;
                 
                 // Integrate via persona to maintain conversation flow
-                chat.integrate_tool_result(event_msg);
+                chat.integrate_tool_result("", event_msg);
 
                 // Remove the finished timer
                 it = active_timers.erase(it);
@@ -281,7 +281,7 @@ void TOOL_HUE::handle_tool(ollama_system& chat, const std::string& name, const j
         if(!hue.refresh_lights()) {
             std::string err = "Error: Could not reach the Hue Bridge.";
             chat.send_tool_result(tc_id, err);
-            chat.integrate_tool_result(err);
+            chat.integrate_tool_result("", err);
             return;
         }
         auto& lights = hue.get_cached_lights();
@@ -293,7 +293,7 @@ void TOOL_HUE::handle_tool(ollama_system& chat, const std::string& name, const j
         }
         std::string result = ss.str();
         chat.send_tool_result(tc_id, result);
-        chat.integrate_tool_result(result);
+        chat.integrate_tool_result("", result);
     } 
     else if (name == "manage_hue_scenes") {
         std::string action = args.at("action").get<std::string>();
@@ -304,20 +304,20 @@ void TOOL_HUE::handle_tool(ollama_system& chat, const std::string& name, const j
             if (scenes.empty()) {
                 std::string msg = "No local scenes saved.";
                 chat.send_tool_result(tc_id, msg);
-                chat.integrate_tool_result(msg);
+                chat.integrate_tool_result("", msg);
             } else {
                 std::stringstream ss;
                 ss << "Saved Scenes: ";
                 for (auto const& [sname, scene] : scenes) ss << scene.name << ", ";
                 std::string result = ss.str();
                 chat.send_tool_result(tc_id, result);
-                chat.integrate_tool_result(result);
+                chat.integrate_tool_result("", result);
             }
         } else {
             if (scene_name.empty()) {
                 std::string err = "Error: Scene name required for " + action;
                 chat.send_tool_result(tc_id, err);
-                chat.integrate_tool_result(err);
+                chat.integrate_tool_result("", err);
                 return;
             }
             std::string res;
@@ -326,7 +326,7 @@ void TOOL_HUE::handle_tool(ollama_system& chat, const std::string& name, const j
             else if (action == "remove") res = hue.remove_scene(scene_name);
             
             chat.send_tool_result(tc_id, res);
-            chat.integrate_tool_result("Scene " + action + " operation: " + res);
+            chat.integrate_tool_result("", "Scene " + action + " operation: " + res);
         }
     }
     else if (name == "set_hue_light") {
@@ -388,7 +388,7 @@ void TOOL_HUE::handle_tool(ollama_system& chat, const std::string& name, const j
 
         std::string summary = "Light command for " + target + " processed. Result: " + res;
         chat.send_tool_result(tc_id, summary);
-        chat.integrate_tool_result(summary);
+        chat.integrate_tool_result("", summary);
     }
 }
 
@@ -559,7 +559,7 @@ void TOOL_WEB_SEARCH::handle_tool(ollama_system& chat, const std::string& name, 
         if (!args.contains("query")) {
             std::string err = "Error: Missing query.";
             chat.send_tool_result(tc_id, err);
-            chat.integrate_tool_result(err);
+            chat.integrate_tool_result("", err);
             return;
         }
         std::string query = args.at("query").get<std::string>();
@@ -569,13 +569,13 @@ void TOOL_WEB_SEARCH::handle_tool(ollama_system& chat, const std::string& name, 
         chat.send_tool_result(tc_id, result);
         
         // Persona response
-        chat.integrate_tool_result("Search results for '" + query + "': " + result);
+        chat.integrate_tool_result("", "Search results for '" + query + "': " + result);
     } 
     else if (name == "fetch_website_content") {
         if (!args.contains("url")) {
             std::string err = "Error: Missing URL.";
             chat.send_tool_result(tc_id, err);
-            chat.integrate_tool_result(err);
+            chat.integrate_tool_result("", err);
             return;
         }
         std::string url = args.at("url").get<std::string>();
@@ -585,7 +585,7 @@ void TOOL_WEB_SEARCH::handle_tool(ollama_system& chat, const std::string& name, 
         chat.send_tool_result(tc_id, "Cleaned Page Content from " + url + ":\n" + result);
         
         // Persona response
-        chat.integrate_tool_result("I have fetched and processed the content from " + url + ". Here is the information retrieved: " + result);
+        chat.integrate_tool_result("", "I have fetched and processed the content from " + url + ". Here is the information retrieved: " + result);
     }
     else {
         chat.send_tool_result(tc_id, "Error: Unknown tool.");
@@ -867,28 +867,10 @@ void TOOL_TASK_RUNNER::handle_tool(
             //std::cout << "AI Result: " << instance.last_received.response << std::endl;
         }
 
-        // C. GATHER RESULTS FROM HISTORY
-        // We compile all 'assistant' responses generated since we started the loop.
-        std::stringstream task_report;
-        task_report << "### [AUTOMATION REPORT: " << found_task.TASK_PHRASE << "] ###\n";
-        
-        bool gathered_any = false;
-        for (size_t i = 0; i < instance.history.size(); ++i) {
-            const auto& msg = instance.history[i];
-            if (msg.role == "assistant") {
-                task_report << "- " << msg.content << "\n";
-                gathered_any = true;
-            }
-        }
-
-        if (!gathered_any) {
-            task_report << "(Task completed. No status messages recorded.)";
-        }
-
         {
             success_log = "SUCCESS: Automation Complete";
             main_instance.send_tool_result(call_id, success_log);
-            main_instance.integrate_tool_result(task_report.str());
+            main_instance.integrate_tool_result("", instance.gather_history());
         }
 
         if (running_directory) 
@@ -906,7 +888,7 @@ void TOOL_TASK_RUNNER::handle_tool(
         std::string error_msg = "ERROR: No automation found for '" + intent_phrase + "'.";
         
         main_instance.send_tool_result(call_id, error_msg);
-        main_instance.integrate_tool_result(error_msg);
+        main_instance.integrate_tool_result("", error_msg);
     }
 }
 
@@ -1071,12 +1053,34 @@ void ollama_system::open(OLLAMA_SYSTEM_PROPERTIES Properties)
     open();
 }
 
+
+string ollama_system::gather_history()
+{
+    std::stringstream task_report;
+    task_report << "### [REPORT] ###\n";
+    
+    bool gathered_any = false;
+    for (size_t i = 0; i < history.size(); ++i) {
+        const auto& msg = history[i];
+        if (msg.role == "assistant") {
+            task_report << "- " << msg.content << "\n";
+            gathered_any = true;
+        }
+    }
+
+    if (!gathered_any) {
+        task_report << "(Task completed. Nothing recorded.)";
+    }
+
+    //cout << task_report.str() << endl; // Log the report for debugging
+    return task_report.str();
+}
+
 /**
- * NEW: INTEGRATE_TOOL_RESULT
  * This function takes raw tool data and asks the model to "speak" it 
  * in the context of the current conversation/persona.
  */
-void ollama_system::integrate_tool_result(const std::string& raw_result) 
+void ollama_system::integrate_tool_result(std::string Special_Instruction, const std::string& raw_result) 
 {
     //  Why this is the "Road Less Trodden"
 
@@ -1120,8 +1124,17 @@ void ollama_system::integrate_tool_result(const std::string& raw_result)
             "[DIRECTOR_NOTE]\n"
             "The following raw data was just retrieved: '" + raw_result + "'.\n"
             "TASK: Acknowledge this info as the Assistant. Stay in persona.\n"
-            "CONSTRAINTS: Be concise. No technical jargon. Do NOT say 'The system found' or 'Rewriting data'.\n"
+            "CONSTRAINTS: Be concise. No technical jargon. Do NOT say 'The system found' or 'Rewriting data'.\n";
+
+        if (!Special_Instruction.empty()) 
+        {
+            prompt += Special_Instruction + "\n";
+        }
+        else
+        {
+            prompt += 
             "Begin speaking now:";
+        }
 
         // 2. We use "system" here. 
         // This prevents the "What was the last thing I said?" confusion 
@@ -1417,7 +1430,12 @@ bool ollama_system::jump_input(CLASS_SYSTEM& System)
         if (chat_thread.joinable()) chat_thread.join();
         return true;
     }
-    else if (trim(System.key_input.LINE) == "I'm home." || trim(System.key_input.LINE) == "I'm leaving." || trim(System.key_input.LINE) == "I'm sleeping.")
+    else if (trim(System.key_input.LINE) == "I'm home." || 
+                trim(System.key_input.LINE) == "I'm awake." || 
+                trim(System.key_input.LINE) == "Lights on." || 
+                trim(System.key_input.LINE) == "I'm leaving." || 
+                trim(System.key_input.LINE) == "Lights off." || 
+                trim(System.key_input.LINE) == "I'm sleeping.")
     {
         ollama_system jump_instance;
 
@@ -1428,10 +1446,16 @@ bool ollama_system::jump_input(CLASS_SYSTEM& System)
 
         // ----
         cout << "[JUMP] " << flush;
+        cout << "[" << System.key_input.LINE << "] " << std::endl;
 
-        if (trim(System.key_input.LINE) == "I'm home.")
+        // ----
+        // This needs compartmentalization and definable configuration.
+        // ----
+
+        if (trim(System.key_input.LINE) == "I'm home." || 
+            trim(System.key_input.LINE) == "I'm awake." || 
+            trim(System.key_input.LINE) == "Lights on.")
         {
-            cout << "[I'm home.] " << flush;
             System.audio_control.VOCA_manual_set(DEF_VOCA_SLEEP);
             jump_instance.TOOL_PERMISSIONS.HUE = true;
             jump_instance.open(PROPS);
@@ -1440,16 +1464,15 @@ bool ollama_system::jump_input(CLASS_SYSTEM& System)
         }
         else if (trim(System.key_input.LINE) == "I'm leaving.")
         {
-            cout << "[I'm leaving.] " << flush;
             System.audio_control.VOCA_manual_set(DEF_VOCA_SLEEP);
             jump_instance.TOOL_PERMISSIONS.HUE = true;
             jump_instance.open(PROPS);
             jump_instance.send("Load the labor scene.");
             jump_instance.process(System.key_input);
         }
-        else if (trim(System.key_input.LINE) == "I'm sleeping.")
+        else if (trim(System.key_input.LINE) == "I'm sleeping." || 
+                    trim(System.key_input.LINE) == "Lights off." )
         {
-            cout << "[I'm sleeping.] " << flush;
             System.audio_control.VOCA_manual_set(DEF_VOCA_SLEEP);
             jump_instance.TOOL_PERMISSIONS.HUE = true;
             jump_instance.open(PROPS);
@@ -1457,7 +1480,7 @@ bool ollama_system::jump_input(CLASS_SYSTEM& System)
             jump_instance.process(System.key_input);
         }
 
-        cout << "[JUMP EXIT]" << endl;
+        integrate_tool_result("Describe what happened.", gather_history());
 
         System.key_input.reset();
         

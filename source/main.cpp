@@ -11,6 +11,7 @@ int main() {
     CLASS_SYSTEM system;
 
     ollama_system chat;
+    SIDETRACK_CLASS sidetrack;
     
     system.setings_vars.load_settings();
     

@@ -1446,7 +1446,7 @@ bool ollama_system::jump_input(CLASS_SYSTEM& System)
 
         // ----
         cout << "[JUMP] " << flush;
-        cout << "[" << System.key_input.LINE << "] " << std::endl;
+        cout << "[" << trim(System.key_input.LINE) << "] " << std::endl;
 
         // ----
         // This needs compartmentalization and definable configuration.
@@ -1480,8 +1480,7 @@ bool ollama_system::jump_input(CLASS_SYSTEM& System)
             jump_instance.process(System.key_input);
         }
 
-        integrate_tool_result("Describe what happened.", gather_history());
-
+        //integrate_tool_result("Describe what happened.", gather_history());
         System.key_input.reset();
         
         return true;

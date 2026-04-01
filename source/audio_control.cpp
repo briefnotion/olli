@@ -3,7 +3,7 @@
 
 #include "audio_control.h"
 
-void AUDIO_CONTROL_CLASS::VOCA_set(double Time, int Command)
+void AUDIO_CONTROL_CLASS::VOCA_set(int Command)
 {
     switch (Command)
     {
@@ -12,11 +12,9 @@ void AUDIO_CONTROL_CLASS::VOCA_set(double Time, int Command)
             break;
         case DEF_VOCA_PAUSE:
             VOCA_COMMAND_SETTINGS.command = "pause";
-            RESUME_TIMER.set(Time, 60000);
             break;
         case DEF_VOCA_LISTEN:
             VOCA_COMMAND_SETTINGS.command = "listen";
-            RESUME_TIMER.set(Time, 30000);
             break;
         default:
             std::cerr << "Invalid VOCA command: " << Command << std::endl;
@@ -27,28 +25,88 @@ void AUDIO_CONTROL_CLASS::VOCA_set(double Time, int Command)
 
 void AUDIO_CONTROL_CLASS::adjust_audio_files(double Time)
 {
-    checkAndLoadFile(settings_path / "voca_status.json", VOCA_lastKnownTime, VOCA_SETTINGS);
+    /*
+    VOCA Status's
 
-    if (checkAndLoadFile(settings_path / "lira_control.json", LIRA_lastKnownTime, LIRA_SETTINGS)) 
+        SLEEP
+        VOCA Sleeping   VOCA_SETTINGS.is_awake = false
+        LISTEN
+        Voca Listening  VOCA_SETTINGS.is_awake = true
+            
+        PAUSE
+
+    LIRA Status's
+
+        INTERRUPT
+        LIRA Interrupt   LIRA_SETTINGS.interrupt = true     
+        SPEAKING
+        LIRA Speaking    LIRA_SETTINGS.is_speaking = true   
+    */
+
+    VOCA_STATUS_CHANGED = checkAndLoadFile(settings_path / "voca_status.json", VOCA_lastKnownTime, VOCA_SETTINGS);
+    LIRA_STATUS_CHANGED = checkAndLoadFile(settings_path / "lira_control.json", LIRA_lastKnownTime, LIRA_SETTINGS);
+
+    // Wake command recieved from VOCA status.
+    if (CONTROL_AWAKE == false)
     {
-        if (LIRA_SETTINGS.is_speaking)
+        if (VOCA_SETTINGS.is_awake)
         {
-            VOCA_set(Time, DEF_VOCA_PAUSE);
-        }
-        else
-        {
-            VOCA_set(Time, DEF_VOCA_LISTEN);
+            //cout << "CONTROL_AWAKE = true          " << Time <<endl;
+            CONTROL_AWAKE = true;
+            VOCA_STATUS_CHANGED = false;
+
+            AUDIO_TIMER.set(Time, 10000);
         }
     }
 
-    if (VOCA_SETTINGS.is_awake && RESUME_TIMER.is_ready(Time))
+    // Sleep command recieved from VOCA status.
+    if (CONTROL_AWAKE == true)
     {
-        VOCA_set(Time, DEF_VOCA_SLEEP);
+        if (VOCA_STATUS_CHANGED && VOCA_SETTINGS.is_awake == false)
+        {
+            //cout << "CONTROL_SLEEPING = true" << endl;
+            CONTROL_AWAKE = false;
+            VOCA_STATUS_CHANGED = false;
+        }
     }
 
+    //  If LIRA starts speaking, then we pause VOCA. If LIRA stops speaking, then we set VOCA to listen.
+    if (CONTROL_AWAKE)
+    {
+        if (LIRA_STATUS_CHANGED && LIRA_SETTINGS.is_speaking)
+        {
+            //cout << "VOCA_set(Time, DEF_VOCA_PAUSE)" << endl;
+            VOCA_set(DEF_VOCA_PAUSE);
+            LIRA_STATUS_CHANGED = false;
+        }
+
+        if (LIRA_STATUS_CHANGED && LIRA_SETTINGS.is_speaking == false)
+        {
+            //cout << "VOCA_set(Time, DEF_VOCA_LISTEN)" << endl;
+            VOCA_set(DEF_VOCA_LISTEN);
+            LIRA_STATUS_CHANGED = false;
+
+            AUDIO_TIMER.set(Time, 10000);
+        }
+    }
+
+    // Timer Control.
+    if (AUDIO_TIMER.is_ready(Time))
+    {
+        if (CONTROL_AWAKE)
+        {
+            if (LIRA_SETTINGS.is_speaking == false)
+            {
+                //cout << "Timer Control: Setting VOCA to Sleep" << endl;
+                VOCA_set(DEF_VOCA_SLEEP);
+            }
+        }
+    }
+
+    // Manual override control from user input.
     if (VOCA_REQUESTED_CHANGE > -1)
     {
-        VOCA_set(Time, VOCA_REQUESTED_CHANGE);
+        VOCA_set(VOCA_REQUESTED_CHANGE);
         VOCA_REQUESTED_CHANGE = -1;
     }
 }

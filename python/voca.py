@@ -48,7 +48,7 @@ STATUS_FILE = os.path.join(OLLI_DIR, "voca_status.json")
 COMMAND_FILE = os.path.join(OLLI_DIR, "voca_command.json")
 
 WAKE_PHRASES = ["hey voca", "hey voka", "hey boca", "hey vocer", "hey volca", "hey vocaah", "voca", "voka"]
-SLEEP_PHRASES = ["sleep voca", "sleep voka", "sleep boca", "voca rest", "voka rest", "voca stop", "voka stop"]
+SLEEP_PHRASES = ["stop listening", "sleep voca", "sleep voka", "sleep boca", "voca rest", "voka rest", "voca stop", "voka stop"]
 INTERRUPT_PHRASES = ["stop talking", "stop speaking", "stop now"]
 
 AUTO_SLEEP_TIMEOUT = 300  # 5 minutes
@@ -106,6 +106,7 @@ def silence_all():
 
 class VocaNode:
     def __init__(self, model_size="small.en"):
+    #def __init__(self, model_size="base.en"):
         self.is_running = True
         self.is_awake = False 
         self.is_busy = False   
@@ -120,11 +121,12 @@ class VocaNode:
         self.report_status("sleep")
 
         print(f"{C_CYAN}Initializing Whisper Engine ({model_size}) on CPU...{C_RESET}")
-        with silence_all():
-            try:
-                self.model = WhisperModel(model_size, device="cpu", compute_type="int8", cpu_threads=8)
-            except Exception:
-                self.model = WhisperModel("tiny.en", device="cpu", compute_type="int8")
+        try:
+            self.model = WhisperModel(model_size, device="cpu", compute_type="int8", cpu_threads=4)
+            print(f"{C_CYAN}CPU Enabled (int8) (4 threads){C_RESET}")
+        except Exception:
+            self.model = WhisperModel("tiny.en", device="cpu", compute_type="int8")
+            print(f"{C_CYAN}CPU Enabled (tiny) (int8){C_RESET}")
         
         self.recognizer = sr.Recognizer()
         # Tweaked for better phrase detection
@@ -264,17 +266,21 @@ class VocaNode:
         print(f"{C_GREEN}--- Voca Pro (v3.2.12) Active ---{C_RESET}")
         with silence_all():
             mic = sr.Microphone(sample_rate=16000)
-        try:
-            with mic as source:
-                self.recognizer.adjust_for_ambient_noise(source, duration=1.0)
-        except Exception as e:
-            print(f"{C_RED}Hardware Error: {e}{C_RESET}"); return
 
+        # Start your worker thread
         threading.Thread(target=self.process_audio_worker, daemon=True).start()
+
         def callback(recognizer, audio):
+            # Only keep this if you use RMS for VAD / wake-word logic
             self.current_rms = self.get_rms(audio)
             self.audio_queue.put(audio)
-        stop_fn = self.recognizer.listen_in_background(mic, callback, phrase_time_limit=30)
+
+        # Start background listening
+        stop_fn = self.recognizer.listen_in_background(
+            mic,
+            callback,
+            phrase_time_limit=30
+        )
 
         try:
             spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]

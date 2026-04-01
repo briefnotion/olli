@@ -86,7 +86,12 @@ class AUDIO_CONTROL_CLASS
 
         VOCA_COMMAND_CONFIG VOCA_COMMAND_SETTINGS;
 
-        TIMED_IS_READY  RESUME_TIMER;
+        bool VOCA_STATUS_CHANGED = false;
+        bool LIRA_STATUS_CHANGED = false;
+
+        bool CONTROL_AWAKE = true;
+
+        TIMED_IS_READY  AUDIO_TIMER;
 
         int VOCA_REQUESTED_CHANGE = -1;
 
@@ -154,7 +159,7 @@ class AUDIO_CONTROL_CLASS
             }
         }
 
-        void VOCA_set(double Time, int Command);
+        void VOCA_set(int Command);
         void adjust_audio_files(double Time);
 
     public:

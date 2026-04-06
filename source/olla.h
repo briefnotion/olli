@@ -220,6 +220,14 @@ class OLLAMA_SYSTEM_PROPERTIES
         std::string hue_ip = "127.0.0.1";
         std::string hue_key = "Enter_Hue_Bridge_API_Key";
         std::string hue_path = "scenes.json";
+
+        // parameters
+        int consolitation_starts_starts_at = 20;
+        int consolitation_sizes = 10;
+
+        // test
+        //int consolitation_starts_starts_at = 4;
+        //int consolitation_sizes = 2;
 };
 
 class ollama_system {
@@ -266,10 +274,6 @@ class ollama_system {
 
         std::queue<ToolCall> pending_tool_calls;
 
-        // parameters
-        int consolitation_starts_starts_at = 20;
-        int consolitation_sizes = 10;
-
         ollama_system_status status;    
 
         std::vector<Message> history;
@@ -302,13 +306,13 @@ class ollama_system {
         
         void process(KEYBOARD_INPUT& Keyboard_Input);
 
-        void consolidate_check(KEYBOARD_INPUT& Keyboard_Input);
+        //void consolidate_check(KEYBOARD_INPUT& Keyboard_Input);
 };
 
 // FIX: Added 'static' to ensure internal linkage. 
 // This prevents the "multiple definition" error during linking.
 static std::mutex history_mutex;
 
-void consolidate(std::vector<Message>& chat_history, ollama_system& config, KEYBOARD_INPUT& kb);
+//void consolidate(std::vector<Message>& chat_history, ollama_system& config, KEYBOARD_INPUT& kb);
 
 #endif

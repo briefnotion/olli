@@ -1480,7 +1480,7 @@ bool ollama_system::jump_input(CLASS_SYSTEM& System)
             jump_instance.process(System.key_input);
         }
 
-        //integrate_tool_result("Describe what happened.", gather_history());
+        integrate_tool_result("Describe what happened.", gather_history());
         System.key_input.reset();
         
         return true;
@@ -1616,7 +1616,7 @@ void ollama_system::process(KEYBOARD_INPUT& Keyboard_Input)
     write_to_tts();        // Pushes new text to Speech engine
 }
 
-
+/*
 void ollama_system::consolidate_check(KEYBOARD_INPUT& Keyboard_Input)
 {
     // ---------------------------------------------------------
@@ -1652,6 +1652,7 @@ void ollama_system::consolidate_check(KEYBOARD_INPUT& Keyboard_Input)
         }
     }
 }
+*/
 
 // ----
 
@@ -1659,6 +1660,8 @@ void ollama_system::consolidate_check(KEYBOARD_INPUT& Keyboard_Input)
  * Standalone Consolidation Function
  * @param kb Reference to the keyboard input object for activity monitoring.
  */
+
+/*
 void consolidate(std::vector<Message>& chat_history, ollama_system& config, KEYBOARD_INPUT& kb) {
     if (chat_history.empty()) return;
 
@@ -1745,6 +1748,7 @@ void consolidate(std::vector<Message>& chat_history, ollama_system& config, KEYB
         } else break; 
     }
 }
+*/
 
 
 #endif

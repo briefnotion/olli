@@ -35,6 +35,9 @@ int main() {
     system.audio_control.create(system.setings_vars.get_settings_path());
     system.audio_control.thread_start();
 
+    sidetrack.create(chat.PROPS);
+    sidetrack.thread_start();
+
     //
     system.key_input.PROPS.path_input = system.setings_vars.get_settings_path() / "input";
     system.key_input.PROPS.lira_control_file = system.setings_vars.get_settings_path() / "lira_control.json";
@@ -44,6 +47,9 @@ int main() {
     std::cout << "\n--- Chat Started (Type 'bye' or 'quit' or 'Goodbye.' to stop) ---\n" << std::endl;
     std::cout << "You: " << std::flush;
 
+    // interupt carriar variable
+    bool interupt_signal = false;
+
     //
     // Main loop: runs until user types 'bye' or 'quit' or 'Goodbye.'
     while (chat.running) 
@@ -52,10 +58,13 @@ int main() {
 
         // process text from keyboard
         system.key_input.keyboard_input();
+        interupt_signal = system.key_input.INTERRUPTED;
 
         chat.input(system);
         chat.process(system.key_input);
-        chat.consolidate_check(system.key_input);
+        //chat.consolidate_check(system.key_input);
+
+        sidetrack.check(interupt_signal, chat);
 
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
@@ -64,6 +73,8 @@ int main() {
 
     system.audio_control.thread_stop();
     system.setings_vars.save_settings();
+
+    sidetrack.thread_stop();
 
     return 0;
 }

@@ -302,7 +302,7 @@ class ollama_system {
         void write_to_tts();
 
         bool jump_input(CLASS_SYSTEM& System);
-        void input(CLASS_SYSTEM& System);
+        bool input(CLASS_SYSTEM& System);
         
         void process(KEYBOARD_INPUT& Keyboard_Input);
 

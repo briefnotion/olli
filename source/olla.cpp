@@ -1491,50 +1491,71 @@ bool ollama_system::jump_input(CLASS_SYSTEM& System)
     }
 }
 
-void ollama_system::input(CLASS_SYSTEM& System)
+/**
+ * Updates the input method to return true when a chat response is complete.
+ * This version preserves the original non-blocking logic and thread safety.
+ */
+bool ollama_system::input(CLASS_SYSTEM& System)
 {
-
+    // 1. ORIGINAL INTERRUPT LOGIC
     if (is_processing && System.key_input.INTERRUPTED) 
     {
-        std::cout<< "." << std::flush;
+        std::cout << "." << std::flush;
         System.key_input.reset();
-        // If the assistant is currently talking and we get NEW input, 
-        // we trigger the interrupt.
+        
         stop();
         if (chat_thread.joinable()) chat_thread.join();
         is_processing = false;
         std::cout << "\n[Interrupting for new input...]" << std::endl;
+        
+        // Return true because the current session was closed/interrupted
+        return true;
     }
 
+    // 2. ORIGINAL INPUT LOGIC
     if (System.key_input.ENTER_PRESSED) 
     {
         if (jump_input(System)) 
         {
-
+            // Internal command logic (e.g. /clear, /settings)
+            return false;
         }
         else 
         {
             status.interrupt_signal = false;
-            // Process the user message in a background thread
             is_processing = true;
+            
             std::string tmp_line = System.key_input.LINE;
             System.key_input.reset();
-            bool tmp_is_processing = is_processing;
-            // Capture chat by reference, user_input by value, and is_processing by reference
-            chat_thread = std::thread([this, tmp_line, &tmp_is_processing]() 
-                                        {
-                                            try {
-                                                send(tmp_line);
-                                            } catch (...) {
-                                                // Safety: Ensure flag is reset even if send throws
-                                            }
-                                            is_processing = false;
-                                        });
-            is_processing = tmp_is_processing;
+
+            // Ensure we don't leak a thread if one was somehow left joinable
+            if (chat_thread.joinable()) chat_thread.join();
+
+            // Launch the background thread exactly as before
+            chat_thread = std::thread([this, tmp_line]() 
+            {
+                try {
+                    send(tmp_line);
+                } catch (...) {
+                    // Maintain existing safety
+                }
+                this->is_processing = false;
+            });
+
+            return false;
         }
     }
 
+    // 3. COMPLETION CHECK
+    // If the thread is no longer processing but the thread object is still active,
+    // it means the background work JUST finished.
+    if (!is_processing && chat_thread.joinable()) 
+    {
+        chat_thread.join(); // Clean up the thread resources
+        return true;        // Signal to the caller that the response is complete
+    }
 
+    return false;
 }
 
 /**

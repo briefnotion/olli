@@ -47,8 +47,6 @@ int main() {
     std::cout << "\n--- Chat Started (Type 'bye' or 'quit' or 'Goodbye.' to stop) ---\n" << std::endl;
     std::cout << "You: " << std::flush;
 
-    // interupt carriar variable
-    bool interupt_signal = false;
 
     //
     // Main loop: runs until user types 'bye' or 'quit' or 'Goodbye.'
@@ -58,13 +56,19 @@ int main() {
 
         // process text from keyboard
         system.key_input.keyboard_input();
-        interupt_signal = system.key_input.INTERRUPTED;
+        if (system.key_input.INTERRUPTED)
+        {
+            sidetrack.SIGNALS.INTERUPT_SIGNAL = true;
+        }
 
-        chat.input(system);
+        if (chat.input(system))
+        {
+            sidetrack.SIGNALS.CHAT_FINISHED_SIGNAL = true;
+        }
+
         chat.process(system.key_input);
-        //chat.consolidate_check(system.key_input);
 
-        sidetrack.check(interupt_signal, chat);
+        sidetrack.check(chat);
 
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }

@@ -6,18 +6,17 @@
 // ----
 
 /**
- * Standalone Consolidation Function
+ * Refactored Consolidation Function
+ * * Logic:
+ * 1. Identify all messages at current_level.
+ * 2. If count > (starts_at + sizes), we consolidate the OLDEST messages 
+ * past the 'starts_at' threshold.
  */
 bool consolidate(std::vector<Message>& chat_history, OLLAMA_SYSTEM_PROPERTIES& config) 
 {
-    if (chat_history.empty())
-    {
-        cout << "[Consolidation] Chat history is empty. Skipping consolidation." << endl;
-        return false;
-    }
+    if (chat_history.empty()) return false;
 
     ollama_system consolidate_client;
-    // Copy necessary props...
     consolidate_client.PROPS.host = config.host;
     consolidate_client.PROPS.port = config.port;
     consolidate_client.PROPS.model = config.model;
@@ -28,50 +27,49 @@ bool consolidate(std::vector<Message>& chat_history, OLLAMA_SYSTEM_PROPERTIES& c
     size_t starts_at = static_cast<size_t>(config.consolitation_starts_starts_at); 
     size_t sizes = static_cast<size_t>(config.consolitation_sizes); 
 
-    cout << "[Consolidation] Starting consolidation process..." << endl;
+    bool any_consolidation_occurred = false;
 
-    int current_level = 0;
-    while (current_level < 10) 
+    // We iterate through levels. If a level is too full, we shrink it and move up.
+    for (int current_level = 0; current_level < 10; ++current_level) 
     {
-
-
-
-        /*
-        // DIRECT ABORT CHECK: Checks the public boolean flags directly via reference
-        if (config.status.interrupt_signal.load() || kb.INTERRUPTED || kb.IS_TYPING) {
-            std::cout << "[Consolidation] Aborted: User activity detected." << std::endl;
-            return; 
-        }
-        */
-
-
-
-
-        std::vector<size_t> target_indices;
+        std::vector<size_t> level_indices;
         {
             std::lock_guard<std::mutex> lock(history_mutex);
             for (size_t i = 0; i < chat_history.size(); ++i) {
-                // Keep the foundational rules (Level 0) and sync them with latest OLLAMA_OPENING
+                // Ignore L0 system prompts if they are "protected"
                 if (current_level == 0 && chat_history[i].role == "system" && chat_history[i].consolidation_level == 0) {
-                    //chat_history[i].content = config.OLLAMA_OPENING;
-                    
                     continue;
                 }
                 if (chat_history[i].consolidation_level == current_level) {
-                    target_indices.push_back(i);
+                    level_indices.push_back(i);
                 }
             }
         }
 
-        if (target_indices.size() >= (starts_at + sizes)) {
+        // Only consolidate if we exceed the allowed buffer (starts_at) + the chunk size to merge (sizes)
+        if (level_indices.size() >= (starts_at + sizes)) {
+            
+            // We want to keep 'starts_at' messages untouched.
+            // Usually, we consolidate the OLDEST ones (the ones at the start of the level_indices list)
+            // Or we consolidate ones at the end of the list. 
+            // Assuming we want to keep the most RECENT 'starts_at' messages:
+            
             std::vector<size_t> merge_batch;
-            for (size_t i = 0; i < sizes; ++i) merge_batch.push_back(target_indices[i]);
+            // Target the oldest 'sizes' messages that are ABOVE the threshold
+            for (size_t i = 0; i < sizes; ++i) {
+                merge_batch.push_back(level_indices[i]);
+            }
 
-            std::string prompt = "Summarize the following history concisely:\n";
+            std::string prompt = "Summarize the following conversation segment concisely while preserving key facts and the current state of the topic:\n";
             {
                 std::lock_guard<std::mutex> lock(history_mutex);
-                for (size_t idx : merge_batch) prompt += "\n[" + chat_history[idx].role + "]: " + chat_history[idx].content;
+                for (size_t idx : merge_batch) {
+                    prompt += "\n[" + chat_history[idx].role + "]: " + chat_history[idx].content;
+                }
             }
+
+            //cout << "[Consolidation] Level " << current_level << " has " << level_indices.size() 
+            //     << " messages. Merging " << sizes << " messages..." << endl;
 
             consolidate_client.history.clear();
             consolidate_client.send(prompt, "system");
@@ -79,57 +77,41 @@ bool consolidate(std::vector<Message>& chat_history, OLLAMA_SYSTEM_PROPERTIES& c
             std::string summary_text = consolidate_client.last_received.response;
             if (summary_text.empty()) summary_text = consolidate_client.last_received.thinking;
 
-
-
-
-            // Final check before modifying shared history
-            //bool aborted_during_llm = config.status.interrupt_signal.load() || kb.INTERRUPTED || kb.IS_TYPING;
-            bool aborted_during_llm = false;
-
-
-
-            if (!aborted_during_llm && consolidate_client.last_received.complete && !summary_text.empty()) {
+            if (consolidate_client.last_received.complete && !summary_text.empty()) {
                 Message summary_msg;
                 summary_msg.role = "system";
-                summary_msg.content = "Context Summary: " + summary_text;
+                summary_msg.content = "Summary of previous context: " + summary_text;
                 summary_msg.consolidation_level = current_level + 1;
 
                 {
                     std::lock_guard<std::mutex> lock(history_mutex);
+                    
+                    // 1. Remove old messages (Reverse order to maintain index integrity)
                     std::vector<size_t> erase_indices = merge_batch;
                     std::sort(erase_indices.rbegin(), erase_indices.rend());
-                    
                     for (size_t idx : erase_indices) {
                         chat_history.erase(chat_history.begin() + static_cast<std::ptrdiff_t>(idx));
                     }
 
-                    size_t insert_pos = 0;
-                    while (insert_pos < chat_history.size() && 
-                           chat_history[insert_pos].role == "system" && 
-                           chat_history[insert_pos].consolidation_level == 0) {
-                        insert_pos++;
-                    }
+                    // 2. Insert summary. 
+                    // To keep history chronological, we insert it at the position where the first merged message was.
+                    size_t insert_pos = merge_batch[0]; 
+                    if (insert_pos > chat_history.size()) insert_pos = chat_history.size();
                     
                     chat_history.insert(chat_history.begin() + static_cast<std::ptrdiff_t>(insert_pos), summary_msg);
                 }
-                current_level++; 
-                return true;
-            } 
-            else 
-            {
-                cout << "[Consolidation] Aborted during LLM processing or empty summary received." << endl;
-                return false;
+                
+                any_consolidation_occurred = true;
+                // Stay on this level to see if we need to consolidate more (until we are under the limit)
+                current_level--; 
+            } else {
+                return any_consolidation_occurred;
             }
-        } 
-        else 
-        {
-            cout << "[Consolidation] Not enough messages at level " << current_level 
-                 << " to consolidate (found " << target_indices.size() 
-                 << ", need " << (starts_at + sizes) << ")." << endl;
-            return false;
         }
+        // If this level is fine, the loop continues to the next level (current_level++)
     }
-    return false;
+
+    return any_consolidation_occurred;
 }
 
 
@@ -164,39 +146,45 @@ void SIDETRACK_CLASS::thread_main()
         {
             //std::cout << "Sidetrack Thread Interupted" << std::endl;
             IDLE_WAIT_TIMER_FOR_CONSOLIDATION.set(thread_time.current_frame_time(), IDLE_WAIT_TIME_FOR_CONSOLIDATION);
+            INTERUPT.store(false);
         }
 
         // MAIN THREAD ROUTINE GOES HERE
         {
             PROCESSING.store(true);
 
+            // Consolidation
             if (IDLE_WAIT_TIMER_FOR_CONSOLIDATION.is_ready(thread_time.now()))
             {
-                if (chat_history_requested == false && 
-                    chat_history_needs_processing == false && 
-                    chat_history_is_processed == false)
+                if (chat_history_processing_stage == 0)
                 {
-                    std::cout << "Sidetrack: Requesting chat history for consolidation." << std::endl;
-                    chat_history_requested = true;
+                    //std::cout << "Sidetrack: Requesting chat history for consolidation." << std::endl;
+                    chat_history_processing_stage = 1;
                 }
 
-                if (chat_history_needs_processing)
+                if (chat_history_processing_stage == 2)
                 {
                     if (consolidate(temp_chat_history, SIDETRACK_CHAT_INSTANCE.PROPS))
                     {
-                        chat_history_is_processed = true;
+                        chat_history_processing_stage = 3;
                     }
-                    chat_history_needs_processing = false;
+                    else
+                    {
+                        chat_history_processing_stage = 0;
+                    }
+                    
+                    IDLE_WAIT_TIMER_FOR_CONSOLIDATION.set(thread_time.current_frame_time(), IDLE_WAIT_TIME_FOR_CONSOLIDATION);
                 }
+            }
 
-                IDLE_WAIT_TIMER_FOR_CONSOLIDATION.set(thread_time.current_frame_time(), IDLE_WAIT_TIME_FOR_CONSOLIDATION);
+            if (CHAT_FINISHED.load())
+            {
+                //std::cout << "Sidetrack: Chat finished signal received." << std::endl;
+                CHAT_FINISHED.store(false);
             }
             
             PROCESSING.store(false);
         }
-
-        // Reset interupt signal on main thread routine completion
-        INTERUPT.store(false);
 
         //sleep thread
         thread_time.request_ready_time(frame_limit.get_ready_time());
@@ -225,27 +213,35 @@ void SIDETRACK_CLASS::thread_stop()
     }
 }
 
-void SIDETRACK_CLASS::check(bool Interupt_Signal, ollama_system& main_instance)
+void SIDETRACK_CLASS::check(ollama_system& main_instance)
 {
-    if (Interupt_Signal)
+    if (SIGNALS.INTERUPT_SIGNAL)
     {
         INTERUPT.store(true);
+        SIGNALS.INTERUPT_SIGNAL = false;
     }
 
-    if (chat_history_requested)
+    if (SIGNALS.CHAT_FINISHED_SIGNAL)
+    {
+        CHAT_FINISHED.store(true);
+        SIGNALS.CHAT_FINISHED_SIGNAL = false;
+    }
+
+    // ----
+
+    if (chat_history_processing_stage == 1)
     {
         temp_chat_history =  main_instance.history;
-        chat_history_requested = false;
-        chat_history_needs_processing = true;
+        chat_history_processing_stage = 2;
     }
 
-    if (chat_history_is_processed)
+    if (chat_history_processing_stage == 3)
     {
         if (INTERUPT.load() == false)
         {
             main_instance.history = temp_chat_history;
         }
-        chat_history_is_processed = false;
+        chat_history_processing_stage = 0;
     }
 }
 

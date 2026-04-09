@@ -66,7 +66,7 @@ int main() {
             sidetrack.SIGNALS.CHAT_FINISHED_SIGNAL = true;
         }
 
-        chat.process(system.key_input);
+        chat.process(system.key_input.PROPS.ENABLED);
 
         sidetrack.check(chat);
 

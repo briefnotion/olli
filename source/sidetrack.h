@@ -42,14 +42,24 @@ class SIDETRACK_CLASS
         // Temporary Holdings
         std::vector<Message> temp_chat_history;
 
-        //int ROUTINE = 0; // 0 = idle, 1 = consolidation, 2 = other routine, etc.
+        int ROUTINE = 0; // 0 = idle, 1 = consolidation, 2 = other routine, etc.
 
         // Routine 1: Consolidation Routine
-        int chat_history_processing_stage = 0;
+        int CHAT_HISTORY_PROCESSING_STAGE = 0;
         // 0 = idle
         // 1 = chat history requested.
         // 2 = chat history ready for processing
         // 3 = chat history is processed.
+        // 4 = chat history wrap up.
+
+        // Routine 2: Second_Guess Routine
+        int SECOND_GUESS_PROCESSING_STAGE = 0;
+        // 0 = idle
+        // 1 = chat history requested.
+        // 2 = second guess initiated.
+        // 3 = second guess update chat history.
+        // 4 = second guess wrap up.
+
 
         // Routine 2:
 

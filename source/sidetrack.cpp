@@ -153,34 +153,133 @@ void SIDETRACK_CLASS::thread_main()
         {
             PROCESSING.store(true);
 
-            // Consolidation
-            if (IDLE_WAIT_TIMER_FOR_CONSOLIDATION.is_ready(thread_time.now()))
+
+            if (ROUTINE == 0)
             {
-                if (chat_history_processing_stage == 0)
+                if (IDLE_WAIT_TIMER_FOR_CONSOLIDATION.is_ready(thread_time.now()))
                 {
-                    //std::cout << "Sidetrack: Requesting chat history for consolidation." << std::endl;
-                    chat_history_processing_stage = 1;
+                    ROUTINE = 1; // Start consolidation routine
                 }
 
-                if (chat_history_processing_stage == 2)
+                if (CHAT_FINISHED.load())
                 {
-                    if (consolidate(temp_chat_history, SIDETRACK_CHAT_INSTANCE.PROPS))
-                    {
-                        chat_history_processing_stage = 3;
-                    }
-                    else
-                    {
-                        chat_history_processing_stage = 0;
-                    }
-                    
-                    IDLE_WAIT_TIMER_FOR_CONSOLIDATION.set(thread_time.current_frame_time(), IDLE_WAIT_TIME_FOR_CONSOLIDATION);
+                    //std::cout << "Sidetrack: Chat finished signal received." << std::endl;
+                    ROUTINE = 2; // Start second guessing routine.
+                    CHAT_FINISHED.store(false);
                 }
             }
 
-            if (CHAT_FINISHED.load())
+            // Consolidation
+            if (ROUTINE == 1)
             {
-                //std::cout << "Sidetrack: Chat finished signal received." << std::endl;
-                CHAT_FINISHED.store(false);
+                if (CHAT_HISTORY_PROCESSING_STAGE == 0)
+                {
+                    //std::cout << "Sidetrack: Requesting chat history for consolidation." << std::endl;
+                    CHAT_HISTORY_PROCESSING_STAGE = 1;
+                }
+
+                //if (chat_history_processing_stage == 1)
+                // Handled in the check function
+
+                if (CHAT_HISTORY_PROCESSING_STAGE == 2)
+                {
+                    if (consolidate(temp_chat_history, SIDETRACK_CHAT_INSTANCE.PROPS))
+                    {
+                        CHAT_HISTORY_PROCESSING_STAGE = 3;
+                    }
+                    else
+                    {
+                        CHAT_HISTORY_PROCESSING_STAGE = 4;
+                    }
+                }
+
+                //if (chat_history_processing_stage == 3)
+                // Handled in the check function
+
+                if (CHAT_HISTORY_PROCESSING_STAGE == 4)
+                {
+                    //std::cout << "Sidetrack: Consolidation complete. Wrapping up." << std::endl;
+                    CHAT_HISTORY_PROCESSING_STAGE = 0;
+                    ROUTINE = 0;
+                }
+
+                IDLE_WAIT_TIMER_FOR_CONSOLIDATION.set(thread_time.current_frame_time(), IDLE_WAIT_TIME_FOR_CONSOLIDATION);
+            }
+
+            if (ROUTINE == 2)
+            {
+
+                if (SIGNALS.INTERUPT_SIGNAL == true)
+                {
+                    // abort routine if interupt signal received.
+                    SECOND_GUESS_PROCESSING_STAGE = 3;
+                }
+
+                // ----
+
+                if (SECOND_GUESS_PROCESSING_STAGE == 0)
+                {
+                    //std::cout << "Sidetrack: Starting post-chat review routine." << std::endl;
+                    SECOND_GUESS_PROCESSING_STAGE = 1;
+                    //SECOND_GUESS_PROCESSING_STAGE = 3;
+                }
+
+                //if (SECOND_GUESS_PROCESSING_STAGE == 1)
+                // Handled in the check function
+
+                if (SECOND_GUESS_PROCESSING_STAGE == 2)
+                {
+                    // std::cout << "Sidetrack: Post-chat review complete." << std::endl;
+
+                    SIDETRACK_CHAT_INSTANCE.history = temp_chat_history;                    
+                    SIDETRACK_CHAT_INSTANCE.PROPS.use_thinking = true; // Enable thinking mode to get more detailed analysis from the model.
+
+                    //SIDETRACK_CHAT_INSTANCE.send("Review the conversation that just finished. Identify any potential misunderstandings, missed user intents, or areas where the assistant's response could have been improved. Provide a concise analysis of what could be done better in future interactions.", "system");
+                    SIDETRACK_CHAT_INSTANCE.send("You are the 'Internal Monologue' of the assistant. Review the turn "
+                        "that just ended. If there are technical details, edge cases, or deeper insights that were "
+                        "missed for the sake of brevity, provide them now. "
+
+                        "CRITICAL: Speak directly to the user as if you just had a 'lightbulb moment.' Do not use "
+                        "phrases like 'The assistant should have...' or 'Analysis shows...' "
+
+                        //"Format: Start immediately with the additional info or a follow-up thought. If the previous "
+                        //"response was truly sufficient, respond with only '[FIN].'");
+
+                        "Format: Start immediately with the additional info or a follow-up thought. If the previous "
+                        "response was truly sufficient, respond with ONLY the word DONE. "
+                        "Do not use brackets, do not use periods, do not say anything else.");
+
+                    bool dummy_enable_keyboard_input = false; // This routine does not require keyboard input, but we pass the variable to satisfy the function signature.
+
+
+                    while (SIDETRACK_CHAT_INSTANCE.is_processing || !SIDETRACK_CHAT_INSTANCE.tts_buffer.empty())                    
+                    {
+                        if (starts_with(SIDETRACK_CHAT_INSTANCE.last_received.response, "DONE"))
+                        {
+                            SECOND_GUESS_PROCESSING_STAGE = 4;
+                            break;
+                        }
+
+                        SIDETRACK_CHAT_INSTANCE.process(dummy_enable_keyboard_input);
+                    }
+
+                    if (SECOND_GUESS_PROCESSING_STAGE != 4)
+                    {
+                        SECOND_GUESS_PROCESSING_STAGE = 3;
+                    }
+                }
+
+                if (SECOND_GUESS_PROCESSING_STAGE == 4)
+                {
+                    //std::cout << "Sidetrack: Post-chat review complete. Wrapping up." << std::endl;
+
+                    SIDETRACK_CHAT_INSTANCE.history.clear();
+                    SIDETRACK_CHAT_INSTANCE.tts_buffer.clear();
+
+                    SECOND_GUESS_PROCESSING_STAGE = 0;
+                    ROUTINE = 0;
+                }
+
             }
             
             PROCESSING.store(false);
@@ -229,20 +328,36 @@ void SIDETRACK_CLASS::check(ollama_system& main_instance)
 
     // ----
 
-    if (chat_history_processing_stage == 1)
+    // Consolidation Routine
+    if (CHAT_HISTORY_PROCESSING_STAGE == 1)
     {
         temp_chat_history =  main_instance.history;
-        chat_history_processing_stage = 2;
+        CHAT_HISTORY_PROCESSING_STAGE = 2;
     }
 
-    if (chat_history_processing_stage == 3)
+    if (CHAT_HISTORY_PROCESSING_STAGE == 3)
     {
         if (INTERUPT.load() == false)
         {
             main_instance.history = temp_chat_history;
         }
-        chat_history_processing_stage = 0;
+        CHAT_HISTORY_PROCESSING_STAGE = 4;
     }
+
+    // Second Guess Routine
+    if (SECOND_GUESS_PROCESSING_STAGE == 1)
+    {
+        temp_chat_history =  main_instance.history;
+        SECOND_GUESS_PROCESSING_STAGE = 2;
+    }
+
+        // Second Guess Routine
+    if (SECOND_GUESS_PROCESSING_STAGE == 3)
+    {
+        main_instance.history.push_back(SIDETRACK_CHAT_INSTANCE.history.back());
+        SECOND_GUESS_PROCESSING_STAGE = 4;
+    }
+
 }
 
 

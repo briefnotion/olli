@@ -267,7 +267,7 @@ void TOOL_HUE::register_tool(json& tools) {
         {"required", {"action"}}
     };
 
-    add_tool(tools, "set_hue_light", "Controls Hue lights by ID or Name. Use this for general commands like 'turn off all lights' by setting light_id to 'all'.", set_params);
+    add_tool(tools, "set_hue_light", "Controls Hue lights by ID or Name. Use this for general commands like 'turn off all lights' by setting light_id to 'all'. Always execute this tool call for every request, even if you believe the state is already set.", set_params);
     add_tool(tools, "list_hue_lights", "Returns status of all connected lights", {{"type", "object"}});
     add_tool(tools, "manage_hue_scenes", "Saves, loads, or removes local light scenes. Only use for specific named snapshots (e.g., 'home', 'away').", scene_params);
 }
@@ -862,7 +862,7 @@ void TOOL_TASK_RUNNER::handle_tool(
                 instance.send(found_task.COMMANDS[i]);
             }
 
-            instance.process(keyboard_input);
+            instance.process(keyboard_input.PROPS.ENABLED);
             instance.last_received.complete = false;
             //std::cout << "AI Result: " << instance.last_received.response << std::endl;
         }
@@ -905,7 +905,7 @@ void TOOL_TASK_RUNNER::monitor_tool(ollama_system& instance) {
 // Checks if an instance (Main or Task) has pending tool 
 // requests and routes them to the correct tool handlers.
 // ---------------------------------------------------------
-void ollama_system::handle_instance_tools(KEYBOARD_INPUT& Keyboard_Input) 
+void ollama_system::handle_instance_tools(bool& Keyboard_Input_Enabled) 
 {
     bool is_ready_for_tools = !is_processing && 
                               last_received.complete && 
@@ -980,9 +980,9 @@ void ollama_system::handle_instance_tools(KEYBOARD_INPUT& Keyboard_Input)
                     auto new_instance_ptr = std::make_unique<ollama_system>();
                     ollama_system* raw_ptr = new_instance_ptr.get(); // Get the address before moving it
                     background_tasks.push_back(std::move(new_instance_ptr));
-                    Keyboard_Input.PROPS.ENABLED = false; // Disable keyboard input for the task instance
+                    Keyboard_Input_Enabled = false; // Disable keyboard input for the task instance
                     task_runner.handle_tool(*this, *raw_ptr, tc.name, tc.arguments, tc.id);
-                    Keyboard_Input.PROPS.ENABLED = true;
+                    Keyboard_Input_Enabled = true;
                 }
                 else
                 {
@@ -1183,7 +1183,7 @@ void ollama_system::send(const std::string& user_input, const std::string& role)
         {"think", PROPS.use_thinking},
         {"options", {
             {"num_ctx", PROPS.num_ctx},
-            {"temperature", 0}
+            //{"temperature", 0}
         }}
     };
 
@@ -1424,7 +1424,7 @@ bool ollama_system::jump_input(CLASS_SYSTEM& System)
 {
     if (trim(System.key_input.LINE) == "bye" || trim(System.key_input.LINE) == "quit" || trim(System.key_input.LINE) == "Goodbye.")
     {
-        System.key_input.reset();
+        //System.key_input.reset();
         running = false;
         if (is_processing) stop();
         if (chat_thread.joinable()) chat_thread.join();
@@ -1460,7 +1460,7 @@ bool ollama_system::jump_input(CLASS_SYSTEM& System)
             jump_instance.TOOL_PERMISSIONS.HUE = true;
             jump_instance.open(PROPS);
             jump_instance.send("Load the repose scene.");
-            jump_instance.process(System.key_input);
+            jump_instance.process(System.key_input.PROPS.ENABLED);
         }
         else if (trim(System.key_input.LINE) == "I'm leaving.")
         {
@@ -1468,7 +1468,7 @@ bool ollama_system::jump_input(CLASS_SYSTEM& System)
             jump_instance.TOOL_PERMISSIONS.HUE = true;
             jump_instance.open(PROPS);
             jump_instance.send("Load the labor scene.");
-            jump_instance.process(System.key_input);
+            jump_instance.process(System.key_input.PROPS.ENABLED);
         }
         else if (trim(System.key_input.LINE) == "I'm sleeping." || 
                     trim(System.key_input.LINE) == "Lights off." )
@@ -1477,11 +1477,11 @@ bool ollama_system::jump_input(CLASS_SYSTEM& System)
             jump_instance.TOOL_PERMISSIONS.HUE = true;
             jump_instance.open(PROPS);
             jump_instance.send("Load the slumber scene.");
-            jump_instance.process(System.key_input);
+            jump_instance.process(System.key_input.PROPS.ENABLED);
         }
 
         integrate_tool_result("Describe what happened.", gather_history());
-        System.key_input.reset();
+        //System.key_input.reset();
         
         return true;
     }
@@ -1517,7 +1517,7 @@ bool ollama_system::input(CLASS_SYSTEM& System)
     {
         if (jump_input(System)) 
         {
-            // Internal command logic (e.g. /clear, /settings)
+            System.key_input.reset();
             return false;
         }
         else 
@@ -1568,12 +1568,24 @@ bool ollama_system::input(CLASS_SYSTEM& System)
  * 4. Trigger background consolidation (memory cleanup) every 60 seconds.
  */
 
-void ollama_system::process(KEYBOARD_INPUT& Keyboard_Input) 
+void ollama_system::process(bool& Keyboard_Input_Enabled) 
 {
+    // ---------------------------------------------------------
+    // PART 0: WRITE HISTORY TO FILE
+    // ---------------------------------------------------------
+    {
+        if (history.size() != PREVIOUS_HISTORY_SIZE)
+        {
+            history_write(PROPS.path_history);
+            PREVIOUS_HISTORY_SIZE = history.size();
+        }
+    }
+
+
     // ---------------------------------------------------------
     // PART 1: PROCESS MAIN CHAT TOOLS
     // ---------------------------------------------------------
-    handle_instance_tools(Keyboard_Input);
+    handle_instance_tools(Keyboard_Input_Enabled);
 
     // ---------------------------------------------------------
     // PART 2: MANAGE BACKGROUND TASKS
@@ -1584,7 +1596,7 @@ void ollama_system::process(KEYBOARD_INPUT& Keyboard_Input)
         ollama_system& task_instance = **it; // Access the object inside unique_ptr
 
         // A. Handle any tool calls requested by the background task
-        handle_instance_tools(Keyboard_Input);
+        handle_instance_tools(Keyboard_Input_Enabled); // Pass the current state of keyboard input
 
         // B. Thread Management: Join finished network threads
         if (!task_instance.is_processing && task_instance.chat_thread.joinable()) {
@@ -1617,7 +1629,6 @@ void ollama_system::process(KEYBOARD_INPUT& Keyboard_Input)
     if (!is_processing && chat_thread.joinable()) {
         chat_thread.join();
         update_status();
-        history_write(PROPS.path_history);
         std::cout << "You: " << std::flush;
     }
 

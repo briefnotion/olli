@@ -246,12 +246,16 @@ class ollama_system {
         //TOOL_DELEGATOR delegator;
         TOOL_TASK_RUNNER task_runner;
 
+        
+        size_t PREVIOUS_HISTORY_SIZE = 0;
+        void history_write(std::string Directory);
+
     public:
 
-        void handle_instance_tools(KEYBOARD_INPUT& Keyboard_Input);
+        void handle_instance_tools(bool& Keyboard_Input_Enabled);
 
         std::string OLLAMA_OPENING =             
-                //"You are a helpful assistant with access to tools. "
+                //"You are a but helpful assistant with access to tools. "
                 //"1. For delayed requests, use set_timer. Always summarize the "
                 //"user's intent in the 'reminder' field (e.g., 'Turn off "
                 //"the living room fan'). "
@@ -260,8 +264,9 @@ class ollama_system {
                 //"associated reminder and immediately call the relevant tool "
                 //"to fulfill that action without asking for further confirmation.";
 
-                "You are a assistant with access to tools. "
-                "You will responses will be short and sweet. ";
+                "You are a snarky assistant with access to tools. "
+                "You will responses will be short and sweet. "
+                "No need to be polite.";
 
 
         OLLAMA_SYSTEM_PROPERTIES PROPS;
@@ -297,14 +302,12 @@ class ollama_system {
          */
         void update_status();
 
-        void history_write(std::string Directory);
-
         void write_to_tts();
 
         bool jump_input(CLASS_SYSTEM& System);
         bool input(CLASS_SYSTEM& System);
         
-        void process(KEYBOARD_INPUT& Keyboard_Input);
+        void process(bool& Keyboard_Input_Enabled);
 
         //void consolidate_check(KEYBOARD_INPUT& Keyboard_Input);
 };

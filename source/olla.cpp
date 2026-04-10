@@ -67,48 +67,72 @@ void TOOL_SET_THINKING_MODE::handle_tool(ollama_system& chat, const std::string&
 // ---
 
 /**
- * @brief Registers the get_current_time tool with the system.
+ * @brief Registers the clock tools with the system.
  */
 void TOOL_GET_CURRENT_TIME::register_tool(json& tools) {
-    // Tool to get the current system time
+    // Definitive tool definition for time
     json get_time_params = {
         {"type", "object"},
         {"properties", {
             {"format", {
                 {"type", "string"}, 
-                {"description", "Optional: custom strftime format (e.g., '%H:%M')"}
+                {"description", "The strftime format string (e.g., '%H:%M:%S'). Required."}
             }}
-        }}
+        }},
+        {"required", {"format"}}
     };
 
-    add_tool(tools, "get_current_time", "Returns the current system date and time", get_time_params);
+    // Definitive tool definition for date
+    json get_date_params = {
+        {"type", "object"},
+        {"properties", {
+            {"format", {
+                {"type", "string"}, 
+                {"description", "The strftime format string (e.g., '%Y-%m-%d'). Required."}
+            }}
+        }},
+        {"required", {"format"}}
+    };
+
+    add_tool(tools, "get_current_time", "Returns the current system time using a specific format. Always execute this tool call for every request, even if you believe you have the time.", get_time_params);
+    add_tool(tools, "get_current_date", "Returns the current system date using a specific format. Always execute this tool call for every request, even if you believe you have the date.", get_date_params);
 }
 
 /**
- * REFINED CLOCK TOOL
- * Now uses the integrate_tool_result pattern and correctly handles args.
+ * @brief Handles the execution of clock tools for Linux/Ubuntu.
  */
 void TOOL_GET_CURRENT_TIME::handle_tool(ollama_system& chat, const std::string& name, const json& args, const std::string& tc_id) {
-    if (name == "get_current_time") {
-        auto now = std::chrono::system_clock::now();
-        std::time_t now_time = std::chrono::system_clock::to_time_t(now);
-        
-        // Use args to determine format if provided, otherwise default
-        std::string format = "%Y-%m-%d %H:%M:%S";
-        if (args.contains("format") && args["format"].is_string()) {
-            format = args["format"];
-        }
+    if (name != "get_current_time" && name != "get_current_date") return;
 
-        std::stringstream ss;
-        ss << std::put_time(std::localtime(&now_time), format.c_str());
-        std::string current_time_str = ss.str();
-
-        // 1. Acknowledge the tool call internally
-        chat.send_tool_result(tc_id, "System Time: " + current_time_str);
-
-        // 2. INTEGRATION: Ask the instance to wrap this in persona
-        chat.integrate_tool_result("", "Current Time is " + current_time_str);
+    // Default format logic based on tool name
+    std::string format = (name == "get_current_time") ? "%H:%M:%S" : "%Y-%m-%d";
+    
+    // Strict argument extraction
+    if (args.is_object() && args.contains("format") && args["format"].is_string()) {
+        format = args["format"].get<std::string>();
     }
+
+    // Time acquisition
+    auto now = std::chrono::system_clock::now();
+    std::time_t now_time = std::chrono::system_clock::to_time_t(now);
+    
+    // Linux-specific thread-safe time conversion
+    std::tm local_tm;
+    if (localtime_r(&now_time, &local_tm) == nullptr) {
+        chat.send_tool_result(tc_id, "Error: Failed to process system clock.");
+        return;
+    }
+
+    // Formatting
+    std::stringstream ss;
+    ss << std::put_time(&local_tm, format.c_str());
+    std::string result_str = ss.str();
+
+    // Send the technical result to the message history
+    chat.send_tool_result(tc_id, result_str);
+
+    // Integrate the result for the persona to respond to the user
+    chat.integrate_tool_result(tc_id, result_str);
 }
 
 // ---
@@ -917,8 +941,10 @@ void ollama_system::handle_instance_tools(bool& Keyboard_Input_Enabled)
         last_received.tool_calls.clear(); 
         
         for (auto& tc : pending_calls) {
-            if (tc.name == "get_current_time") 
+            if (tc.name == "get_current_time" || tc.name == "get_current_date") 
             {
+                cout << "[System] Tool call received: " << tc.name << endl;
+
                 if (TOOL_PERMISSIONS.CURRENT_TIME)
                     current_time.handle_tool(*this, tc.name, tc.arguments, tc.id);
                 else
@@ -931,6 +957,8 @@ void ollama_system::handle_instance_tools(bool& Keyboard_Input_Enabled)
             } 
             else if (tc.name == "set_timer" || tc.name == "check_timer") 
             {
+                cout << "[System] Tool call received: " << tc.name << endl;
+                
                 if (TOOL_PERMISSIONS.TIMER)
                     timer.handle_tool(*this, tc.name, tc.arguments, tc.id);
                 else
@@ -942,6 +970,8 @@ void ollama_system::handle_instance_tools(bool& Keyboard_Input_Enabled)
             }
             else if (tc.name == "set_hue_light" || tc.name == "list_hue_lights" || tc.name == "manage_hue_scenes") 
             {
+                cout << "[System] Tool call received: " << tc.name << endl;
+                
                 if (TOOL_PERMISSIONS.HUE)
                     hue.handle_tool(*this, tc.name, tc.arguments, tc.id);
                 else
@@ -952,6 +982,8 @@ void ollama_system::handle_instance_tools(bool& Keyboard_Input_Enabled)
             }
             else if (tc.name == "set_thinking_mode") 
             {
+                cout << "[System] Tool call received: " << tc.name << endl;
+                
                 if (TOOL_PERMISSIONS.THINKING)
                     thinking.handle_tool(*this, tc.name, tc.arguments, tc.id);
                 else
@@ -963,6 +995,8 @@ void ollama_system::handle_instance_tools(bool& Keyboard_Input_Enabled)
             } 
             else if (tc.name == "web_search" || tc.name == "fetch_website_content") 
             {
+                cout << "[System] Tool call received: " << tc.name << endl;
+                
                 if (TOOL_PERMISSIONS.WEB)
                     web.handle_tool(*this, tc.name, tc.arguments, tc.id);
                 
@@ -975,6 +1009,8 @@ void ollama_system::handle_instance_tools(bool& Keyboard_Input_Enabled)
             } 
             else if (tc.name == "run_automation_task") 
             {
+                cout << "[System] Tool call received: " << tc.name << endl;
+                
                 if (TOOL_PERMISSIONS.TASK_RUNNER)
                 {
                     auto new_instance_ptr = std::make_unique<ollama_system>();
@@ -993,6 +1029,8 @@ void ollama_system::handle_instance_tools(bool& Keyboard_Input_Enabled)
             }
             else 
             {
+                cout << "[System] Tool error call received: " << tc.name << endl;
+                
                 // Build error message
                 std::string error_msg = 
                     "Error: Tool '" + tc.name + "' is not recognized by the system.";
@@ -1039,6 +1077,11 @@ void ollama_system::open()
     if (TOOL_PERMISSIONS.TASK_RUNNER)
         task_runner.register_tool(tools);
 
+    if (PROPS.LOAD_SAVE_HISTORY_ON_DISK)
+    {
+        loadHistoryFromJson(PROPS.OLLI_DIERCTORY / "history.json");
+    }
+
     // 
     if (history.empty()) 
     {
@@ -1050,6 +1093,9 @@ void ollama_system::open()
 void ollama_system::open(OLLAMA_SYSTEM_PROPERTIES Properties)
 {
     PROPS = Properties;
+
+    PROPS.LOAD_SAVE_HISTORY_ON_DISK = false;
+
     open();
 }
 
@@ -1356,10 +1402,69 @@ void ollama_system::update_status() {
 }
 
 /**
+ * @brief Saves a vector of Messages to a JSON file.
+ * * @param filename The destination file path.
+ * @param history The vector containing message data.
+ * @return true if successful, false otherwise.
+ */
+bool ollama_system::saveHistoryToJson(std::filesystem::path filepath) {
+    try {
+        // Create a json object from the vector
+        // nlohmann::json handles std::vector automatically if to_json is defined for the element
+        json j = history;
+
+        std::ofstream file(filepath);
+        if (!file.is_open()) {
+            return false;
+        }
+
+        // Write to file with 4-space indentation for readability
+        file << j.dump(4);
+        file.close();
+        return true;
+    } catch (const std::exception& e) {
+        std::cerr << "Error saving history: " << e.what() << std::endl;
+        return false;
+    }
+}
+
+/**
+ * @brief Loads a vector of Messages from a JSON file.
+ * * @param filename The source file path.
+ * @param history A reference to the vector to be populated.
+ * @return true if successful, false otherwise.
+ */
+bool ollama_system::loadHistoryFromJson(std::filesystem::path filepath) {
+    try {
+        std::ifstream file(filepath);
+        if (!file.is_open()) {
+            return false;
+        }
+
+        json j;
+        file >> j;
+        
+        // Convert the JSON array back into the vector of Messages
+        history = j.get<std::vector<Message>>();
+        
+        file.close();
+        return true;
+    } catch (const std::exception& e) {
+        std::cerr << "Error loading history: " << e.what() << std::endl;
+        return false;
+    }
+}
+
+/**
  * Writes all history to a file in the specified directory.
  * Overwrites the file if it already exists.
  */
-void ollama_system::history_write(std::string Directory) {
+void ollama_system::history_write(std::string Directory) 
+{
+    // First, we save the history to a JSON file for structured access and debugging.
+    saveHistoryToJson(PROPS.OLLI_DIERCTORY / "history.json");
+
+    // Next, we create a human-readable text file for quick inspection.
     namespace fs = std::filesystem;
     try {
         if (!fs::exists(Directory)) {
@@ -1574,13 +1679,17 @@ void ollama_system::process(bool& Keyboard_Input_Enabled)
     // PART 0: WRITE HISTORY TO FILE
     // ---------------------------------------------------------
     {
-        if (history.size() != PREVIOUS_HISTORY_SIZE)
+        update_status();
+
+        if (PROPS.LOAD_SAVE_HISTORY_ON_DISK)
         {
-            history_write(PROPS.path_history);
-            PREVIOUS_HISTORY_SIZE = history.size();
+            if (history.size() != PREVIOUS_HISTORY_SIZE)
+            {
+                history_write(PROPS.path_history);
+                PREVIOUS_HISTORY_SIZE = history.size();
+            }
         }
     }
-
 
     // ---------------------------------------------------------
     // PART 1: PROCESS MAIN CHAT TOOLS
@@ -1628,10 +1737,11 @@ void ollama_system::process(bool& Keyboard_Input_Enabled)
     // ---------------------------------------------------------
     if (!is_processing && chat_thread.joinable()) {
         chat_thread.join();
+        cout << "\n[Response complete. Awaiting user input...]" << std::endl;
         update_status();
-        std::cout << "You: " << std::flush;
+        //std::cout << "You: " << std::flush;
     }
-
+    
     // ---------------------------------------------------------
     // PART 5: ACTIVE MONITORS
     // Continuous checks for time-based triggers or hardware state.

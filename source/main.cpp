@@ -64,6 +64,7 @@ int main() {
         if (chat.input(system))
         {
             sidetrack.SIGNALS.CHAT_FINISHED_SIGNAL = true;
+            std::cout << "You: " << std::flush;
         }
 
         chat.process(system.key_input.PROPS.ENABLED);

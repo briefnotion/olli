@@ -23,11 +23,33 @@ using json = nlohmann::json;
 // --- FORWARD DECLARATION ---
 
 class ollama_system;
+/**
+ * @brief Structure representing a single chat message in the history.
+ */
 struct Message {
     std::string role = "";    
     std::string content = "";
     std::string tool_call_id = ""; 
     int consolidation_level = 0;
+
+    // Helper to convert a Message object to a JSON object
+    // This allows nlohmann::json to handle the struct automatically
+    friend void to_json(json& j, const Message& m) {
+        j = json{
+            {"role", m.role},
+            {"content", m.content},
+            {"tool_call_id", m.tool_call_id},
+            {"consolidation_level", m.consolidation_level}
+        };
+    }
+
+    // Helper to convert a JSON object back into a Message object
+    friend void from_json(const json& j, Message& m) {
+        j.at("role").get_to(m.role);
+        j.at("content").get_to(m.content);
+        j.at("tool_call_id").get_to(m.tool_call_id);
+        j.at("consolidation_level").get_to(m.consolidation_level);
+    }
 };
 
 struct ToolCall {
@@ -228,6 +250,8 @@ class OLLAMA_SYSTEM_PROPERTIES
         // test
         //int consolitation_starts_starts_at = 4;
         //int consolitation_sizes = 2;
+
+        bool LOAD_SAVE_HISTORY_ON_DISK = true;
 };
 
 class ollama_system {
@@ -246,8 +270,11 @@ class ollama_system {
         //TOOL_DELEGATOR delegator;
         TOOL_TASK_RUNNER task_runner;
 
-        
         size_t PREVIOUS_HISTORY_SIZE = 0;
+        
+        bool saveHistoryToJson(std::filesystem::path filepath);
+        bool loadHistoryFromJson(std::filesystem::path filepath);
+
         void history_write(std::string Directory);
 
     public:

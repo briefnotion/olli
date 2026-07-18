@@ -122,7 +122,7 @@ void AUDIO_CONTROL_CLASS::create(const std::filesystem::path& filePath)
         LIRA_lastKnownTime = std::filesystem::last_write_time(settings_path / "lira_control.json");
     }
     if (std::filesystem::exists(settings_path / "voca_status.json")) {
-        LIRA_lastKnownTime = std::filesystem::last_write_time(settings_path / "voca_status.json");
+        VOCA_lastKnownTime = std::filesystem::last_write_time(settings_path / "voca_status.json");
     }
 }
 

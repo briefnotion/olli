@@ -9,6 +9,7 @@
 #include <atomic>
 #include <filesystem>
 #include <queue>
+#include <mutex>
 
 #include "httplib.h"
 #include <nlohmann/json.hpp>
@@ -339,9 +340,16 @@ class ollama_system {
         //void consolidate_check(KEYBOARD_INPUT& Keyboard_Input);
 };
 
-// FIX: Added 'static' to ensure internal linkage. 
-// This prevents the "multiple definition" error during linking.
-static std::mutex history_mutex;
+// A single shared mutex protecting every ollama_system::history vector.
+//
+// This MUST be an 'inline' variable (C++17), not 'static'. A 'static'
+// definition in a header gives every translation unit that includes olla.h
+// its OWN private mutex, so the main/chat thread and the sidetrack thread
+// would lock unrelated mutexes and never actually exclude one another —
+// a silent data race on the history while consolidation runs. 'inline'
+// yields one shared instance across all translation units with no
+// "multiple definition" linker error.
+inline std::mutex history_mutex;
 
 //void consolidate(std::vector<Message>& chat_history, ollama_system& config, KEYBOARD_INPUT& kb);
 

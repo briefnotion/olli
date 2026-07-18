@@ -134,13 +134,16 @@ void Settings::save_settings() {
 
 // Helper to find the home directory across Windows/Linux/macOS
 fs::path Settings::get_settings_path() {
-    std::string home_dir;
     #ifdef _WIN32
-        home_dir = std::getenv("USERPROFILE");
+        const char* home_dir = std::getenv("USERPROFILE");
     #else
-        home_dir = std::getenv("HOME");
+        const char* home_dir = std::getenv("HOME");
     #endif
-    return fs::path(home_dir) / "olli_files";
+    // std::getenv may return nullptr; constructing a std::string / fs::path
+    // from nullptr is undefined behaviour. Fall back to the current
+    // directory so the program degrades gracefully instead of crashing.
+    fs::path base = (home_dir != nullptr) ? fs::path(home_dir) : fs::current_path();
+    return base / "olli_files";
 }
 
 // ----
@@ -158,9 +161,9 @@ VOCA_CONTROL::VOCA_CONTROL(std::string olli_dir = "")
 {
     if (olli_dir.empty()) {
         const char* home = std::getenv("HOME");
-        if (home) {
-            m_olli_dir = std::string(home) + "/olli_files";
-        }
+        // Fall back to "." when HOME is unset so the derived paths below
+        // remain valid relative paths rather than an empty prefix.
+        m_olli_dir = (home != nullptr) ? std::string(home) + "/olli_files" : "./olli_files";
     } else {
         m_olli_dir = olli_dir;
     }

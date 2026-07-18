@@ -1704,8 +1704,12 @@ void ollama_system::process(bool& Keyboard_Input_Enabled)
     for (auto it = background_tasks.begin(); it != background_tasks.end(); ) {
         ollama_system& task_instance = **it; // Access the object inside unique_ptr
 
-        // A. Handle any tool calls requested by the background task
-        handle_instance_tools(Keyboard_Input_Enabled); // Pass the current state of keyboard input
+        // A. Handle any tool calls requested by the background task.
+        // NOTE: this dispatches on the task instance, not on the main
+        // instance (*this) — otherwise a background task's tool calls would
+        // never be serviced and the main instance would be re-processed
+        // once per background task instead.
+        task_instance.handle_instance_tools(Keyboard_Input_Enabled);
 
         // B. Thread Management: Join finished network threads
         if (!task_instance.is_processing && task_instance.chat_thread.joinable()) {

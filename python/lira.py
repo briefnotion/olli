@@ -105,7 +105,15 @@ class SpeechHandler(FileSystemEventHandler):
             if engine_name == "pico2wave":
                 subprocess.run(["pico2wave", "-w", temp_wav, text], check=True)
             elif engine_name == "festival":
-                subprocess.run(f'echo "{text}" | text2wave -o {temp_wav}', shell=True, check=True)
+                # Feed the text to text2wave over stdin instead of interpolating
+                # it into a shell command. The text originates from model output,
+                # so `shell=True` with an f-string is a command-injection risk
+                # (e.g. a response containing `"; rm -rf ~ ;` would execute).
+                subprocess.run(
+                    ["text2wave", "-o", temp_wav],
+                    input=text.encode("utf-8"),
+                    check=True,
+                )
             else:
                 # For espeak, we'll just pipe directly to player in the next step
                 pass

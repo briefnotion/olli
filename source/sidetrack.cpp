@@ -354,7 +354,14 @@ void SIDETRACK_CLASS::check(ollama_system& main_instance)
         // Second Guess Routine
     if (SECOND_GUESS_PROCESSING_STAGE == 3)
     {
-        main_instance.history.push_back(SIDETRACK_CHAT_INSTANCE.history.back());
+        // Only fold the review back into the main conversation when the
+        // side instance actually produced something. Calling .back() on an
+        // empty vector (e.g. the routine was interrupted before any
+        // response) is undefined behaviour.
+        if (!SIDETRACK_CHAT_INSTANCE.history.empty())
+        {
+            main_instance.history.push_back(SIDETRACK_CHAT_INSTANCE.history.back());
+        }
         SECOND_GUESS_PROCESSING_STAGE = 4;
     }
 

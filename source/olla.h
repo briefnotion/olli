@@ -282,6 +282,9 @@ class ollama_system {
 
         void handle_instance_tools(bool& Keyboard_Input_Enabled);
 
+        // Explicit flush to disk, e.g. right after consolidation commits or on shutdown.
+        void save_history();
+
         std::string OLLAMA_OPENING =             
                 //"You are a but helpful assistant with access to tools. "
                 //"1. For delayed requests, use set_timer. Always summarize the "
@@ -337,7 +340,6 @@ class ollama_system {
         
         void process(bool& Keyboard_Input_Enabled);
 
-        //void consolidate_check(KEYBOARD_INPUT& Keyboard_Input);
 };
 
 // A single shared mutex protecting every ollama_system::history vector.
@@ -350,7 +352,5 @@ class ollama_system {
 // yields one shared instance across all translation units with no
 // "multiple definition" linker error.
 inline std::mutex history_mutex;
-
-//void consolidate(std::vector<Message>& chat_history, ollama_system& config, KEYBOARD_INPUT& kb);
 
 #endif

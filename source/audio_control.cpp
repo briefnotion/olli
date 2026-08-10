@@ -166,11 +166,10 @@ void AUDIO_CONTROL_CLASS::thread_start()
 
 void AUDIO_CONTROL_CLASS::thread_stop()
 {
-    while (RUN)
-    {
-        RUN = false;
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
+    // See SIDETRACK_CLASS::thread_stop for why this actually waits on the
+    // thread instead of just flipping a flag and returning.
+    RUN = false;
+    THREAD_CONTROL.wait_for_thread_to_finish();
 }
 
 

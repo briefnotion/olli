@@ -76,6 +76,8 @@ int main() {
 
     std::cout << "\n--- Chat Ended ---" << std::endl;
 
+    chat.save_history();
+
     system.audio_control.thread_stop();
     system.setings_vars.save_settings();
 

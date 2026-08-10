@@ -6,70 +6,62 @@
 // ----
 
 /**
- * Refactored Consolidation Function
- * * Logic:
- * 1. Identify all messages at current_level.
- * 2. If count > (starts_at + sizes), we consolidate the OLDEST messages 
- * past the 'starts_at' threshold.
+ * Consolidation
+ *
+ * 1. Bucket every message by its consolidation_level (protected messages,
+ *    level < 0, are set aside untouched).
+ * 2. Walk the buckets bottom-up. Any bucket holding at least
+ *    (starts_at + sizes) messages gets its oldest 'sizes' messages
+ *    summarized into one message, promoted to the next level up.
+ * 3. Flatten back into a single chronological vector: protected messages
+ *    first, then oldest (highest level) down to newest (level 0).
+ *
+ * Note: chat_history here is the sidetrack thread's private working copy
+ * (see SIDETRACK_CLASS::check's handoff) - nothing else touches it while
+ * this runs, so no locking is needed inside this function.
  */
-bool consolidate(std::vector<Message>& chat_history, OLLAMA_SYSTEM_PROPERTIES& config) 
+bool consolidate(std::vector<Message>& chat_history, OLLAMA_SYSTEM_PROPERTIES& config)
 {
     if (chat_history.empty()) return false;
+
+    size_t starts_at = static_cast<size_t>(config.consolitation_starts_starts_at);
+    size_t sizes = static_cast<size_t>(config.consolitation_sizes);
+    if (sizes == 0) return false;
+
+    // 1. Bucket by level.
+    std::vector<Message> protected_messages;
+    std::vector<std::vector<Message>> levels;
+
+    for (const Message& msg : chat_history) {
+        if (msg.consolidation_level < 0) {
+            protected_messages.push_back(msg);
+            continue;
+        }
+        size_t level = static_cast<size_t>(msg.consolidation_level);
+        if (level >= levels.size()) levels.resize(level + 1);
+        levels[level].push_back(msg);
+    }
+    levels.resize(levels.size() + 1); // headroom for a promotion out of the top level
+
+    // 2. Drain each level in turn; promotions feed the next iteration.
+    bool any_consolidation_occurred = false;
 
     ollama_system consolidate_client;
     consolidate_client.PROPS.host = config.host;
     consolidate_client.PROPS.port = config.port;
     consolidate_client.PROPS.model = config.model;
-    consolidate_client.PROPS.num_ctx = config.num_ctx; 
-    consolidate_client.PROPS.use_thinking = false; 
-    consolidate_client.PROPS.stream_output = false; 
+    consolidate_client.PROPS.num_ctx = config.num_ctx;
+    consolidate_client.PROPS.use_thinking = false;
+    consolidate_client.PROPS.stream_output = false;
 
-    size_t starts_at = static_cast<size_t>(config.consolitation_starts_starts_at); 
-    size_t sizes = static_cast<size_t>(config.consolitation_sizes); 
-
-    bool any_consolidation_occurred = false;
-
-    // We iterate through levels. If a level is too full, we shrink it and move up.
-    for (int current_level = 0; current_level < 10; ++current_level) 
-    {
-        std::vector<size_t> level_indices;
-        {
-            std::lock_guard<std::mutex> lock(history_mutex);
-            for (size_t i = 0; i < chat_history.size(); ++i) {
-                // Ignore L0 system prompts if they are "protected"
-                if (current_level == 0 && chat_history[i].role == "system" && chat_history[i].consolidation_level == 0) {
-                    continue;
-                }
-                if (chat_history[i].consolidation_level == current_level) {
-                    level_indices.push_back(i);
-                }
-            }
-        }
-
-        // Only consolidate if we exceed the allowed buffer (starts_at) + the chunk size to merge (sizes)
-        if (level_indices.size() >= (starts_at + sizes)) {
-            
-            // We want to keep 'starts_at' messages untouched.
-            // Usually, we consolidate the OLDEST ones (the ones at the start of the level_indices list)
-            // Or we consolidate ones at the end of the list. 
-            // Assuming we want to keep the most RECENT 'starts_at' messages:
-            
-            std::vector<size_t> merge_batch;
-            // Target the oldest 'sizes' messages that are ABOVE the threshold
-            for (size_t i = 0; i < sizes; ++i) {
-                merge_batch.push_back(level_indices[i]);
-            }
-
+    bool llm_failed = false;
+    for (size_t level = 0; !llm_failed && level + 1 < levels.size(); ++level) {
+        while (levels[level].size() >= starts_at + sizes) {
+            // Oldest 'sizes' messages sit at the front of the bucket.
             std::string prompt = "Summarize the following conversation segment concisely while preserving key facts and the current state of the topic:\n";
-            {
-                std::lock_guard<std::mutex> lock(history_mutex);
-                for (size_t idx : merge_batch) {
-                    prompt += "\n[" + chat_history[idx].role + "]: " + chat_history[idx].content;
-                }
+            for (size_t i = 0; i < sizes; ++i) {
+                prompt += "\n[" + levels[level][i].role + "]: " + levels[level][i].content;
             }
-
-            //cout << "[Consolidation] Level " << current_level << " has " << level_indices.size() 
-            //     << " messages. Merging " << sizes << " messages..." << endl;
 
             consolidate_client.history.clear();
             consolidate_client.send(prompt, "system");
@@ -77,38 +69,29 @@ bool consolidate(std::vector<Message>& chat_history, OLLAMA_SYSTEM_PROPERTIES& c
             std::string summary_text = consolidate_client.last_received.response;
             if (summary_text.empty()) summary_text = consolidate_client.last_received.thinking;
 
-            if (consolidate_client.last_received.complete && !summary_text.empty()) {
-                Message summary_msg;
-                summary_msg.role = "system";
-                summary_msg.content = "Summary of previous context: " + summary_text;
-                summary_msg.consolidation_level = current_level + 1;
-
-                {
-                    std::lock_guard<std::mutex> lock(history_mutex);
-                    
-                    // 1. Remove old messages (Reverse order to maintain index integrity)
-                    std::vector<size_t> erase_indices = merge_batch;
-                    std::sort(erase_indices.rbegin(), erase_indices.rend());
-                    for (size_t idx : erase_indices) {
-                        chat_history.erase(chat_history.begin() + static_cast<std::ptrdiff_t>(idx));
-                    }
-
-                    // 2. Insert summary. 
-                    // To keep history chronological, we insert it at the position where the first merged message was.
-                    size_t insert_pos = merge_batch[0]; 
-                    if (insert_pos > chat_history.size()) insert_pos = chat_history.size();
-                    
-                    chat_history.insert(chat_history.begin() + static_cast<std::ptrdiff_t>(insert_pos), summary_msg);
-                }
-                
-                any_consolidation_occurred = true;
-                // Stay on this level to see if we need to consolidate more (until we are under the limit)
-                current_level--; 
-            } else {
-                return any_consolidation_occurred;
+            if (!consolidate_client.last_received.complete || summary_text.empty()) {
+                llm_failed = true; // give up; keep whatever progress was already made
+                break;
             }
+
+            levels[level].erase(levels[level].begin(), levels[level].begin() + static_cast<std::ptrdiff_t>(sizes));
+
+            Message summary_msg;
+            summary_msg.role = "system";
+            summary_msg.content = "Summary of previous context: " + summary_text;
+            summary_msg.consolidation_level = static_cast<int>(level) + 1;
+            levels[level + 1].push_back(summary_msg);
+
+            any_consolidation_occurred = true;
         }
-        // If this level is fine, the loop continues to the next level (current_level++)
+    }
+
+    if (any_consolidation_occurred) {
+        chat_history.clear();
+        chat_history.insert(chat_history.end(), protected_messages.begin(), protected_messages.end());
+        for (size_t level = levels.size(); level-- > 0; ) {
+            chat_history.insert(chat_history.end(), levels[level].begin(), levels[level].end());
+        }
     }
 
     return any_consolidation_occurred;
@@ -129,8 +112,14 @@ void SIDETRACK_CLASS::create(OLLAMA_SYSTEM_PROPERTIES Ollama_Properties)
 void SIDETRACK_CLASS::thread_main()
 {
     TIMED_IS_READY  frame_limit;     // Controls sleep time
-    FLED_TIME thread_time;           // Thread gets its own Time 
+    FLED_TIME thread_time;           // Thread gets its own Time
     thread_time.create();
+
+    // TIMED_IS_READY defaults its ready-time to 0, which is_ready() always
+    // considers already-elapsed. Without arming it here, consolidation would
+    // fire on the very first check after every program start, instead of
+    // waiting the full configured idle interval.
+    IDLE_WAIT_TIMER_FOR_CONSOLIDATION.set(thread_time.now(), IDLE_WAIT_TIME_FOR_CONSOLIDATION);
 
     RUN = true;
     while (RUN)
@@ -305,11 +294,15 @@ void SIDETRACK_CLASS::thread_start()
 
 void SIDETRACK_CLASS::thread_stop()
 {
-    while (RUN)
-    {
-        RUN = false;
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
+    // Signal the loop to exit, then actually wait for the background
+    // thread to finish before returning. If it's mid-way through a
+    // blocking LLM call (consolidation or the second-guess review), that
+    // call runs to completion first. Returning early here (as before) let
+    // callers proceed to destroy this object - and everything it
+    // references - while the thread was still running against it, which
+    // caused a heap-corruption crash on shutdown.
+    RUN = false;
+    THREAD_CONTROL.wait_for_thread_to_finish();
 }
 
 void SIDETRACK_CLASS::check(ollama_system& main_instance)
@@ -329,42 +322,46 @@ void SIDETRACK_CLASS::check(ollama_system& main_instance)
     // ----
 
     // Consolidation Routine
-    if (CHAT_HISTORY_PROCESSING_STAGE == 1)
     {
-        temp_chat_history =  main_instance.history;
-        CHAT_HISTORY_PROCESSING_STAGE = 2;
-    }
-
-    if (CHAT_HISTORY_PROCESSING_STAGE == 3)
-    {
-        if (INTERUPT.load() == false)
+        if (CHAT_HISTORY_PROCESSING_STAGE == 1)
         {
-            main_instance.history = temp_chat_history;
+            temp_chat_history =  main_instance.history;
+            CHAT_HISTORY_PROCESSING_STAGE = 2;
         }
-        CHAT_HISTORY_PROCESSING_STAGE = 4;
+
+        if (CHAT_HISTORY_PROCESSING_STAGE == 3)
+        {
+            if (INTERUPT.load() == false)
+            {
+                main_instance.history = temp_chat_history;
+                main_instance.save_history();
+            }
+            CHAT_HISTORY_PROCESSING_STAGE = 4;
+        }
     }
 
     // Second Guess Routine
-    if (SECOND_GUESS_PROCESSING_STAGE == 1)
     {
-        temp_chat_history =  main_instance.history;
-        SECOND_GUESS_PROCESSING_STAGE = 2;
-    }
+        if (SECOND_GUESS_PROCESSING_STAGE == 1)
+        {
+            temp_chat_history =  main_instance.history;
+            SECOND_GUESS_PROCESSING_STAGE = 2;
+        }
 
         // Second Guess Routine
-    if (SECOND_GUESS_PROCESSING_STAGE == 3)
-    {
-        // Only fold the review back into the main conversation when the
-        // side instance actually produced something. Calling .back() on an
-        // empty vector (e.g. the routine was interrupted before any
-        // response) is undefined behaviour.
-        if (!SIDETRACK_CHAT_INSTANCE.history.empty())
+        if (SECOND_GUESS_PROCESSING_STAGE == 3)
         {
-            main_instance.history.push_back(SIDETRACK_CHAT_INSTANCE.history.back());
+            // Only fold the review back into the main conversation when the
+            // side instance actually produced something. Calling .back() on an
+            // empty vector (e.g. the routine was interrupted before any
+            // response) is undefined behaviour.
+            if (!SIDETRACK_CHAT_INSTANCE.history.empty())
+            {
+                main_instance.history.push_back(SIDETRACK_CHAT_INSTANCE.history.back());
+            }
+            SECOND_GUESS_PROCESSING_STAGE = 4;
         }
-        SECOND_GUESS_PROCESSING_STAGE = 4;
     }
-
 }
 
 

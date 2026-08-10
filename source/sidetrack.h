@@ -12,7 +12,7 @@
 #include "fled_time.h"
 #include "threading.h"
 
-bool consolidate(std::vector<Message>& chat_history, ollama_system& config);
+bool consolidate(std::vector<Message>& chat_history, OLLAMA_SYSTEM_PROPERTIES& config);
 
 struct SIDETRACK_SIGNALS
 {

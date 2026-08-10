@@ -234,7 +234,9 @@ Two housekeeping routines run off the main thread (`sidetrack.cpp`):
 
 1. **Consolidation** — when the conversation grows past a threshold, older
    messages are summarised into a higher "consolidation level", compressing
-   history so long sessions stay within the model's context window.
+   history so long sessions stay within the model's context window. The
+   assistant's foundational persona/instructions message is tagged level
+   `-1` and is never summarised.
 2. **Second-guess** — after each turn, an "internal monologue" pass reviews the
    answer and, if it finds a genuinely useful addition, speaks a follow-up
    thought; otherwise it stays quiet.

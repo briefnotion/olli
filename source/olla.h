@@ -24,6 +24,7 @@ using json = nlohmann::json;
 // --- FORWARD DECLARATION ---
 
 class ollama_system;
+class AUDIO_CONTROL_CLASS; // for the text-to-speech output hook; see set_audio_control
 /**
  * @brief Structure representing a single chat message in the history.
  */
@@ -272,11 +273,15 @@ class ollama_system {
         TOOL_TASK_RUNNER task_runner;
 
         size_t PREVIOUS_HISTORY_SIZE = 0;
-        
+
         bool saveHistoryToJson(std::filesystem::path filepath);
         bool loadHistoryFromJson(std::filesystem::path filepath);
 
         void history_write(std::string Directory);
+
+        // Not owned; null unless set_audio_control was called (only the main
+        // chat instance gets one - see main.cpp). write_to_tts() no-ops if unset.
+        AUDIO_CONTROL_CLASS* audio_control_ptr = nullptr;
 
     public:
 
@@ -284,6 +289,9 @@ class ollama_system {
 
         // Explicit flush to disk, e.g. right after consolidation commits or on shutdown.
         void save_history();
+
+        // Wires this instance's spoken output to an AUDIO_CONTROL_CLASS.
+        void set_audio_control(AUDIO_CONTROL_CLASS* audio_control) { audio_control_ptr = audio_control; }
 
         std::string OLLAMA_OPENING =             
                 //"You are a but helpful assistant with access to tools. "

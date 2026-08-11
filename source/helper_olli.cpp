@@ -23,54 +23,6 @@ void simulateTyping(const std::string& text) {
 
 // ----
 
-/**
- * Checks the control file to see if Lira is currently speaking.
- * Returns true if is_speaking is true, false otherwise.
- */
-bool LIRA_CONTROL::isLiraSpeaking(std::filesystem::path Control_File_JSON) 
-{
-    try {
-        std::ifstream file(Control_File_JSON);
-        if (!file.is_open()) return false;
-
-        json data;
-        file >> data;
-        return data.value("is_speaking", false);
-    } catch (...) {
-        // If file is being written to by Python (locked), just return false
-        return false;
-    }
-}
-
-/**
- * Sets the interrupt signal to true in the control file.
- * This will trigger the Python monitor to kill the speech process.
- */
-void LIRA_CONTROL::setLiraInterrupt(std::filesystem::path Control_File_JSON) 
-{
-    try {
-        json data;
-        
-        // 1. Read existing data first to preserve is_speaking status
-        std::ifstream inFile(Control_File_JSON);
-        if (inFile.is_open()) {
-            inFile >> data;
-            inFile.close();
-        }
-
-        // 2. Set interrupt to true
-        data["interrupt"] = true;
-
-        // 3. Write back to file
-        std::ofstream outFile(Control_File_JSON);
-        outFile << data.dump(4); // Pretty print with 4 spaces
-    } catch (const std::exception& e) {
-        std::cerr << "Failed to set interrupt: " << e.what() << std::endl;
-    }
-}
-
-// ----
-
 void Settings::load_settings() {
     fs::path config_path = get_settings_path() / "settings.json";;
 
@@ -283,7 +235,7 @@ void KEYBOARD_INPUT::getNextInteraction(std::filesystem::path& folderPath)
                 if (starts_with(content, "stop talking"))
                 {
                     std::cout << "[INTERUPTION]" << std::endl;
-                    LIRA.setLiraInterrupt(PROPS.lira_control_file);
+                    STOP_TALKING_REQUESTED = true;
                     INTERRUPTED = true;
                     ENTER_PRESSED = true;
                 }

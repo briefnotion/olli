@@ -51,25 +51,6 @@ class Settings {
 
 // ----
 
-class LIRA_CONTROL 
-{
-    public:
-        /**
-         * Checks the control file to see if Lira is currently speaking.
-         * Returns true if is_speaking is true, false otherwise.
-         */
-        bool isLiraSpeaking(std::filesystem::path Control_File_JSON);
-
-        /**
-         * Sets the interrupt signal to true in the control file.
-         * This will trigger the Python monitor to kill the speech process.
-         */
-        void setLiraInterrupt(std::filesystem::path Control_File_JSON);
-};
-
-
-// ----
-
 
 /**
  * VOCA_CONTROL Class
@@ -120,7 +101,6 @@ class KEYBOARD_INPUT_PROPERTIES
     public:
 
     std::filesystem::path path_input = "";
-    std::filesystem::path lira_control_file = "";
 
     bool ENABLED = false;
     bool ENABLE_LIRA_VOCA = true;
@@ -144,9 +124,12 @@ class KEYBOARD_INPUT
         bool INTERRUPTED = false;
         bool IS_TYPING = false;
 
+        // Set when "stop talking" is heard/typed; the main loop forwards
+        // this to AUDIO_CONTROL_CLASS::stop_speaking() and clears it.
+        bool STOP_TALKING_REQUESTED = false;
+
         // Voca
         VOCA_CONTROL VOCA;
-        LIRA_CONTROL LIRA;
 
         KEYBOARD_INPUT();
         ~KEYBOARD_INPUT();

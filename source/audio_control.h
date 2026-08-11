@@ -11,6 +11,7 @@
 
 #include "fled_time.h"
 #include "threading.h"
+#include "tts.hpp"
 
 #define DEF_VOCA_SLEEP  0
 #define DEF_VOCA_PAUSE  1
@@ -20,21 +21,9 @@
  * @file audio_control.h
  * @brief Header file for audio control functionality.
  *
- * This file contains the AUDIO_CONTROL_CLASS which manages audio settings
- * and controls interactions between LIRA and VOCA systems.
+ * This file contains the AUDIO_CONTROL_CLASS which owns text-to-speech
+ * (via the in-process TextToSpeech class) and coordinates it with VOCA.
  */
-
-/**
- * @struct LIRA_CONTROL_CONFIG
- * @brief Configuration structure for LIRA audio control settings.
- *
- * Contains flags for interrupt handling and speaking status from the LIRA system.
- */
-struct LIRA_CONTROL_CONFIG {
-    bool interrupt = false;    /**< Flag indicating if audio should be interrupted */
-    bool is_speaking = false;  /**< Flag indicating if LIRA is currently speaking */
-};
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(LIRA_CONTROL_CONFIG, interrupt, is_speaking)        
 
 /**
  * @struct VOCA_CONTROL_CONFIG
@@ -65,11 +54,12 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(VOCA_COMMAND_CONFIG, command, last_update)
 
 /**
  * @class AUDIO_CONTROL_CLASS
- * @brief Main class for coordinating audio control between LIRA and VOCA systems.
+ * @brief Owns text-to-speech and coordinates it with VOCA (voice assistant).
  *
- * This class manages the interaction between LIRA (speech synthesis) and VOCA (voice assistant)
- * systems by monitoring their status files and sending appropriate commands to coordinate
- * their audio behavior.
+ * Speech is synthesized/played in-process via TextToSpeech. VOCA is a
+ * separate Python process, so it's still coordinated through its status/
+ * command files: while TTS is speaking, VOCA is paused so it doesn't hear
+ * olli's own voice; once speech stops, VOCA resumes listening.
  */
 class AUDIO_CONTROL_CLASS
 {
@@ -78,16 +68,15 @@ class AUDIO_CONTROL_CLASS
         THREADING_INFO  THREAD_CONTROL;  // Controls: update_frame_thread()
         std::filesystem::path settings_path;
 
-        std::filesystem::file_time_type LIRA_lastKnownTime;
-        LIRA_CONTROL_CONFIG LIRA_SETTINGS;
-        
+        TextToSpeech tts;
+        bool tts_was_speaking = false; // last-seen isSpeaking(), to detect start/stop transitions
+
         std::filesystem::file_time_type VOCA_lastKnownTime;
         VOCA_CONTROL_CONFIG VOCA_SETTINGS;
 
         VOCA_COMMAND_CONFIG VOCA_COMMAND_SETTINGS;
 
         bool VOCA_STATUS_CHANGED = false;
-        bool LIRA_STATUS_CHANGED = false;
 
         bool CONTROL_AWAKE = true;
 
@@ -170,6 +159,12 @@ class AUDIO_CONTROL_CLASS
         void create(const std::filesystem::path& filePath);
 
         void VOCA_manual_set(int Command);
+
+        // Queues text to be spoken (see TextToSpeech::speakAsync).
+        void speak(const std::string& text);
+
+        // Interrupts speech in progress and clears anything queued.
+        void stop_speaking();
 
         void thread_main();
 

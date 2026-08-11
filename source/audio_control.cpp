@@ -32,19 +32,19 @@ void AUDIO_CONTROL_CLASS::adjust_audio_files(double Time)
         VOCA Sleeping   VOCA_SETTINGS.is_awake = false
         LISTEN
         Voca Listening  VOCA_SETTINGS.is_awake = true
-            
+
         PAUSE
 
-    LIRA Status's
+    TTS Status (in-process, no file involved)
 
-        INTERRUPT
-        LIRA Interrupt   LIRA_SETTINGS.interrupt = true     
-        SPEAKING
-        LIRA Speaking    LIRA_SETTINGS.is_speaking = true   
+        SPEAKING        tts.isSpeaking() == true
     */
 
     VOCA_STATUS_CHANGED = checkAndLoadFile(settings_path / "voca_status.json", VOCA_lastKnownTime, VOCA_SETTINGS);
-    LIRA_STATUS_CHANGED = checkAndLoadFile(settings_path / "lira_control.json", LIRA_lastKnownTime, LIRA_SETTINGS);
+
+    bool tts_is_speaking = tts.isSpeaking();
+    bool tts_speaking_changed = (tts_is_speaking != tts_was_speaking);
+    tts_was_speaking = tts_is_speaking;
 
     // Wake command recieved from VOCA status.
     if (CONTROL_AWAKE == false)
@@ -70,21 +70,19 @@ void AUDIO_CONTROL_CLASS::adjust_audio_files(double Time)
         }
     }
 
-    //  If LIRA starts speaking, then we pause VOCA. If LIRA stops speaking, then we set VOCA to listen.
+    //  If TTS starts speaking, then we pause VOCA. If TTS stops speaking, then we set VOCA to listen.
     if (CONTROL_AWAKE)
     {
-        if (LIRA_STATUS_CHANGED && LIRA_SETTINGS.is_speaking)
+        if (tts_speaking_changed && tts_is_speaking)
         {
             //cout << "VOCA_set(Time, DEF_VOCA_PAUSE)" << endl;
             VOCA_set(DEF_VOCA_PAUSE);
-            LIRA_STATUS_CHANGED = false;
         }
 
-        if (LIRA_STATUS_CHANGED && LIRA_SETTINGS.is_speaking == false)
+        if (tts_speaking_changed && !tts_is_speaking)
         {
             //cout << "VOCA_set(Time, DEF_VOCA_LISTEN)" << endl;
             VOCA_set(DEF_VOCA_LISTEN);
-            LIRA_STATUS_CHANGED = false;
 
             AUDIO_TIMER.set(Time, 10000);
         }
@@ -95,7 +93,7 @@ void AUDIO_CONTROL_CLASS::adjust_audio_files(double Time)
     {
         if (CONTROL_AWAKE)
         {
-            if (LIRA_SETTINGS.is_speaking == false)
+            if (!tts_is_speaking)
             {
                 //cout << "Timer Control: Setting VOCA to Sleep" << endl;
                 VOCA_set(DEF_VOCA_SLEEP);
@@ -118,9 +116,6 @@ AUDIO_CONTROL_CLASS::AUDIO_CONTROL_CLASS()
 void AUDIO_CONTROL_CLASS::create(const std::filesystem::path& filePath)
 {
     settings_path =  filePath;
-    if (std::filesystem::exists(settings_path / "lira_control.json")) {
-        LIRA_lastKnownTime = std::filesystem::last_write_time(settings_path / "lira_control.json");
-    }
     if (std::filesystem::exists(settings_path / "voca_status.json")) {
         VOCA_lastKnownTime = std::filesystem::last_write_time(settings_path / "voca_status.json");
     }
@@ -129,6 +124,16 @@ void AUDIO_CONTROL_CLASS::create(const std::filesystem::path& filePath)
 void AUDIO_CONTROL_CLASS::VOCA_manual_set(int Command)
 {
     VOCA_REQUESTED_CHANGE = Command;
+}
+
+void AUDIO_CONTROL_CLASS::speak(const std::string& text)
+{
+    tts.speakAsync(text);
+}
+
+void AUDIO_CONTROL_CLASS::stop_speaking()
+{
+    tts.stop();
 }
 
 void AUDIO_CONTROL_CLASS::thread_main()

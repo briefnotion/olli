@@ -64,6 +64,7 @@ add_executable(olli
     ../source/tools_helper.cpp
     ../source/stringthings.cpp
     ../source/audio_control.cpp
+    ../source/tts.cpp
     ../source/sidetrack.cpp
     ../source/threading.cpp
     ../source/fled_time.cpp

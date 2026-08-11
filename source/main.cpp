@@ -29,8 +29,9 @@ int main() {
     chat.TOOL_PERMISSIONS.TASK_RUNNER = true;
 
     chat.PROPS.use_thinking = false;
-    chat.PROPS.model = "qwen3:8b"; 
+    chat.PROPS.model = "qwen3:8b";
     chat.open();
+    chat.set_audio_control(&system.audio_control);
 
     system.audio_control.create(system.setings_vars.get_settings_path());
     system.audio_control.thread_start();
@@ -40,7 +41,6 @@ int main() {
 
     //
     system.key_input.PROPS.path_input = system.setings_vars.get_settings_path() / "input";
-    system.key_input.PROPS.lira_control_file = system.setings_vars.get_settings_path() / "lira_control.json";
     system.key_input.PROPS.ENABLED = true;
 
     //
@@ -59,6 +59,11 @@ int main() {
         if (system.key_input.INTERRUPTED)
         {
             sidetrack.SIGNALS.INTERUPT_SIGNAL = true;
+        }
+        if (system.key_input.STOP_TALKING_REQUESTED)
+        {
+            system.audio_control.stop_speaking();
+            system.key_input.STOP_TALKING_REQUESTED = false;
         }
 
         if (chat.input(system))

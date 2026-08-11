@@ -2,6 +2,7 @@
 #define olla_cpp
 
 #include "olla.h"
+#include "audio_control.h"
 
 void add_tool(json& tools, const std::string& name, const std::string& description, json parameters) 
 {
@@ -1528,23 +1529,18 @@ void ollama_system::save_history()
 // ----
 
 
-void ollama_system::write_to_tts() 
+void ollama_system::write_to_tts()
 {
     if (!tts_buffer.empty())
     {
         if ((tts_buffer.find_first_of(".!?,:;") != std::string::npos || tts_buffer.length() > 60) ||
         status.is_active == false)
         {
-            if (!std::filesystem::exists(PROPS.path_output / "output.txt"))
+            if (audio_control_ptr != nullptr)
             {
-                std::ofstream out(PROPS.path_output / "output.txt");
-                if (out.is_open()) 
-                {
-                    out << tts_filter(tts_buffer);
-                    out.close();
-                    tts_buffer.clear();
-                }
+                audio_control_ptr->speak(tts_filter(tts_buffer));
             }
+            tts_buffer.clear();
         }
     }
 }

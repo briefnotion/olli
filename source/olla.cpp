@@ -1536,9 +1536,9 @@ void ollama_system::write_to_tts()
         if ((tts_buffer.find_first_of(".!?,:;") != std::string::npos || tts_buffer.length() > 60) ||
         status.is_active == false)
         {
-            if (audio_control_ptr != nullptr)
+            if (g_audio_control != nullptr)
             {
-                audio_control_ptr->speak(tts_filter(tts_buffer));
+                g_audio_control->speak(tts_filter(tts_buffer));
             }
             tts_buffer.clear();
         }
@@ -1632,9 +1632,6 @@ bool ollama_system::input(CLASS_SYSTEM& System)
         if (chat_thread.joinable()) chat_thread.join();
         is_processing = false;
         std::cout << "\n[Interrupting for new input...]" << std::endl;
-        
-        // Return true because the current session was closed/interrupted
-        return true;
     }
 
     // 2. ORIGINAL INPUT LOGIC

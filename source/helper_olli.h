@@ -124,10 +124,6 @@ class KEYBOARD_INPUT
         bool INTERRUPTED = false;
         bool IS_TYPING = false;
 
-        // Set when "stop talking" is heard/typed; the main loop forwards
-        // this to AUDIO_CONTROL_CLASS::stop_speaking() and clears it.
-        bool STOP_TALKING_REQUESTED = false;
-
         // Voca
         VOCA_CONTROL VOCA;
 

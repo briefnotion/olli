@@ -109,6 +109,13 @@ void SIDETRACK_CLASS::create(OLLAMA_SYSTEM_PROPERTIES Ollama_Properties)
     SIDETRACK_CHAT_INSTANCE.PROPS = Ollama_Properties;
 }
 
+/**
+ * Runs on the sidetrack background thread (started via thread_start, joined
+ * via thread_stop) for the lifetime of the program. Ticks roughly every
+ * INTERVAL ms. Drives ROUTINE (0=idle, 1=consolidation, 2=second-guess
+ * review) and each routine's *_PROCESSING_STAGE - see the class-level
+ * comment in sidetrack.h for how this hands off to check() (main thread).
+ */
 void SIDETRACK_CLASS::thread_main()
 {
     TIMED_IS_READY  frame_limit;     // Controls sleep time
@@ -138,7 +145,8 @@ void SIDETRACK_CLASS::thread_main()
             INTERUPT.store(false);
         }
 
-        // MAIN THREAD ROUTINE GOES HERE
+        // Sidetrack's per-tick routine dispatch (despite the name, this
+        // whole block runs on the SIDETRACK thread, not the main one).
         {
             PROCESSING.store(true);
 
@@ -150,6 +158,11 @@ void SIDETRACK_CLASS::thread_main()
                     ROUTINE = 1; // Start consolidation routine
                 }
 
+                // Note: if both conditions are true on the same tick, this
+                // silently wins over the ROUTINE = 1 assignment just above -
+                // a second-guess review always takes priority over a
+                // consolidation pass that happened to become ready at the
+                // same moment.
                 if (CHAT_FINISHED.load())
                 {
                     //std::cout << "Sidetrack: Chat finished signal received." << std::endl;
@@ -158,7 +171,12 @@ void SIDETRACK_CLASS::thread_main()
                 }
             }
 
-            // Consolidation
+            // Consolidation - see CHAT_HISTORY_PROCESSING_STAGE's comments
+            // in sidetrack.h for what each stage means and which thread
+            // handles it. Note: SIDETRACK_CHAT_INSTANCE.PROPS is passed
+            // here purely as a config bundle (model/host/port/etc) for
+            // consolidate()'s own local, separate ollama_system - this
+            // doesn't touch SIDETRACK_CHAT_INSTANCE itself or its history.
             if (ROUTINE == 1)
             {
                 if (CHAT_HISTORY_PROCESSING_STAGE == 0)
@@ -192,6 +210,10 @@ void SIDETRACK_CLASS::thread_main()
                     ROUTINE = 0;
                 }
 
+                // Re-armed every tick this routine is active (not just once
+                // at the end), so the idle wait always starts fresh
+                // relative to whenever consolidation last did anything -
+                // including while it's still mid-pass across several ticks.
                 IDLE_WAIT_TIMER_FOR_CONSOLIDATION.set(thread_time.current_frame_time(), IDLE_WAIT_TIME_FOR_CONSOLIDATION);
             }
 
@@ -200,7 +222,15 @@ void SIDETRACK_CLASS::thread_main()
 
                 if (SIGNALS.INTERUPT_SIGNAL == true)
                 {
-                    // abort routine if interupt signal received.
+                    // This only ever catches an interrupt that arrives
+                    // BEFORE stage 2's SIDETRACK_CHAT_INSTANCE.send() call
+                    // below starts - once that call is running, this
+                    // thread is blocked inside it and can't reach this
+                    // check again until send() returns on its own (see the
+                    // GOTCHA in the class-level comment in sidetrack.h).
+                    // Actually aborting an in-flight send() is check()'s
+                    // job, via SIDETRACK_CHAT_INSTANCE.stop() - it runs on
+                    // the main thread, which isn't blocked.
                     SECOND_GUESS_PROCESSING_STAGE = 3;
                 }
 
@@ -220,10 +250,17 @@ void SIDETRACK_CLASS::thread_main()
                 {
                     // std::cout << "Sidetrack: Post-chat review complete." << std::endl;
 
-                    SIDETRACK_CHAT_INSTANCE.history = temp_chat_history;                    
+                    SIDETRACK_CHAT_INSTANCE.history = temp_chat_history;
                     SIDETRACK_CHAT_INSTANCE.PROPS.use_thinking = true; // Enable thinking mode to get more detailed analysis from the model.
+                    SIDETRACK_CHAT_INSTANCE.status.interrupt_signal = false; // clear any flag left by a previous interrupt
 
                     //SIDETRACK_CHAT_INSTANCE.send("Review the conversation that just finished. Identify any potential misunderstandings, missed user intents, or areas where the assistant's response could have been improved. Provide a concise analysis of what could be done better in future interactions.", "system");
+                    // NOTE: this is a direct, BLOCKING call - not launched
+                    // on its own thread like the main chat's sends are. The
+                    // sidetrack thread sits here for the entire duration of
+                    // the model's response (can be several seconds), unable
+                    // to do anything else, including notice a fresh
+                    // interrupt (see the check above).
                     SIDETRACK_CHAT_INSTANCE.send("You are the 'Internal Monologue' of the assistant. Review the turn "
                         "that just ended. If there are technical details, edge cases, or deeper insights that were "
                         "missed for the sake of brevity, provide them now. "
@@ -241,7 +278,16 @@ void SIDETRACK_CLASS::thread_main()
                     bool dummy_enable_keyboard_input = false; // This routine does not require keyboard input, but we pass the variable to satisfy the function signature.
 
 
-                    while (SIDETRACK_CHAT_INSTANCE.is_processing || !SIDETRACK_CHAT_INSTANCE.tts_buffer.empty())                    
+                    // send() above already blocked until the response was
+                    // complete (or aborted), so by the time execution
+                    // reaches here the network call is already done. Note
+                    // SIDETRACK_CHAT_INSTANCE.is_processing is never true in
+                    // this loop - send() only ever sets that flag when it's
+                    // launched on its own thread (as the main chat does),
+                    // which this call isn't. So this loop is really just
+                    // draining tts_buffer via process() calls (a handful of
+                    // iterations at most), not "waiting for streaming."
+                    while (SIDETRACK_CHAT_INSTANCE.is_processing || !SIDETRACK_CHAT_INSTANCE.tts_buffer.empty())
                     {
                         if (starts_with(SIDETRACK_CHAT_INSTANCE.last_received.response, "DONE"))
                         {
@@ -252,6 +298,11 @@ void SIDETRACK_CLASS::thread_main()
                         SIDETRACK_CHAT_INSTANCE.process(dummy_enable_keyboard_input);
                     }
 
+                    // Reaching here without hitting the DONE break above
+                    // means the review said something worth keeping (or
+                    // was interrupted mid-generation) - stage 3 is where
+                    // check() decides whether it actually has anything new
+                    // to fold in.
                     if (SECOND_GUESS_PROCESSING_STAGE != 4)
                     {
                         SECOND_GUESS_PROCESSING_STAGE = 3;
@@ -305,12 +356,26 @@ void SIDETRACK_CLASS::thread_stop()
     THREAD_CONTROL.wait_for_thread_to_finish();
 }
 
+/**
+ * Runs on the MAIN thread - called once per main-loop tick, right after
+ * chat.process() (see main.cpp). This is the only place allowed to read or
+ * write main_instance.history directly, so it handles every *_PROCESSING_
+ * STAGE step that touches the real conversation, plus consuming SIGNALS
+ * (see sidetrack.h) into their atomic counterparts for the sidetrack
+ * background thread to see.
+ */
 void SIDETRACK_CLASS::check(ollama_system& main_instance)
 {
     if (SIGNALS.INTERUPT_SIGNAL)
     {
         INTERUPT.store(true);
         SIGNALS.INTERUPT_SIGNAL = false;
+
+        // The sidetrack thread can't notice an interrupt itself while it's
+        // blocked inside SIDETRACK_CHAT_INSTANCE.send() - only this (main)
+        // thread can. This actually aborts an in-flight second-guess LLM
+        // call instead of just letting it run to completion.
+        SIDETRACK_CHAT_INSTANCE.stop();
     }
 
     if (SIGNALS.CHAT_FINISHED_SIGNAL)
@@ -323,12 +388,22 @@ void SIDETRACK_CLASS::check(ollama_system& main_instance)
 
     // Consolidation Routine
     {
+        // Snapshot the real history for consolidate() (sidetrack thread,
+        // stage 2) to work on.
         if (CHAT_HISTORY_PROCESSING_STAGE == 1)
         {
             temp_chat_history =  main_instance.history;
             CHAT_HISTORY_PROCESSING_STAGE = 2;
         }
 
+        // consolidate() finished with a real change to commit. Unlike the
+        // second-guess routine (see SIDETRACK_CHAT_INSTANCE.stop() above),
+        // consolidation's own LLM call is never actually aborted mid-flight
+        // if the user interacts while it's running - it always runs to
+        // completion. This is the "abandon and revert" part instead: if an
+        // interrupt happened at any point during the pass, INTERUPT is
+        // still true here, and the result is simply discarded rather than
+        // written back - by design, so a change never lands mid-interaction.
         if (CHAT_HISTORY_PROCESSING_STAGE == 3)
         {
             if (INTERUPT.load() == false)
@@ -342,20 +417,32 @@ void SIDETRACK_CLASS::check(ollama_system& main_instance)
 
     // Second Guess Routine
     {
+        // Snapshot the real history as context for the review prompt
+        // (sidetrack thread, stage 2, seeds SIDETRACK_CHAT_INSTANCE with it).
         if (SECOND_GUESS_PROCESSING_STAGE == 1)
         {
             temp_chat_history =  main_instance.history;
             SECOND_GUESS_PROCESSING_STAGE = 2;
         }
 
-        // Second Guess Routine
+        // Reached either because the review had something to say (normal
+        // path out of stage 2), or forced here directly by an interrupt
+        // (thread_main's SIGNALS.INTERUPT_SIGNAL check, or the stop() call
+        // above in this function).
         if (SECOND_GUESS_PROCESSING_STAGE == 3)
         {
-            // Only fold the review back into the main conversation when the
-            // side instance actually produced something. Calling .back() on an
-            // empty vector (e.g. the routine was interrupted before any
-            // response) is undefined behaviour.
-            if (!SIDETRACK_CHAT_INSTANCE.history.empty())
+            // Fold the review's reply into the main conversation only if
+            // this cycle actually generated one. send() always pushes its
+            // own prompt onto SIDETRACK_CHAT_INSTANCE.history immediately,
+            // before generation even starts, so a non-empty history alone
+            // doesn't mean anything new was said - it could just be that
+            // prompt, or a stale reply left over from an earlier cycle that
+            // this one never got the chance to replace (e.g. interrupted
+            // before any content was generated). last_received.response is
+            // reset at the top of every send() call, so a non-empty value
+            // here reliably means this specific call produced real content
+            // (complete or partial/interrupted, either way worth keeping).
+            if (!SIDETRACK_CHAT_INSTANCE.last_received.response.empty())
             {
                 main_instance.history.push_back(SIDETRACK_CHAT_INSTANCE.history.back());
             }

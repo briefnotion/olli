@@ -24,7 +24,7 @@ using json = nlohmann::json;
 // --- FORWARD DECLARATION ---
 
 class ollama_system;
-class AUDIO_CONTROL_CLASS; // for the text-to-speech output hook; see set_audio_control
+class AUDIO_CONTROL_CLASS; // for the text-to-speech output hook; see g_audio_control below
 /**
  * @brief Structure representing a single chat message in the history.
  */
@@ -279,10 +279,6 @@ class ollama_system {
 
         void history_write(std::string Directory);
 
-        // Not owned; null unless set_audio_control was called (only the main
-        // chat instance gets one - see main.cpp). write_to_tts() no-ops if unset.
-        AUDIO_CONTROL_CLASS* audio_control_ptr = nullptr;
-
     public:
 
         void handle_instance_tools(bool& Keyboard_Input_Enabled);
@@ -290,10 +286,7 @@ class ollama_system {
         // Explicit flush to disk, e.g. right after consolidation commits or on shutdown.
         void save_history();
 
-        // Wires this instance's spoken output to an AUDIO_CONTROL_CLASS.
-        void set_audio_control(AUDIO_CONTROL_CLASS* audio_control) { audio_control_ptr = audio_control; }
-
-        std::string OLLAMA_OPENING =             
+        std::string OLLAMA_OPENING =
                 //"You are a but helpful assistant with access to tools. "
                 //"1. For delayed requests, use set_timer. Always summarize the "
                 //"user's intent in the 'reminder' field (e.g., 'Turn off "
@@ -360,5 +353,13 @@ class ollama_system {
 // yields one shared instance across all translation units with no
 // "multiple definition" linker error.
 inline std::mutex history_mutex;
+
+// The one text-to-speech output for the whole process. There's only ever
+// one physical speaker, so every ollama_system instance (the main chat,
+// sidetrack's second-guess review, task-runner/delegator sub-instances)
+// routes spoken output through the same AUDIO_CONTROL_CLASS rather than
+// each needing to be wired up individually. Set once in main.cpp; null
+// until then, in which case write_to_tts() just no-ops.
+inline AUDIO_CONTROL_CLASS* g_audio_control = nullptr;
 
 #endif

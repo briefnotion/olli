@@ -231,29 +231,18 @@ void KEYBOARD_INPUT::getNextInteraction(std::filesystem::path& folderPath)
 
                 // ---- 
 
-                // check wakeup and sleep
-                if (starts_with(content, "stop talking"))
+                if (starts_with(content, "go to sleep"))
                 {
-                    std::cout << "[INTERUPTION]" << std::endl;
-                    STOP_TALKING_REQUESTED = true;
+                    VOCA.sendCommand("sleep");
+                    std::cout << LINE << std::endl;
                     INTERRUPTED = true;
                     ENTER_PRESSED = true;
                 }
                 else
                 {
-                    if (starts_with(content, "go to sleep"))
-                    {
-                        VOCA.sendCommand("sleep");
-                        std::cout << LINE << std::endl;
-                        INTERRUPTED = true;
-                        ENTER_PRESSED = true;
-                    }
-                    else
-                    {
-                        std::cout << LINE << std::endl;
-                        INTERRUPTED = true;
-                        ENTER_PRESSED = true;
-                    }
+                    std::cout << LINE << std::endl;
+                    INTERRUPTED = true;
+                    ENTER_PRESSED = true;
                 }
             }
         }

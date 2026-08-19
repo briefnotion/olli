@@ -3,109 +3,30 @@
 
 #include "audio_control.h"
 
-void AUDIO_CONTROL_CLASS::VOCA_set(int Command)
-{
-    switch (Command)
-    {
-        case DEF_VOCA_SLEEP:
-            VOCA_COMMAND_SETTINGS.command = "sleep";
-            break;
-        case DEF_VOCA_PAUSE:
-            VOCA_COMMAND_SETTINGS.command = "pause";
-            break;
-        case DEF_VOCA_LISTEN:
-            VOCA_COMMAND_SETTINGS.command = "listen";
-            break;
-        default:
-            std::cerr << "Invalid VOCA command: " << Command << std::endl;
-            return;
-    }
-    writeFile(settings_path / "voca_command.json", VOCA_COMMAND_SETTINGS);
-}
-
 void AUDIO_CONTROL_CLASS::adjust_audio_files(double Time)
 {
-    /*
-    VOCA Status's
+    (void)Time;
 
-        SLEEP
-        VOCA Sleeping   VOCA_SETTINGS.is_awake = false
-        LISTEN
-        Voca Listening  VOCA_SETTINGS.is_awake = true
-
-        PAUSE
-
-    TTS Status (in-process, no file involved)
-
-        SPEAKING        tts.isSpeaking() == true
-    */
-
-    VOCA_STATUS_CHANGED = checkAndLoadFile(settings_path / "voca_status.json", VOCA_lastKnownTime, VOCA_SETTINGS);
+    if (voca == nullptr) return;
 
     bool tts_is_speaking = tts.isSpeaking();
     bool tts_speaking_changed = (tts_is_speaking != tts_was_speaking);
     tts_was_speaking = tts_is_speaking;
 
-    // Wake command recieved from VOCA status.
-    if (CONTROL_AWAKE == false)
+    // If TTS starts speaking, pause Voca so it doesn't hear olli's own
+    // voice. If TTS stops speaking, resume listening. Voca handles its own
+    // wake-word detection and auto-sleep timeout internally - nothing else
+    // to poll here.
+    if (tts_speaking_changed)
     {
-        if (VOCA_SETTINGS.is_awake)
+        if (tts_is_speaking)
         {
-            //cout << "CONTROL_AWAKE = true          " << Time <<endl;
-            CONTROL_AWAKE = true;
-            VOCA_STATUS_CHANGED = false;
-
-            AUDIO_TIMER.set(Time, 10000);
+            voca->pause();
         }
-    }
-
-    // Sleep command recieved from VOCA status.
-    if (CONTROL_AWAKE == true)
-    {
-        if (VOCA_STATUS_CHANGED && VOCA_SETTINGS.is_awake == false)
+        else
         {
-            //cout << "CONTROL_SLEEPING = true" << endl;
-            CONTROL_AWAKE = false;
-            VOCA_STATUS_CHANGED = false;
+            voca->resume();
         }
-    }
-
-    //  If TTS starts speaking, then we pause VOCA. If TTS stops speaking, then we set VOCA to listen.
-    if (CONTROL_AWAKE)
-    {
-        if (tts_speaking_changed && tts_is_speaking)
-        {
-            //cout << "VOCA_set(Time, DEF_VOCA_PAUSE)" << endl;
-            VOCA_set(DEF_VOCA_PAUSE);
-        }
-
-        if (tts_speaking_changed && !tts_is_speaking)
-        {
-            //cout << "VOCA_set(Time, DEF_VOCA_LISTEN)" << endl;
-            VOCA_set(DEF_VOCA_LISTEN);
-
-            AUDIO_TIMER.set(Time, 10000);
-        }
-    }
-
-    // Timer Control.
-    if (AUDIO_TIMER.is_ready(Time))
-    {
-        if (CONTROL_AWAKE)
-        {
-            if (!tts_is_speaking)
-            {
-                //cout << "Timer Control: Setting VOCA to Sleep" << endl;
-                VOCA_set(DEF_VOCA_SLEEP);
-            }
-        }
-    }
-
-    // Manual override control from user input.
-    if (VOCA_REQUESTED_CHANGE > -1)
-    {
-        VOCA_set(VOCA_REQUESTED_CHANGE);
-        VOCA_REQUESTED_CHANGE = -1;
     }
 }
 
@@ -115,15 +36,61 @@ AUDIO_CONTROL_CLASS::AUDIO_CONTROL_CLASS()
 
 void AUDIO_CONTROL_CLASS::create(const std::filesystem::path& filePath)
 {
-    settings_path =  filePath;
-    if (std::filesystem::exists(settings_path / "voca_status.json")) {
-        VOCA_lastKnownTime = std::filesystem::last_write_time(settings_path / "voca_status.json");
+    settings_path = filePath;
+
+    Voca::Callbacks callbacks;
+
+    // Ordinary transcript text is pulled directly from voca's own
+    // textAvailable()/getNextLine() in popVocaEvent() below - no need to
+    // duplicate it into a callback-fed queue here too.
+
+    callbacks.onInterrupt = [this](const std::string& /*text*/)
+    {
+        // Interrupt-only: signals the main loop to stop TTS/sidetrack
+        // without submitting anything new as a chat message.
+        std::lock_guard<std::mutex> lock(voca_events_mutex);
+        voca_events.push_back(VOCA_EVENT{""});
+    };
+
+    callbacks.onWake = [](const std::string& trigger)
+    {
+        std::cout << "\n[VOCA] awake (\"" << trigger << "\")" << std::endl;
+    };
+
+    callbacks.onSleep = []()
+    {
+        std::cout << "\n[VOCA] asleep" << std::endl;
+    };
+
+    voca = std::make_unique<Voca>((settings_path / "models" / "ggml-small.en.bin").string(),
+                                   std::move(callbacks));
+    if (!voca->start())
+    {
+        std::cerr << "AUDIO_CONTROL_CLASS: Voca failed to start - speech-to-text disabled.\n";
+        voca.reset();
     }
 }
 
 void AUDIO_CONTROL_CLASS::VOCA_manual_set(int Command)
 {
-    VOCA_REQUESTED_CHANGE = Command;
+    if (voca == nullptr) return;
+
+    switch (Command)
+    {
+        case DEF_VOCA_SLEEP:
+            voca->sleep();
+            break;
+        case DEF_VOCA_PAUSE:
+            voca->pause();
+            break;
+        case DEF_VOCA_LISTEN:
+            voca->wake();
+            voca->resume();
+            break;
+        default:
+            std::cerr << "Invalid VOCA command: " << Command << std::endl;
+            break;
+    }
 }
 
 void AUDIO_CONTROL_CLASS::speak(const std::string& text)
@@ -136,10 +103,33 @@ void AUDIO_CONTROL_CLASS::stop_speaking()
     tts.stop();
 }
 
+bool AUDIO_CONTROL_CLASS::popVocaEvent(VOCA_EVENT& out)
+{
+    // Interrupt-only events take priority - they signal "stop what's
+    // happening now" and shouldn't wait behind queued transcript text.
+    {
+        std::lock_guard<std::mutex> lock(voca_events_mutex);
+        if (!voca_events.empty())
+        {
+            out = std::move(voca_events.front());
+            voca_events.pop_front();
+            return true;
+        }
+    }
+
+    if (voca != nullptr && voca->textAvailable())
+    {
+        out = VOCA_EVENT{voca->getNextLine()};
+        return true;
+    }
+
+    return false;
+}
+
 void AUDIO_CONTROL_CLASS::thread_main()
 {
     TIMED_IS_READY  frame_limit;     // Controls sleep time
-    FLED_TIME thread_time;           // Thread gets its own Time 
+    FLED_TIME thread_time;           // Thread gets its own Time
     thread_time.create();
 
     RUN = true;
@@ -164,13 +154,15 @@ void AUDIO_CONTROL_CLASS::thread_start()
         THREAD_CONTROL.create(1000);
         // Start the camera update on a separate thread.
         // This call is non-blocking, so the main loop can continue immediately.
-        THREAD_CONTROL.start_render_thread([&]() 
+        THREAD_CONTROL.start_render_thread([&]()
                   {  thread_main();  });
     }
 }
 
 void AUDIO_CONTROL_CLASS::thread_stop()
 {
+    if (voca != nullptr) voca->stop();
+
     // See SIDETRACK_CLASS::thread_stop for why this actually waits on the
     // thread instead of just flipping a flag and returning.
     RUN = false;

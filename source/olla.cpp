@@ -789,7 +789,6 @@ void TOOL_TASK_RUNNER::handle_tool(
 
     KEYBOARD_INPUT keyboard_input;
     keyboard_input.PROPS.ENABLED = false;
-    keyboard_input.PROPS.ENABLE_LIRA_VOCA = false;
 
     // ---------------------------------------------------------
     // 1. GUARD CLAUSE
@@ -1046,15 +1045,15 @@ void ollama_system::open()
 {
     std::cout << "[System] Connecting to " << PROPS.host << ":" << PROPS.port << " (" << PROPS.model << ")" << std::endl;
     
-    std::filesystem::create_directories(PROPS.OLLI_DIERCTORY / "output");
-    std::filesystem::create_directories(PROPS.OLLI_DIERCTORY / "input");
+    std::filesystem::create_directories(PROPS.OLLI_DIRECTORY / "output");
+    std::filesystem::create_directories(PROPS.OLLI_DIRECTORY / "input");
     
     web.apiKey = PROPS.web_search_api_key;
     hue.set_credentials(PROPS.hue_ip, PROPS.hue_key, PROPS.hue_path);
-    task_runner.OLLI_DIRECTORY = PROPS.OLLI_DIERCTORY;
+    task_runner.OLLI_DIRECTORY = PROPS.OLLI_DIRECTORY;
 
-    PROPS.hue_path = (PROPS.OLLI_DIERCTORY / "scenes.json").string(); 
-    PROPS.path_output = PROPS.OLLI_DIERCTORY / "output";
+    PROPS.hue_path = (PROPS.OLLI_DIRECTORY / "scenes.json").string(); 
+    PROPS.path_output = PROPS.OLLI_DIRECTORY / "output";
     PROPS.path_history = ".";
 
     if (TOOL_PERMISSIONS.CURRENT_TIME)
@@ -1080,7 +1079,7 @@ void ollama_system::open()
 
     if (PROPS.LOAD_SAVE_HISTORY_ON_DISK)
     {
-        loadHistoryFromJson(PROPS.OLLI_DIERCTORY / "history.json");
+        loadHistoryFromJson(PROPS.OLLI_DIRECTORY / "history.json");
     }
 
     // Ensure a protected (consolidation_level -1) foundational message is
@@ -1243,6 +1242,7 @@ void ollama_system::send(const std::string& user_input, const std::string& role)
         {"messages", messages_json},
         {"stream", PROPS.stream_output},
         {"think", PROPS.use_thinking},
+        {"keep_alive", PROPS.keep_alive_seconds},
         {"options", {
             {"num_ctx", PROPS.num_ctx},
             //{"temperature", 0}
@@ -1394,6 +1394,8 @@ void ollama_system::send_tool_result(const std::string& tool_call_id, const std:
     msg.role = "tool";
     msg.content = result;
     msg.tool_call_id = tool_call_id;
+
+    std::lock_guard<std::mutex> lock(history_mutex);
     history.push_back(msg);
 }
 
@@ -1427,7 +1429,11 @@ bool ollama_system::saveHistoryToJson(std::filesystem::path filepath) {
     try {
         // Create a json object from the vector
         // nlohmann::json handles std::vector automatically if to_json is defined for the element
-        json j = history;
+        json j;
+        {
+            std::lock_guard<std::mutex> lock(history_mutex);
+            j = history;
+        }
 
         std::ofstream file(filepath);
         if (!file.is_open()) {
@@ -1478,7 +1484,7 @@ bool ollama_system::loadHistoryFromJson(std::filesystem::path filepath) {
 void ollama_system::history_write(std::string Directory) 
 {
     // First, we save the history to a JSON file for structured access and debugging.
-    saveHistoryToJson(PROPS.OLLI_DIERCTORY / "history.json");
+    saveHistoryToJson(PROPS.OLLI_DIRECTORY / "history.json");
 
     // Next, we create a human-readable text file for quick inspection.
     namespace fs = std::filesystem;
@@ -1499,16 +1505,19 @@ void ollama_system::history_write(std::string Directory)
         outFile << "Status: " << status.to_string() << std::endl;
         outFile << "------------------------------------" << std::endl;
 
-        for (size_t i = 0; i < history.size(); ++i) {
-            const auto& msg = history[i];
-            outFile << "Index: " << i << std::endl;
-            outFile << "Level: " << msg.consolidation_level << std::endl;
-            outFile << "Role:  " << msg.role << std::endl;
-            outFile << "Content: " << msg.content << std::endl;
-            if (!msg.tool_call_id.empty()) {
-                outFile << "Tool ID: " << msg.tool_call_id << std::endl;
+        {
+            std::lock_guard<std::mutex> lock(history_mutex);
+            for (size_t i = 0; i < history.size(); ++i) {
+                const auto& msg = history[i];
+                outFile << "Index: " << i << std::endl;
+                outFile << "Level: " << msg.consolidation_level << std::endl;
+                outFile << "Role:  " << msg.role << std::endl;
+                outFile << "Content: " << msg.content << std::endl;
+                if (!msg.tool_call_id.empty()) {
+                    outFile << "Tool ID: " << msg.tool_call_id << std::endl;
+                }
+                outFile << "------------------------------------" << std::endl;
             }
-            outFile << "------------------------------------" << std::endl;
         }
 
         outFile.close();
@@ -1524,6 +1533,22 @@ void ollama_system::save_history()
         history_write(PROPS.path_history);
         PREVIOUS_HISTORY_SIZE = history.size();
     }
+}
+
+void ollama_system::unload_model()
+{
+    // /api/generate with no "prompt" and keep_alive: 0 is Ollama's
+    // documented way to unload a model on demand, independent of whatever
+    // keep_alive value normal requests use (see PROPS.keep_alive_seconds).
+    json body = {
+        {"model", PROPS.model},
+        {"keep_alive", 0}
+    };
+
+    httplib::Headers headers = { {"Content-Type", "application/json"} };
+    httplib::Client cli(PROPS.host, PROPS.port);
+    cli.set_read_timeout(10); // just an unload signal - no generation happens, should return almost instantly
+    cli.Post("/api/generate", headers, body.dump(), "application/json");
 }
 
 // ----
@@ -1700,10 +1725,14 @@ void ollama_system::process(bool& Keyboard_Input_Enabled)
 
         if (PROPS.LOAD_SAVE_HISTORY_ON_DISK)
         {
-            if (history.size() != PREVIOUS_HISTORY_SIZE)
+            // status.total_messages was just set from history.size() under
+            // history_mutex in update_status() above - reusing it here
+            // avoids reading history.size() again without the lock.
+            size_t current_history_size = static_cast<size_t>(status.total_messages);
+            if (current_history_size != PREVIOUS_HISTORY_SIZE)
             {
                 history_write(PROPS.path_history);
-                PREVIOUS_HISTORY_SIZE = history.size();
+                PREVIOUS_HISTORY_SIZE = current_history_size;
             }
         }
     }

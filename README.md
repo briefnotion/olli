@@ -1,19 +1,18 @@
 # olli
 
-**olli** is a fully local, offline voice assistant. A C++ core drives a
-[Ollama](https://ollama.com) language model, calls real tools (clock, timers,
-web search, Philips Hue lights, scripted automations), speaks in-process via a
-local TTS engine, and talks to one Python helper process that gives it *ears*.
-Nothing leaves your machine except optional web searches and calls to your own
-Hue bridge.
+**olli** is a fully local, offline voice assistant. A single C++ process
+drives a [Ollama](https://ollama.com) language model, calls real tools (clock,
+timers, web search, Philips Hue lights, scripted automations), and both speaks
+and listens in-process via local TTS/STT engines. Nothing leaves your machine
+except optional web searches and calls to your own Hue bridge.
 
 ```
-        speech ──►  VOCA (ears, Python)  ──┐
-                                           │  files in ~/olli_files/
-   Hue lights ◄──                          ▼
-   web search ◄──►   olli  (C++ core + Ollama)   ◄── keyboard
-      timers  ◄──                          │
-                                            ▼
+        speech ──►  VOCA (ears, in-process)  ──┐
+                                                │
+   Hue lights ◄──                              ▼
+   web search ◄──►      olli  (C++ core + Ollama)   ◄── keyboard
+      timers  ◄──                              │
+                                                ▼
                                  voice  (in-process: espeak-ng + aplay)
 ```
 
@@ -21,38 +20,43 @@ Hue bridge.
 
 ## How it works
 
-olli is two cooperating processes. VOCA feeds it transcribed speech through
-JSON/text files in `~/olli_files/`; there is no socket or shared memory
-between them, which keeps VOCA decoupled and independently restartable.
-Speaking, by contrast, happens directly in-process — olli calls straight into
-its own `TextToSpeech` class (`tts.hpp`/`tts.cpp`), which shells out to
-`espeak-ng` for synthesis and `aplay` for playback on a background thread. No
-files, no second process, no polling.
+olli is a single process. Both halves of voice — listening and speaking —
+happen directly in-process, no sockets, files, or second process involved:
 
-| Process | Language | Role |
-|---------|----------|------|
-| **olli** | C++ | The "brain". Holds the conversation, calls the model over Ollama's HTTP API, runs tools, persists history, speaks via its own TTS class, and coordinates VOCA. |
-| **VOCA** (`python/voca.py`) | Python | The "ears". Wake-word detection + speech-to-text with [faster-whisper](https://github.com/SYSTRAN/faster-whisper). Writes transcripts for olli to read. |
+- **Listening** goes through `Voca` (`voca.hpp`/`voca.cpp`), an offline
+  wake-word + speech-to-text engine (whisper.cpp) running on its own capture
+  and transcription threads. `AUDIO_CONTROL_CLASS` (`audio_control.h`/`.cpp`)
+  owns it and drains transcripts once per main-loop tick in `main.cpp`.
+- **Speaking** goes through `TextToSpeech` (`tts.hpp`/`tts.cpp`), which shells
+  out to `espeak-ng` for synthesis and `aplay` for playback on a background
+  thread.
 
-### The shared folder (`~/olli_files/`)
-
-Everything VOCA-related is coordinated through files here (created
-automatically on first run):
-
-| Path | Direction | Purpose |
-|------|-----------|---------|
-| `input/*.txt` | VOCA → olli | Transcribed user speech, one file per utterance. olli consumes and deletes them. |
-| `voca_status.json` | VOCA → olli | VOCA's state (`awake` / `busy` / timestamp). |
-| `voca_command.json` | olli → VOCA | Commands to VOCA: `sleep`, `pause`, `listen`. |
-| `settings.json` | — | Your API keys and Hue bridge address (see [Configuration](#configuration)). |
-| `history.json` | — | Persisted chat history, reloaded on start. |
-| `history_debug.txt` | — | Human-readable dump of the current history. |
-| `scenes.json` | — | Locally saved Hue light scenes. |
-
-The audio coordination logic (in `audio_control.cpp`) keeps the microphone
-from hearing the assistant's own voice: it watches `TextToSpeech::isSpeaking()`
-directly (no file involved) and `pause`s VOCA while olli is talking, resuming
+`AUDIO_CONTROL_CLASS` coordinates the two directly in memory: it watches
+`TextToSpeech::isSpeaking()` and `pause`s Voca while olli is talking, resuming
 listening once speech ends.
+
+### The settings folder (`~/olli_files/`)
+
+Created automatically on first run, and used for persistence rather than
+inter-process coordination:
+
+| Path | Purpose |
+|------|---------|
+| `settings.json` | Your API keys and Hue bridge address (see [Configuration](#configuration)). |
+| `history.json` | Persisted chat history, reloaded on start. |
+| `history_debug.txt` | Human-readable dump of the current history. |
+| `scenes.json` | Locally saved Hue light scenes. |
+| `models/` | Whisper model file(s) for Voca's speech-to-text. Always shared — see below. |
+
+#### Profiles
+
+Passing a name on the command line (`./build/olli ron`) points everything
+above at `~/olli_files_ron/` instead of the shared `~/olli_files/`, so each
+person gets their own settings, history, and scenes. The first time a named
+profile runs, it's seeded by copying `~/olli_files/` (if one exists) rather
+than starting empty. `models/` is the one exception — it's never copied per
+profile and is always read from the shared `~/olli_files/models/`, since the
+whisper model file is large and has no reason to differ per person.
 
 ---
 
@@ -110,21 +114,16 @@ ollama serve            # if not already running
 ollama pull qwen3:8b
 ```
 
-Then start the two processes (each in its own terminal):
+Then start olli:
 
 ```bash
-# 1. the brain (and voice - TTS runs in-process)
-./build/olli
-
-# 2. the ears
-python python/voca.py
+./build/olli          # shared settings, ~/olli_files/
+./build/olli ron      # ron's own settings, ~/olli_files_ron/ (see Profiles below)
 ```
 
-VOCA declares its Python dependencies inline (PEP 723), so if you use
-[`uv`](https://github.com/astral-sh/uv) you can simply `uv run python/voca.py`.
-
-You can also run olli entirely on its own and just type — VOCA (speech input)
-is optional; speech output is available either way.
+Voice input and output both run in-process, so there's nothing else to start.
+You can also just type — speech input is optional; speech output is available
+either way.
 
 ### Text-to-speech
 
@@ -188,9 +187,9 @@ input (`[[ASK]]`) or a keypress (`[[ENTER TO CONTINUE]]`).
 
 ## Voice & keyboard commands
 
-**Wake / sleep (spoken to VOCA):** say *"hey voca"* to wake it; *"stop
+**Wake / sleep (spoken to Voca):** say *"hey voca"* to wake it; *"stop
 listening"* / *"sleep voca"* to sleep it; *"stop talking"* to interrupt speech.
-VOCA also auto-sleeps after 5 minutes of silence.
+Voca also auto-sleeps after 5 minutes of silence.
 
 **Jump phrases (typed or spoken)** trigger a scene macro directly, bypassing the
 model's tool loop:
@@ -211,9 +210,10 @@ model's tool loop:
 source/
 ├── main.cpp / main.h          Entry point and the main event loop.
 ├── olla.{h,cpp}               ollama_system: chat engine, streaming, tool dispatch, all tools.
-├── helper_olli.{h,cpp}        Settings, raw-mode keyboard input, VOCA control interface.
-├── audio_control.{h,cpp}      Owns the TTS class, coordinates it with VOCA via the shared files.
+├── helper_olli.{h,cpp}        Settings and raw-mode keyboard input.
+├── audio_control.{h,cpp}      Owns TTS and Voca in-process, coordinates the two.
 ├── tts.{hpp,cpp}              TextToSpeech: in-process synthesis (espeak-ng) + playback (aplay).
+├── voca.{hpp,cpp}             Voca: in-process wake-word + speech-to-text (whisper.cpp).
 ├── sidetrack.{h,cpp}          Background thread: history consolidation + post-turn "second guess".
 ├── tools_helper.{h,cpp}       HUE_LIGHT_CLASS, timers, task definitions, tool permissions.
 ├── stringthings.{h,cpp}       General-purpose string utility library.
@@ -221,9 +221,6 @@ source/
 ├── threading.{h,cpp}          Thin std::async thread wrapper.
 ├── system.h                   Aggregates Settings + keyboard + audio into one object.
 └── CMakeLists.txt             Build definition.
-
-python/
-└── voca.py                    VOCA — speech-to-text ("ears").
 ```
 
 ### The background "sidetrack" thread
@@ -245,8 +242,6 @@ Two housekeeping routines run off the main thread (`sidetrack.cpp`):
 
 - olli targets **Linux** (raw-terminal input, `localtime_r`, PulseAudio/ALSA).
   The settings path has a Windows branch but the audio/input paths are POSIX.
-- olli and VOCA are independent processes — start them in any order; each
-  recreates its files as needed.
 - olli is a personal/experimental project; expect rough edges. Some source files
   carry commented-out experiments kept as design notes.
 

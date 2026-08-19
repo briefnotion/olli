@@ -55,6 +55,28 @@ message(STATUS "Using nlohmann/json headers from: ${JSON_INCLUDE_DIR}")
 # 2. Handle threading and CURL
 find_package(Threads REQUIRED)
 find_package(CURL REQUIRED)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(PORTAUDIO REQUIRED IMPORTED_TARGET portaudio-2.0)
+
+# whisper.cpp: offline speech-to-text engine for Voca (see voca.hpp).
+# Vendored via FetchContent so there's nothing to check in - only the build
+# step needs network access, runtime stays fully offline. GGML_CUDA=ON lets
+# it run on a local NVIDIA GPU when present (falls back to CPU automatically
+# otherwise - see whisper_context_params::use_gpu in voca.cpp).
+include(FetchContent)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(WHISPER_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(WHISPER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(WHISPER_BUILD_SERVER OFF CACHE BOOL "" FORCE)
+set(GGML_CUDA ON CACHE BOOL "" FORCE)
+set(CMAKE_CUDA_ARCHITECTURES "61" CACHE STRING "" FORCE)
+FetchContent_Declare(
+    whisper_cpp
+    GIT_REPOSITORY https://github.com/ggml-org/whisper.cpp.git
+    GIT_TAG v1.9.2
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(whisper_cpp)
 
 # 3. Define the executable
 add_executable(olli
@@ -65,6 +87,7 @@ add_executable(olli
     ../source/stringthings.cpp
     ../source/audio_control.cpp
     ../source/tts.cpp
+    ../source/voca.cpp
     ../source/sidetrack.cpp
     ../source/threading.cpp
     ../source/fled_time.cpp
@@ -76,6 +99,8 @@ add_executable(olli
 target_include_directories(olli SYSTEM PRIVATE
     ${HTTPLIB_INCLUDE_DIR}
     ${JSON_INCLUDE_DIR}
+    ${whisper_cpp_SOURCE_DIR}/include
+    ${whisper_cpp_SOURCE_DIR}/ggml/include
 )
 
 # 5. Compiler-specific strict warning flags
@@ -110,4 +135,4 @@ else()
 endif()
 
 # 6. Link libraries
-target_link_libraries(olli PRIVATE Threads::Threads CURL::libcurl)
+target_link_libraries(olli PRIVATE Threads::Threads CURL::libcurl whisper PkgConfig::PORTAUDIO)

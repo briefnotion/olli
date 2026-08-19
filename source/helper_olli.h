@@ -39,6 +39,11 @@ class Settings {
         std::string tool_hue_lights_apiKey = "Enter_API_key_for_HUE_Lights";
         std::string tool_hue_lights_bridge_ip = "127.0.0.1";
 
+        // Set from the command line (e.g. `./olli ron`) so each person gets
+        // their own settings/history/scenes under ~/olli_files_<profile_name>
+        // instead of the shared ~/olli_files. Empty means the shared default.
+        std::string profile_name = "";
+
         // Load settings from the home directory
         void load_settings();
 
@@ -47,63 +52,25 @@ class Settings {
 
         // Helper to find the home directory across Windows/Linux/macOS
         fs::path get_settings_path();
+
+        // The shared ~/olli_files directory, regardless of profile_name -
+        // for things that stay common across profiles (see load_settings()).
+        fs::path get_shared_path();
 };
 
 // ----
 
-
-/**
- * VOCA_CONTROL Class
- * * Provides a C++ interface to communicate with the Voca Pro (v3.2.9) Python node.
- * Handles reading status from 'voca_status.json' and sending commands to 'voca_command.json'.
- */
-class VOCA_CONTROL {
-public:
-    struct VocaStatus {
-        std::string status;
-        double timestamp;
-        bool is_awake;
-        bool is_busy;
-        bool valid = false;
-    };
-
-    VOCA_CONTROL(std::string olli_dir);
-
-    /**
-     * Sends a command to Voca.
-     * Automatically attaches a high-resolution timestamp to ensure 
-     * the Python script processes it even if the command text hasn't changed.
-     */
-    bool sendCommand(const std::string& command); 
-
-    /**
-     * Reads the current status of Voca from the status file.
-     */
-    VocaStatus getStatus(); 
-
-    /**
-     * Helper functions for common state checks
-     */
-    bool isAwake();
-    bool isPaused();
-
-private:
-    std::string m_olli_dir;
-    std::string m_status_path;
-    std::string m_command_path;
-};
-
-
-// ----
+// Speech-to-text input (Voca) is no longer a separate process talking
+// through files - it's in-process now (see audio_control.h/AUDIO_CONTROL_CLASS
+// and voca.hpp). main.cpp drains its transcripts each loop tick and feeds
+// them into KEYBOARD_INPUT's LINE/INTERRUPTED/ENTER_PRESSED below, the same
+// fields a typed line sets.
 
 class KEYBOARD_INPUT_PROPERTIES
 {
     public:
 
-    std::filesystem::path path_input = "";
-
     bool ENABLED = false;
-    bool ENABLE_LIRA_VOCA = true;
 };
 
 class KEYBOARD_INPUT
@@ -113,8 +80,6 @@ class KEYBOARD_INPUT
         struct termios oldt, newt;
         EFFICIANTCY_TIMER_EASY enter_ready;
 
-        void getNextInteraction(std::filesystem::path& folderPath);
-
     public:
 
         KEYBOARD_INPUT_PROPERTIES PROPS;
@@ -123,9 +88,6 @@ class KEYBOARD_INPUT
         bool ENTER_PRESSED = false;
         bool INTERRUPTED = false;
         bool IS_TYPING = false;
-
-        // Voca
-        VOCA_CONTROL VOCA;
 
         KEYBOARD_INPUT();
         ~KEYBOARD_INPUT();

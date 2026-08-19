@@ -2,16 +2,17 @@
 #define AUDIO_CONTTROL_H
 
 #include <iostream>
-#include <fstream>
 #include <filesystem>
 #include <thread>
 #include <chrono>
-
-#include <nlohmann/json.hpp>
+#include <mutex>
+#include <deque>
+#include <memory>
 
 #include "fled_time.h"
 #include "threading.h"
 #include "tts.hpp"
+#include "voca.hpp"
 
 #define DEF_VOCA_SLEEP  0
 #define DEF_VOCA_PAUSE  1
@@ -21,45 +22,27 @@
  * @file audio_control.h
  * @brief Header file for audio control functionality.
  *
- * This file contains the AUDIO_CONTROL_CLASS which owns text-to-speech
- * (via the in-process TextToSpeech class) and coordinates it with VOCA.
+ * This file contains the AUDIO_CONTROL_CLASS which owns both text-to-speech
+ * (via TextToSpeech) and speech-to-text (via Voca) in-process, and
+ * coordinates the two: while TTS is speaking, Voca is paused so it doesn't
+ * hear olli's own voice; once speech stops, Voca resumes listening.
  */
 
 /**
- * @struct VOCA_CONTROL_CONFIG
- * @brief Configuration structure for VOCA status settings.
- *
- * Contains status information, timestamp, and state flags from the VOCA system.
+ * @struct VOCA_EVENT
+ * @brief One piece of voice input handed off from Voca's background
+ * transcription thread to the main loop (see popVocaEvent()).
  */
-struct VOCA_CONTROL_CONFIG {
-    string status = "";        /**< Current status string of VOCA system */
-    double timestamp = 0.0;    /**< Timestamp of last status update */
-    bool is_awake = false;     /**< Flag indicating if VOCA is awake/active */
-    bool is_busy = false;      /**< Flag indicating if VOCA is busy processing */
+struct VOCA_EVENT {
+    // Text to submit as chat input. Empty for an interrupt-only event (e.g.
+    // "stop talking" heard while TTS is speaking) - the caller should still
+    // treat the event as an interrupt, just not submit anything new.
+    std::string text;
 };
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(VOCA_CONTROL_CONFIG, status, timestamp, is_awake, is_busy)
-
-/**
- * @struct VOCA_COMMAND_CONFIG
- * @brief Configuration structure for VOCA command settings.
- *
- * Contains command strings and update timestamps for controlling VOCA behavior.
- */
-struct VOCA_COMMAND_CONFIG {
-    string command = "";       /**< Command string to send to VOCA */
-    double last_update = 0.0;  /**< Timestamp of last command update */
-};
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(VOCA_COMMAND_CONFIG, command, last_update)
-
 
 /**
  * @class AUDIO_CONTROL_CLASS
- * @brief Owns text-to-speech and coordinates it with VOCA (voice assistant).
- *
- * Speech is synthesized/played in-process via TextToSpeech. VOCA is a
- * separate Python process, so it's still coordinated through its status/
- * command files: while TTS is speaking, VOCA is paused so it doesn't hear
- * olli's own voice; once speech stops, VOCA resumes listening.
+ * @brief Owns text-to-speech and speech-to-text and coordinates them.
  */
 class AUDIO_CONTROL_CLASS
 {
@@ -71,84 +54,11 @@ class AUDIO_CONTROL_CLASS
         TextToSpeech tts;
         bool tts_was_speaking = false; // last-seen isSpeaking(), to detect start/stop transitions
 
-        std::filesystem::file_time_type VOCA_lastKnownTime;
-        VOCA_CONTROL_CONFIG VOCA_SETTINGS;
+        std::unique_ptr<Voca> voca;
 
-        VOCA_COMMAND_CONFIG VOCA_COMMAND_SETTINGS;
+        std::mutex voca_events_mutex;
+        std::deque<VOCA_EVENT> voca_events;
 
-        bool VOCA_STATUS_CHANGED = false;
-
-        bool CONTROL_AWAKE = true;
-
-        TIMED_IS_READY  AUDIO_TIMER;
-
-        int VOCA_REQUESTED_CHANGE = -1;
-
-        /**
-         * @brief Templated function to check and load configuration from JSON file.
-         * @tparam T The type of configuration struct to load.
-         * @param filePath Path to the JSON configuration file.
-         * @param lastWriteTime Reference to store the last write time of the file.
-         * @param config Reference to the configuration struct to populate.
-         * @return true if file was loaded successfully, false otherwise.
-         */
-        template <typename T>
-        bool checkAndLoadFile(const std::filesystem::path& filePath, 
-                            std::filesystem::file_time_type& lastWriteTime, 
-                            T& config) {
-            
-            if (!std::filesystem::exists(filePath)) return false;
-
-            try {
-                auto currentWriteTime = std::filesystem::last_write_time(filePath);
-
-                if (currentWriteTime != lastWriteTime) {
-                    lastWriteTime = currentWriteTime;
-
-                    std::ifstream file(filePath);
-                    if (!file.is_open()) return false;
-
-                    nlohmann::json j;
-                    file >> j;
-
-                    // This single line now works for ANY struct passed in.
-                    // It populates the struct 'config' with the values found in 'j'.
-                    config = j.get<T>();
-
-                    return true;
-                }
-            } catch (const std::exception& e) {
-                std::cerr << "Load Error: " << e.what() << std::endl;
-            }
-
-            return false;
-        }
-
-        /**
-         * Portable Write Function
-         * -----------------------
-         * Similarly, this can now take any struct and save it as JSON.
-         */
-        template <typename T>
-        void writeFile(const std::filesystem::path& filePath, const T& config) {
-            try {
-                nlohmann::json j = config; // Converts struct to JSON automatically
-
-                // Add the system timestamp
-                auto now = std::chrono::system_clock::now();
-                auto duration = now.time_since_epoch();
-                j["last_update"] = std::chrono::duration<double>(duration).count();
-
-                std::ofstream file(filePath);
-                if (file.is_open()) {
-                    file << j.dump(4);
-                }
-            } catch (const std::exception& e) {
-                std::cerr << "Write Error: " << e.what() << std::endl;
-            }
-        }
-
-        void VOCA_set(int Command);
         void adjust_audio_files(double Time);
 
     public:
@@ -158,6 +68,8 @@ class AUDIO_CONTROL_CLASS
 
         void create(const std::filesystem::path& filePath);
 
+        // Forces Voca directly into a state, bypassing wake-word detection
+        // (e.g. a manual override from a chat tool - see olla.cpp).
         void VOCA_manual_set(int Command);
 
         // Queues text to be spoken (see TextToSpeech::speakAsync).
@@ -165,6 +77,11 @@ class AUDIO_CONTROL_CLASS
 
         // Interrupts speech in progress and clears anything queued.
         void stop_speaking();
+
+        // Pops the next pending voice event, if any. Called from the main
+        // loop (see main.cpp) to feed transcripts into chat the same way a
+        // typed line would be. Returns false if nothing is pending.
+        bool popVocaEvent(VOCA_EVENT& out);
 
         void thread_main();
 

@@ -229,7 +229,7 @@ class TOOL_TASK_RUNNER
 class OLLAMA_SYSTEM_PROPERTIES
 {
     public:
-        std::filesystem::path OLLI_DIERCTORY = "";
+        std::filesystem::path OLLI_DIRECTORY = "";
         std::filesystem::path path_output = "";
         std::filesystem::path path_history = "";
 
@@ -237,8 +237,15 @@ class OLLAMA_SYSTEM_PROPERTIES
         std::string host = "localhost";
         int port = 11434;
         int num_ctx = 8192; // size
-        bool stream_output = true; 
+        bool stream_output = true;
         bool use_thinking = true;
+
+        // Sent to Ollama as "keep_alive" on every request - how long it
+        // keeps the model loaded in memory after a request. -1 means
+        // indefinitely (until explicitly unloaded or the Ollama server
+        // restarts), overriding Ollama's own default of unloading after 5
+        // minutes of inactivity. A positive value is seconds.
+        int keep_alive_seconds = -1;
 
         string web_search_api_key = "Enter_API_key_for_serpapi.com";
         std::string hue_ip = "127.0.0.1";
@@ -286,6 +293,13 @@ class ollama_system {
         // Explicit flush to disk, e.g. right after consolidation commits or on shutdown.
         void save_history();
 
+        // Tells Ollama to unload PROPS.model from memory immediately
+        // (sends keep_alive: 0). Ollama tracks loaded models by name, not
+        // by connection, so one call covers every ollama_system instance
+        // in the process that shares this model - no need to call it per
+        // instance. Meant for shutdown, alongside save_history().
+        void unload_model();
+
         std::string OLLAMA_OPENING =
                 //"You are a but helpful assistant with access to tools. "
                 //"1. For delayed requests, use set_timer. Always summarize the "
@@ -297,7 +311,7 @@ class ollama_system {
                 //"to fulfill that action without asking for further confirmation.";
 
                 "You are a snarky assistant with access to tools. "
-                "You will responses will be short and sweet. "
+                "Your responses will be short and sweet. "
                 "No need to be polite.";
 
 

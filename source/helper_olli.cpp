@@ -23,8 +23,39 @@ void simulateTyping(const std::string& text) {
 
 // ----
 
+// Helper to find the home directory across Windows/Linux/macOS
+static fs::path get_home_dir() {
+    #ifdef _WIN32
+        const char* home_dir = std::getenv("USERPROFILE");
+    #else
+        const char* home_dir = std::getenv("HOME");
+    #endif
+    // std::getenv may return nullptr; constructing a std::string / fs::path
+    // from nullptr is undefined behaviour. Fall back to the current
+    // directory so the program degrades gracefully instead of crashing.
+    return (home_dir != nullptr) ? fs::path(home_dir) : fs::current_path();
+}
+
 void Settings::load_settings() {
     fs::path config_path = get_settings_path() / "settings.json";;
+
+    // A named profile that doesn't exist yet starts as a copy of the shared
+    // ~/olli_files, if one exists, instead of empty defaults - so switching
+    // profiles doesn't mean re-entering API keys or losing history. "models"
+    // is skipped: it holds the (large) whisper model file, which stays
+    // shared out of ~/olli_files rather than duplicated per profile - see
+    // Settings::get_shared_path(), used for that lookup instead.
+    if (!profile_name.empty() && !fs::exists(config_path.parent_path())) {
+        fs::path default_path = get_home_dir() / "olli_files";
+        if (fs::exists(default_path)) {
+            fs::create_directories(config_path.parent_path());
+            for (const auto& entry : fs::directory_iterator(default_path)) {
+                if (entry.path().filename() == "models") continue;
+                fs::copy(entry.path(), config_path.parent_path() / entry.path().filename(),
+                          fs::copy_options::recursive);
+            }
+        }
+    }
 
     // Create directory if it doesn't exist
     if (!fs::exists(config_path.parent_path())) {
@@ -84,112 +115,20 @@ void Settings::save_settings() {
     }
 }
 
-// Helper to find the home directory across Windows/Linux/macOS
 fs::path Settings::get_settings_path() {
-    #ifdef _WIN32
-        const char* home_dir = std::getenv("USERPROFILE");
-    #else
-        const char* home_dir = std::getenv("HOME");
-    #endif
-    // std::getenv may return nullptr; constructing a std::string / fs::path
-    // from nullptr is undefined behaviour. Fall back to the current
-    // directory so the program degrades gracefully instead of crashing.
-    fs::path base = (home_dir != nullptr) ? fs::path(home_dir) : fs::current_path();
-    return base / "olli_files";
+    std::string dir_name = profile_name.empty() ? "olli_files" : "olli_files_" + profile_name;
+    return get_home_dir() / dir_name;
+}
+
+// The shared, profile-independent ~/olli_files directory - used for things
+// meant to stay common to every profile (currently just the whisper model).
+fs::path Settings::get_shared_path() {
+    return get_home_dir() / "olli_files";
 }
 
 // ----
 
 
-
-/**
- * VOCA_CONTROL Class
- * * Provides a C++ interface to communicate with the Voca Pro (v3.2.9) Python node.
- * Handles reading status from 'voca_status.json' and sending commands to 'voca_command.json'.
- */
-
-
-VOCA_CONTROL::VOCA_CONTROL(std::string olli_dir = "") 
-{
-    if (olli_dir.empty()) {
-        const char* home = std::getenv("HOME");
-        // Fall back to "." when HOME is unset so the derived paths below
-        // remain valid relative paths rather than an empty prefix.
-        m_olli_dir = (home != nullptr) ? std::string(home) + "/olli_files" : "./olli_files";
-    } else {
-        m_olli_dir = olli_dir;
-    }
-
-    m_status_path = m_olli_dir + "/voca_status.json";
-    m_command_path = m_olli_dir + "/voca_command.json";
-}
-
-/**
- * Sends a command to Voca.
- * Automatically attaches a high-resolution timestamp to ensure 
- * the Python script processes it even if the command text hasn't changed.
- */
-bool VOCA_CONTROL::sendCommand(const std::string& command) 
-{
-    try {
-        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()
-        );
-        double now = static_cast<double>(duration.count()) / 1000.0;
-
-        json j;
-        j["command"] = command;
-        j["last_update"] = now;
-
-        std::ofstream file(m_command_path);
-        if (!file.is_open()) return false;
-
-        file << j.dump(4);
-        file.close();
-        return true;
-    } catch (...) {
-        return false;
-    }
-}
-
-/**
- * Reads the current status of Voca from the status file.
- */
-VOCA_CONTROL::VocaStatus VOCA_CONTROL::getStatus() 
-{
-    VocaStatus vs;
-    if (!fs::exists(m_status_path)) return vs;
-
-    try {
-        std::ifstream file(m_status_path);
-        json j;
-        file >> j;
-
-        vs.status = j.value("status", "unknown");
-        vs.timestamp = j.value("timestamp", 0.0);
-        vs.is_awake = j.value("is_awake", false);
-        vs.is_busy = j.value("is_busy", false);
-        vs.valid = true;
-    } catch (...) {
-        vs.valid = false;
-    }
-    return vs;
-}
-
-/**
- * Helper functions for common state checks
- */
-bool VOCA_CONTROL::isAwake() 
-{ 
-    return getStatus().is_awake; 
-}
-
-bool VOCA_CONTROL::isPaused() 
-{ 
-    return getStatus().is_busy; 
-}
-
-// ----
 
 // Constructor: Save state and enter raw mode
 KEYBOARD_INPUT::KEYBOARD_INPUT() {
@@ -204,48 +143,6 @@ KEYBOARD_INPUT::KEYBOARD_INPUT() {
         newt.c_cc[VTIME] = 0;
 
         tcsetattr(STDIN_FILENO, TCSANOW, &newt);
-    }
-}
-
-// ----
-
-void KEYBOARD_INPUT::getNextInteraction(std::filesystem::path& folderPath) 
-{
-    if (std::filesystem::exists(folderPath))
-    {
-        for (const auto& entry : std::filesystem::directory_iterator(folderPath)) 
-        {
-            if (entry.is_regular_file()) 
-            {
-                std::ifstream file(entry.path());
-
-                if (!file.is_open()) continue;
-
-                std::string content((std::istreambuf_iterator<char>(file)),
-                                    std::istreambuf_iterator<char>());
-                file.close();
-
-                std::filesystem::remove(entry.path()); 
-
-                LINE = content;
-
-                // ---- 
-
-                if (starts_with(content, "go to sleep"))
-                {
-                    VOCA.sendCommand("sleep");
-                    std::cout << LINE << std::endl;
-                    INTERRUPTED = true;
-                    ENTER_PRESSED = true;
-                }
-                else
-                {
-                    std::cout << LINE << std::endl;
-                    INTERRUPTED = true;
-                    ENTER_PRESSED = true;
-                }
-            }
-        }
     }
 }
 
@@ -299,12 +196,8 @@ void KEYBOARD_INPUT::keyboard_input()
             enter_ready.start_timer(); // Reset the timer on each key press
         }
 
-        // or get text from voca
-        
-        if (PROPS.ENABLE_LIRA_VOCA)
-        {
-            getNextInteraction(PROPS.path_input);
-        }
+        // Voca (speech-to-text) input is drained separately in main.cpp's
+        // loop, straight from AUDIO_CONTROL_CLASS - see popVocaEvent().
 
         IS_TYPING = !LINE.empty();
     }

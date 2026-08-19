@@ -20,18 +20,40 @@
  *                                 (declared in olla.h), a single shared
  *                                 pointer any ollama_system instance can
  *                                 speak through, not just the main one
- * VOCA (speech-to-text) is a separate Python process; it talks to us only
- * through files under ~/olli_files (see system.key_input.PROPS.path_input).
+ * VOCA (speech-to-text) runs in-process via system.audio_control (see
+ * audio_control.h/voca.hpp) - its transcripts are drained each loop tick
+ * below and fed into system.key_input the same way a typed line would be.
  */
-int main() {
+int main(int argc, char* argv[]) {
+    // ./olli <name> gives that person their own settings/history/scenes
+    // under ~/olli_files_<name> instead of the shared ~/olli_files - see
+    // Settings::load_settings(). Without a name on the command line, ask
+    // for one; pressing Enter with nothing typed keeps the shared default.
+    // Resolved before CLASS_SYSTEM (below) puts the terminal into raw mode
+    // for keyboard input, since this prompt needs normal line input.
+    std::string profile_name;
+    if (argc > 1) {
+        profile_name = argv[1];
+    } else {
+        std::cout << "Each name gets its own settings, history, and scenes,\n"
+                      "kept separate from everyone else's.\n\n";
+        std::cout << "What is your name? (Enter for the shared default) " << std::flush;
+        std::getline(std::cin, profile_name);
+    }
+    // Lower-cased so olli_files_Ron and olli_files_ron can't both exist.
+    profile_name = lower_case(trim(profile_name));
+
     CLASS_SYSTEM system;
 
     ollama_system chat;
     SIDETRACK_CLASS sidetrack;
-    
+
+    system.setings_vars.profile_name = profile_name;
+
     system.setings_vars.load_settings();
-    
-    chat.PROPS.OLLI_DIERCTORY = system.setings_vars.get_settings_path();
+    std::filesystem::path settings_path = system.setings_vars.get_settings_path();
+
+    chat.PROPS.OLLI_DIRECTORY = settings_path;
     chat.PROPS.web_search_api_key = system.setings_vars.tool_web_search_apiKey;
     chat.PROPS.hue_ip = system.setings_vars.tool_hue_lights_bridge_ip;
     chat.PROPS.hue_key = system.setings_vars.tool_hue_lights_apiKey;
@@ -53,14 +75,15 @@ int main() {
     // (the "second guess" review) can be spoken too, not just chat's.
     g_audio_control = &system.audio_control;
 
-    system.audio_control.create(system.setings_vars.get_settings_path());
+    // Voca's whisper model lives in the shared ~/olli_files/models, not the
+    // per-profile directory (see Settings::get_shared_path()).
+    system.audio_control.create(system.setings_vars.get_shared_path());
     system.audio_control.thread_start();
 
     sidetrack.create(chat.PROPS);
     sidetrack.thread_start();
 
     //
-    system.key_input.PROPS.path_input = system.setings_vars.get_settings_path() / "input";
     system.key_input.PROPS.ENABLED = true;
 
     //
@@ -77,10 +100,36 @@ int main() {
     {
         // 1. Non-blocking check for user input
 
-        // process text from keyboard (or a file dropped by VOCA - see
-        // KEYBOARD_INPUT::getNextInteraction in helper_olli.cpp). Sets
-        // INTERRUPTED (below) and/or ENTER_PRESSED (read by chat.input()).
+        // process text from the keyboard. Sets INTERRUPTED (below) and/or
+        // ENTER_PRESSED (read by chat.input()).
         system.key_input.keyboard_input();
+
+        // Pop at most one pending voice event this tick (see
+        // AUDIO_CONTROL_CLASS::popVocaEvent) and feed it into key_input the
+        // same way a typed line would arrive. Deliberately not a "drain
+        // everything" loop: chat.input() below only acts on this single
+        // LINE/ENTER_PRESSED snapshot, and it starts an async chat turn -
+        // if two voice events were said back-to-back, draining both here
+        // would silently lose the first one (overwritten before
+        // chat.input() ever sees it) instead of giving each its own turn.
+        // One per tick means any backlog drains naturally over the next
+        // few ~20ms iterations instead.
+        //
+        // An empty event's text means "interrupt only" (e.g. "stop talking"
+        // heard while TTS is speaking) - INTERRUPTED still fires below, but
+        // nothing gets submitted as a new chat message.
+        VOCA_EVENT voca_event;
+        if (system.audio_control.popVocaEvent(voca_event))
+        {
+            if (!voca_event.text.empty())
+            {
+                system.key_input.LINE = voca_event.text;
+                std::cout << voca_event.text << std::endl;
+                system.key_input.ENTER_PRESSED = true;
+            }
+            system.key_input.INTERRUPTED = true;
+        }
+
         if (system.key_input.INTERRUPTED)
         {
             // Same trigger, two independent things to stop: the sidetrack
@@ -123,6 +172,11 @@ int main() {
     // history size change) only runs from inside the loop above, which has
     // already exited by this point.
     chat.save_history();
+
+    // PROPS.keep_alive_seconds (-1 by default) keeps the model loaded in
+    // Ollama indefinitely across requests - that's independent of this
+    // process, so without this it would stay loaded after olli exits too.
+    chat.unload_model();
 
     // audio_control's thread_stop must actually join before we start
     // tearing this process down (see AUDIO_CONTROL_CLASS::thread_stop for

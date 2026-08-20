@@ -7,15 +7,12 @@
 #include <thread>
 #include <future>
 #include <atomic>
-#include <termios.h>
-#include <unistd.h>
 #include <filesystem>
 #include <fstream>
 
 #include <nlohmann/json.hpp>
 
 #include "stringthings.h"
-#include "fled_time.h"
 
 // ----
 
@@ -57,46 +54,5 @@ class Settings {
         // for things that stay common across profiles (see load_settings()).
         fs::path get_shared_path();
 };
-
-// ----
-
-// Speech-to-text input (Voca) is no longer a separate process talking
-// through files - it's in-process now (see audio_control.h/AUDIO_CONTROL_CLASS
-// and voca.hpp). main.cpp drains its transcripts each loop tick and feeds
-// them into KEYBOARD_INPUT's LINE/INTERRUPTED/ENTER_PRESSED below, the same
-// fields a typed line sets.
-
-class KEYBOARD_INPUT_PROPERTIES
-{
-    public:
-
-    bool ENABLED = false;
-};
-
-class KEYBOARD_INPUT
-{
-    private:
-
-        struct termios oldt, newt;
-        EFFICIANTCY_TIMER_EASY enter_ready;
-
-    public:
-
-        KEYBOARD_INPUT_PROPERTIES PROPS;
-
-        std::string LINE = "";
-        bool ENTER_PRESSED = false;
-        bool INTERRUPTED = false;
-        bool IS_TYPING = false;
-
-        KEYBOARD_INPUT();
-        ~KEYBOARD_INPUT();
-
-        void keyboard_input();
-
-        void reset();
-};
-
-
 
 #endif

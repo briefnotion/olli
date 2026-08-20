@@ -29,12 +29,16 @@ struct SIDETRACK_SIGNALS
  * SIDETRACK_CLASS
  *
  * Runs a background thread (thread_main, on its own std::thread) that does
- * two things while the main chat is otherwise idle:
+ * three things while the main chat is otherwise idle:
  *   ROUTINE 1: consolidation   - compress old history (see consolidate() above)
  *   ROUTINE 2: "second guess"  - after a turn finishes, have a separate
  *                                 ollama_system instance (SIDETRACK_CHAT_INSTANCE)
  *                                 review it and speak a follow-up if it has
  *                                 something worth adding.
+ *   ROUTINE 3: context clear   - after a long stretch of no user activity,
+ *                                 wipe the real conversation history (but
+ *                                 not protected/foundational messages - see
+ *                                 CLEAR_CONTEXT_STAGE below).
  * Only one ROUTINE runs at a time; ROUTINE 0 means idle.
  *
  * IMPORTANT - two threads are involved, and they split responsibility for
@@ -89,6 +93,14 @@ class SIDETRACK_CLASS
         //double IDLE_WAIT_TIME = 1000.0; // ms
         //TIMED_IS_READY IDLE_WAIT_TIMER;
 
+        // How long the system must be idle (no interrupts) before the
+        // conversation history is auto-cleared. Armed once at thread start
+        // in thread_main() and re-armed on every interrupt (same as
+        // IDLE_WAIT_TIMER_FOR_CONSOLIDATION above).
+        double IDLE_WAIT_TIME_FOR_CONTEXT_CLEAR = 30.0 * 60.0 * 1000.0; // ms (30 minutes)
+        //double IDLE_WAIT_TIME_FOR_CONTEXT_CLEAR = 10.0 * 1000.0; // ms (handy for fast local testing)
+        TIMED_IS_READY IDLE_WAIT_TIMER_FOR_CONTEXT_CLEAR;
+
         // Cross-thread handoff buffer for whichever routine is active. See
         // the class-level comment above for the full stage 1<->2, 3<->4
         // choreography between thread_main() (sidetrack thread) and check()
@@ -96,7 +108,7 @@ class SIDETRACK_CLASS
         std::vector<Message> temp_chat_history;
 
         // Which routine is currently running; only one at a time.
-        int ROUTINE = 0; // 0 = idle, 1 = consolidation, 2 = second-guess review
+        int ROUTINE = 0; // 0 = idle, 1 = consolidation, 2 = second-guess review, 3 = context clear
 
         // Routine 1: Consolidation Routine
         int CHAT_HISTORY_PROCESSING_STAGE = 0;
@@ -132,6 +144,26 @@ class SIDETRACK_CLASS
         // 4 = thread_main() clears SIDETRACK_CHAT_INSTANCE's history/
         //     tts_buffer and resets this to 0 and ROUTINE to 0.
 
+        // Routine 3: Clear-Context Routine
+        int CLEAR_CONTEXT_STAGE = 0;
+        // 0 = idle; thread_main() advances this to 1 to kick off a clear.
+        // 1 = thread_main() has requested the clear; waiting for check()
+        //     (main thread) to wipe main_instance.history - preserving any
+        //     protected (consolidation_level < 0) messages, e.g. the
+        //     persona/opening prompt, same as consolidate() already leaves
+        //     those untouched - and save the result to disk, then advance
+        //     this to 2. Skipped (left as a no-op) if an interrupt arrived
+        //     in the meantime - see check().
+        // 2 = thread_main() resets ROUTINE to 0 (idle again) and advances
+        //     this to 3 - NOT back to 0, so a still-idle system doesn't
+        //     clear an already-empty history again every time the idle
+        //     timer comes back around.
+        // 3 = finished; there's nothing left to clear until the user does
+        //     something. Stays here - the ROUTINE==0 dispatch in
+        //     thread_main() won't re-arm ROUTINE 3 while this is 3 - until
+        //     an interrupt resets this back to 0 alongside
+        //     IDLE_WAIT_TIMER_FOR_CONTEXT_CLEAR (see thread_main()).
+
         // Communication variables. These are the atomic (thread-safe)
         // counterparts of SIGNALS above; check() (main thread) mirrors
         // SIGNALS into these, and thread_main() (sidetrack thread) reads
@@ -165,6 +197,12 @@ class SIDETRACK_CLASS
         // main.cpp, right after chat.process(). Handles every stage that
         // needs to touch main_instance.history, plus consuming SIGNALS.
         void check(ollama_system& main_instance);
+
+        // Pulls SIDETRACK_CHAT_INSTANCE's response_buffer/thinking_buffer/
+        // log_buffer into output - same shape as ollama_system's own
+        // pull_background_output(), just for the one instance sidetrack
+        // owns privately instead of a container of them.
+        void pull_output(OUTPUT_CLASS& output);
 };
 
 #endif

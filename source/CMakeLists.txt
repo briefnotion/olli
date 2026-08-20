@@ -52,6 +52,43 @@ endif()
 message(STATUS "Using cpp-httplib headers from: ${HTTPLIB_INCLUDE_DIR}")
 message(STATUS "Using nlohmann/json headers from: ${JSON_INCLUDE_DIR}")
 
+# ncursesw (wide-char, for display_with_ncurses() - see user_io.h/.cpp): not
+# packaged system-wide here, so it's built from a sibling checkout
+# (../../ncurses-snapshots, kept separate from olli's own source per the
+# same "sibling repo" convention as cpp-httplib/json above) into its own
+# local install prefix rather than installed system-wide - see
+# ncurses-snapshots/install after running its own configure/make/make
+# install. Static (--without-shared) so olli stays a single self-contained
+# binary; --enable-widec so UTF-8/wide characters render correctly.
+# curses.h itself does "#include <ncursesw/ncurses_dll.h>", so the include
+# path needs to be the parent of the ncursesw/ directory, not that directory
+# itself - hence searching for ncursesw/curses.h rather than just curses.h.
+find_path(NCURSES_INCLUDE_DIR
+    NAMES ncursesw/curses.h
+    HINTS
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../ncurses-snapshots/install/include"
+)
+
+find_library(NCURSES_LIBRARY
+    NAMES ncursesw
+    HINTS
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../ncurses-snapshots/install/lib"
+)
+
+if(NOT NCURSES_INCLUDE_DIR OR NOT NCURSES_LIBRARY)
+    message(FATAL_ERROR
+        "Could not find a built ncursesw. Clone "
+        "https://github.com/ThomasDickey/ncurses-snapshots.git next to this "
+        "project (../../ncurses-snapshots) and build it there: "
+        "mkdir build && cd build && "
+        "../configure --prefix=$(pwd)/../install --without-shared "
+        "--enable-widec --without-debug --without-ada --without-tests "
+        "--without-manpages --without-progs && make -j && make install")
+endif()
+
+message(STATUS "Using ncursesw headers from: ${NCURSES_INCLUDE_DIR}")
+message(STATUS "Using ncursesw library at: ${NCURSES_LIBRARY}")
+
 # 2. Handle threading and CURL
 find_package(Threads REQUIRED)
 find_package(CURL REQUIRED)
@@ -83,6 +120,7 @@ add_executable(olli
     ../source/main.cpp
     ../source/olla.cpp
     ../source/helper_olli.cpp
+    ../source/user_io.cpp
     ../source/tools_helper.cpp
     ../source/stringthings.cpp
     ../source/audio_control.cpp
@@ -101,6 +139,7 @@ target_include_directories(olli SYSTEM PRIVATE
     ${JSON_INCLUDE_DIR}
     ${whisper_cpp_SOURCE_DIR}/include
     ${whisper_cpp_SOURCE_DIR}/ggml/include
+    ${NCURSES_INCLUDE_DIR}
 )
 
 # 5. Compiler-specific strict warning flags
@@ -135,4 +174,4 @@ else()
 endif()
 
 # 6. Link libraries
-target_link_libraries(olli PRIVATE Threads::Threads CURL::libcurl whisper PkgConfig::PORTAUDIO)
+target_link_libraries(olli PRIVATE Threads::Threads CURL::libcurl whisper PkgConfig::PORTAUDIO ${NCURSES_LIBRARY})

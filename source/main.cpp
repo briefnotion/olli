@@ -24,6 +24,12 @@
  * audio_control.h/voca.hpp) - its transcripts are drained each loop tick
  * below and fed into system.key_input the same way a typed line would be.
  */
+// Which OUTPUT_CLASS display path this run uses - see display_with_ncurses()
+// in user_io.h/.cpp. Flip to false to fall back to the plain scrolling
+// display() if ncurses ever needs to be ruled out (a bug, a terminal it
+// doesn't handle well, etc).
+static const bool USE_NCURSES = true;
+
 int main(int argc, char* argv[]) {
     // ./olli <name> gives that person their own settings/history/scenes
     // under ~/olli_files_<name> instead of the shared ~/olli_files - see
@@ -85,10 +91,30 @@ int main(int argc, char* argv[]) {
 
     //
     system.key_input.PROPS.ENABLED = true;
+    // Under ncurses, keyboard_input()'s own raw per-character echo would
+    // corrupt the ncurses-controlled screen - the input window renders the
+    // typed line itself instead (see display_with_ncurses()).
+    system.key_input.PROPS.RAW_ECHO = !USE_NCURSES;
 
-    //
-    std::cout << "\n--- Chat Started (Type 'bye' or 'quit' or 'Goodbye.' to stop) ---\n" << std::endl;
-    std::cout << "You: " << std::flush;
+    // Flush anything chat.open() already logged (e.g. "[System] Connecting
+    // to...") before the prompt appears - otherwise it sits in log_buffer
+    // until the loop's first tick and prints after "You: " instead of
+    // before it. Under ncurses this is also what triggers its lazy init,
+    // so the very first thing on screen is already the real windowed
+    // layout instead of a plain-terminal banner that ncurses would
+    // immediately paper over anyway.
+    system.output.get_response(chat);
+    if (USE_NCURSES)
+    {
+        system.output.display_with_ncurses(system.key_input);
+    }
+    else
+    {
+        system.output.display();
+
+        std::cout << "\n--- Chat Started (Type 'bye' or 'quit' or 'Goodbye.' to stop) ---\n" << std::endl;
+        std::cout << "You: " << std::flush;
+    }
 
 
     //
@@ -103,6 +129,17 @@ int main(int argc, char* argv[]) {
         // process text from the keyboard. Sets INTERRUPTED (below) and/or
         // ENTER_PRESSED (read by chat.input()).
         system.key_input.keyboard_input();
+
+        // Ctrl+C - see EXIT_REQUESTED's comment in user_io.h for why this
+        // needs its own handling instead of a real SIGINT. Checked before
+        // anything else this tick since it should win over any in-progress
+        // work, same as it would as a real signal.
+        if (system.key_input.EXIT_REQUESTED)
+        {
+            system.key_input.EXIT_REQUESTED = false;
+            chat.request_exit();
+            continue;
+        }
 
         // Pop at most one pending voice event this tick (see
         // AUDIO_CONTROL_CLASS::popVocaEvent) and feed it into key_input the
@@ -124,7 +161,7 @@ int main(int argc, char* argv[]) {
             if (!voca_event.text.empty())
             {
                 system.key_input.LINE = voca_event.text;
-                std::cout << voca_event.text << std::endl;
+                system.output.user_input += voca_event.text + "\n";
                 system.key_input.ENTER_PRESSED = true;
             }
             system.key_input.INTERRUPTED = true;
@@ -148,11 +185,13 @@ int main(int argc, char* argv[]) {
         // whatever's in LINE as a new message if ENTER_PRESSED. Returns
         // true once a full response cycle has completed (see olla.cpp for
         // the exact conditions), at which point we're ready for new input.
-        if (chat.input(system))
-        {
-            sidetrack.SIGNALS.CHAT_FINISHED_SIGNAL = true;
-            std::cout << "You: " << std::flush;
-        }
+        // chat_thread is already joined by the time this returns true, so
+        // response_buffer holds everything send() ever wrote, including its
+        // final trailing newline - the get_response()/display() call below
+        // must run before "You: " prints, or that last newline (and any
+        // last few streamed characters) would print after the prompt
+        // instead of before it.
+        bool response_complete = chat.input(system);
 
         // Dispatches any pending tool calls, flushes new text to TTS
         // (write_to_tts), periodically writes history to disk if it
@@ -163,8 +202,38 @@ int main(int argc, char* argv[]) {
         // machines - see SIDETRACK_CLASS::check's doc comment.
         sidetrack.check(chat);
 
+        // Pull whatever chat, its background tasks (task-runner automations),
+        // and sidetrack's second-guess review each streamed since the last
+        // tick, then show everything accumulated this tick - see
+        // OUTPUT_CLASS in user_io.h/.cpp.
+        system.output.get_response(chat);
+        chat.pull_background_output(system.output);
+        sidetrack.pull_output(system.output);
+        if (USE_NCURSES)
+        {
+            system.output.display_with_ncurses(system.key_input);
+        }
+        else
+        {
+            system.output.display();
+        }
+
+        if (response_complete)
+        {
+            sidetrack.SIGNALS.CHAT_FINISHED_SIGNAL = true;
+            // Under ncurses the input window's "> " prompt is always
+            // visible, so there's no separate "ready for input" line to
+            // print - that's the plain-display()'s equivalent of it.
+            if (!USE_NCURSES) std::cout << "You: " << std::flush;
+        }
+
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
+
+    // Hand the real terminal screen back before printing any of the
+    // shutdown messages below - otherwise they'd print while ncurses'
+    // alternate screen is still up and never actually be seen.
+    system.output.end_ncurses();
 
     std::cout << "\n--- Chat Ended ---" << std::endl;
 

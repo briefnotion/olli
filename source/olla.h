@@ -332,6 +332,37 @@ class ollama_system {
 
         std::string tts_buffer = "";
 
+        // Live streaming output for the screen - appended to from send()'s
+        // streaming loop (chat_thread), drained by OUTPUT_CLASS::get_response()
+        // (see user_io.h/.cpp), which runs on whichever thread calls it once
+        // per tick. Same cross-thread shape as tts_buffer above, but for the
+        // screen instead of speech. Both guarded by output_buffer_mutex below
+        // - lock it around any access to either.
+        std::string response_buffer = "";
+        std::string thinking_buffer = "";
+
+        // Status/debug text ("[System] Tool call received: ...", "[Delegator]
+        // ...", etc.) that used to go straight to std::cout from tool
+        // handlers and other ollama_system methods. Same cross-thread shape
+        // and same output_buffer_mutex as the two buffers above - appended
+        // to from wherever a tool handler already has `chat`/`this` in
+        // scope (no new parameter needed), drained into
+        // OUTPUT_CLASS::system_message by get_response().
+        std::string log_buffer = "";
+
+        // Appends to log_buffer under output_buffer_mutex - the one place
+        // that lock actually gets taken for it, so call sites (tool
+        // handlers, etc.) don't each need their own lock_guard.
+        void log(const std::string& text);
+
+        // Pulls every background task's response_buffer/thinking_buffer/
+        // log_buffer into output, same as OUTPUT_CLASS::get_response() does
+        // for this instance's own - background_tasks stays private, this is
+        // the one place that reaches into it for that purpose. One level
+        // only: a background task's own background_tasks (if it ever had
+        // any) isn't recursed into, matching process()'s own iteration below.
+        void pull_background_output(OUTPUT_CLASS& output);
+
         void open();
         void open(OLLAMA_SYSTEM_PROPERTIES Properties);
         
@@ -342,6 +373,16 @@ class ollama_system {
 
         // Helper to reset the signal
         void stop();
+
+        // Safe shutdown: stops any in-flight response and joins chat_thread
+        // before setting running = false, so main()'s ollama_system chat;
+        // never gets destroyed with chat_thread still joinable (that's a
+        // std::terminate crash). Same body jump_input()'s "bye"/"quit"
+        // handling already used inline - factored out here so
+        // KEYBOARD_INPUT's Ctrl+C handling (main.cpp) can trigger the exact
+        // same safe path instead of duplicating it or setting running =
+        // false directly.
+        void request_exit();
 
         /**
          * Updates the internal status struct by scanning the history.
@@ -367,6 +408,12 @@ class ollama_system {
 // yields one shared instance across all translation units with no
 // "multiple definition" linker error.
 inline std::mutex history_mutex;
+
+// Same reasoning as history_mutex above (must be 'inline', not 'static'),
+// covering ollama_system::response_buffer and ::thinking_buffer instead of
+// ::history. Kept separate from history_mutex so locking one doesn't block
+// the other - they're touched by different code for different reasons.
+inline std::mutex output_buffer_mutex;
 
 // The one text-to-speech output for the whole process. There's only ever
 // one physical speaker, so every ollama_system instance (the main chat,

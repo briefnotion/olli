@@ -127,6 +127,7 @@ void SIDETRACK_CLASS::thread_main()
     // fire on the very first check after every program start, instead of
     // waiting the full configured idle interval.
     IDLE_WAIT_TIMER_FOR_CONSOLIDATION.set(thread_time.now(), IDLE_WAIT_TIME_FOR_CONSOLIDATION);
+    IDLE_WAIT_TIMER_FOR_CONTEXT_CLEAR.set(thread_time.now(), IDLE_WAIT_TIME_FOR_CONTEXT_CLEAR);
 
     RUN = true;
     while (RUN)
@@ -142,6 +143,10 @@ void SIDETRACK_CLASS::thread_main()
         {
             //std::cout << "Sidetrack Thread Interupted" << std::endl;
             IDLE_WAIT_TIMER_FOR_CONSOLIDATION.set(thread_time.current_frame_time(), IDLE_WAIT_TIME_FOR_CONSOLIDATION);
+            IDLE_WAIT_TIMER_FOR_CONTEXT_CLEAR.set(thread_time.current_frame_time(), IDLE_WAIT_TIME_FOR_CONTEXT_CLEAR);
+            // Un-finish the clear routine too, so real activity starts its
+            // idle wait fresh instead of staying "already cleared" forever.
+            CLEAR_CONTEXT_STAGE = 0;
             INTERUPT.store(false);
         }
 
@@ -153,6 +158,21 @@ void SIDETRACK_CLASS::thread_main()
 
             if (ROUTINE == 0)
             {
+                // Lowest priority of the three - checked first so either of
+                // the assignments below silently overrides it if they're
+                // also ready on the same tick. Nuking the whole
+                // conversation is the most drastic outcome here, so a real
+                // user turn or a routine cleanup pass should always win.
+                // CLEAR_CONTEXT_STAGE == 3 means a clear already ran during
+                // this idle stretch and there's nothing left to clear -
+                // don't re-arm the routine every time the timer happens to
+                // still read ready. Only an interrupt (see above) resets
+                // that stage back to 0.
+                if (IDLE_WAIT_TIMER_FOR_CONTEXT_CLEAR.is_ready(thread_time.now()) && CLEAR_CONTEXT_STAGE != 3)
+                {
+                    ROUTINE = 3; // Start context-clear routine
+                }
+
                 if (IDLE_WAIT_TIMER_FOR_CONSOLIDATION.is_ready(thread_time.now()))
                 {
                     ROUTINE = 1; // Start consolidation routine
@@ -321,7 +341,36 @@ void SIDETRACK_CLASS::thread_main()
                 }
 
             }
-            
+
+            // Context Clear - see CLEAR_CONTEXT_STAGE's comments in
+            // sidetrack.h for what each stage means and which thread
+            // handles it.
+            if (ROUTINE == 3)
+            {
+                if (CLEAR_CONTEXT_STAGE == 0)
+                {
+                    //std::cout << "Sidetrack: Requesting context clear." << std::endl;
+                    CLEAR_CONTEXT_STAGE = 1;
+                }
+
+                //if (CLEAR_CONTEXT_STAGE == 1)
+                // Handled in the check function
+
+                if (CLEAR_CONTEXT_STAGE == 2)
+                {
+                    //std::cout << "Sidetrack: Context clear complete. Wrapping up." << std::endl;
+                    // NOT reset to 0 here - see stage 3's comment in
+                    // sidetrack.h for why this stays "finished" until an
+                    // interrupt resets it.
+                    CLEAR_CONTEXT_STAGE = 3;
+                    ROUTINE = 0;
+                }
+
+                // Re-armed every tick this routine is active, same as
+                // IDLE_WAIT_TIMER_FOR_CONSOLIDATION above.
+                IDLE_WAIT_TIMER_FOR_CONTEXT_CLEAR.set(thread_time.current_frame_time(), IDLE_WAIT_TIME_FOR_CONTEXT_CLEAR);
+            }
+
             PROCESSING.store(false);
         }
 
@@ -449,6 +498,35 @@ void SIDETRACK_CLASS::check(ollama_system& main_instance)
             SECOND_GUESS_PROCESSING_STAGE = 4;
         }
     }
+
+    // Context Clear Routine
+    {
+        if (CLEAR_CONTEXT_STAGE == 1)
+        {
+            // Same "abandon if interrupted" rule as consolidation's stage 3
+            // above - if the user did anything in the meantime, INTERUPT is
+            // already true here, and the clear is simply skipped rather
+            // than wiping history out from under a conversation that just
+            // became active again.
+            if (INTERUPT.load() == false)
+            {
+                std::vector<Message> protected_messages;
+                for (const Message& msg : main_instance.history) {
+                    if (msg.consolidation_level < 0) {
+                        protected_messages.push_back(msg);
+                    }
+                }
+                main_instance.history = protected_messages;
+                main_instance.save_history();
+            }
+            CLEAR_CONTEXT_STAGE = 2;
+        }
+    }
+}
+
+void SIDETRACK_CLASS::pull_output(OUTPUT_CLASS& output)
+{
+    output.get_response(SIDETRACK_CHAT_INSTANCE);
 }
 
 

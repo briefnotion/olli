@@ -3,6 +3,7 @@
 
 #include "olla.h"
 #include "audio_control.h"
+#include "user_io.h"
 
 void add_tool(json& tools, const std::string& name, const std::string& description, json parameters) 
 {
@@ -47,7 +48,7 @@ void TOOL_SET_THINKING_MODE::handle_tool(ollama_system& chat, const std::string&
             std::string state_str = chat.PROPS.use_thinking ? "ENABLED" : "DISABLED";
             
             // Log to console for system monitoring
-            std::cout << "[System (set_thinking_mode)]: " << state_str << std::endl;
+            chat.log("[System (set_thinking_mode)]: " + state_str + "\n");
 
             // Send the result back to the chat system
             chat.send_tool_result(tc_id, "Thinking mode has been successfully " + state_str);
@@ -169,7 +170,7 @@ void TOOL_TIMER::register_tool(json& tools) {
  */
 void TOOL_TIMER::handle_tool(ollama_system& chat, const std::string& name, const json& args, const std::string& tc_id) {
     if (name == "set_timer") {
-        std::cout << "[System (set_timer)]" << std::endl;
+        chat.log("[System (set_timer)]\n");
         std::string label = args["label"];
         double seconds = args["seconds"];
         
@@ -236,7 +237,7 @@ void TOOL_TIMER::monitor_tool(ollama_system& chat) {
                 ss << "Inform the user in character.";
 
                 std::string event_msg = ss.str();
-                std::cout << "[Event] Triggering persona alert: " << label << std::endl;
+                chat.log("[Event] Triggering persona alert: " + label + "\n");
                 
                 // Integrate via persona to maintain conversation flow
                 chat.integrate_tool_result("", event_msg);
@@ -662,7 +663,7 @@ void TOOL_DELEGATOR::handle_tool(ollama_system& chat, const std::string& name, c
     std::string specialty = args["specialized_persona"];
     std::string context = args.contains("input_context") ? args["input_context"].get<std::string>() : "";
 
-    std::cout << "\n[Delegator] Invoking Specialist: [" << specialty << "]" << std::endl;
+    chat.log("\n[Delegator] Invoking Specialist: [" + specialty + "]\n");
 
     // 1. Create the sub-agent instance
     auto sub_agent = std::make_unique<ollama_system>();
@@ -698,7 +699,7 @@ void TOOL_DELEGATOR::handle_tool(ollama_system& chat, const std::string& name, c
     int count = 0;
 
     if (sub_agent->is_processing) {
-        std::cout << "[Delegator] Sub-agent is busy reasoning..." << std::endl;
+        chat.log("[Delegator] Sub-agent is busy reasoning...\n");
         while (sub_agent->is_processing && count < wait_limit) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
             count++;
@@ -709,15 +710,15 @@ void TOOL_DELEGATOR::handle_tool(ollama_system& chat, const std::string& name, c
     std::string result = sub_agent->last_received.response; 
     
     if (result.empty() && !sub_agent->last_received.thinking.empty()) {
-        std::cout << "[Delegator] Note: Main response empty, using data from thinking buffer." << std::endl;
+        chat.log("[Delegator] Note: Main response empty, using data from thinking buffer.\n");
         result = sub_agent->last_received.thinking;
     }
 
     if (result.empty()) {
         result = "The expert subroutine failed to return a response.";
-        std::cout << "[Delegator] Error: Result was empty." << std::endl;
+        chat.log("[Delegator] Error: Result was empty.\n");
     } else {
-        std::cout << "[Delegator] Task complete. Length: " << result.length() << std::endl;
+        chat.log("[Delegator] Task complete. Length: " + std::to_string(result.length()) + "\n");
     }
     
     // 6. Integration: Store silent history and speak via persona
@@ -804,7 +805,7 @@ void TOOL_TASK_RUNNER::handle_tool(
     // Get the search phrase (the user's intent) from the JSON arguments.
     // ---------------------------------------------------------
     std::string intent_phrase = tool_args["intent_phrase"];
-    std::cout << "[TaskRunner] Searching for automation matching: \"" << intent_phrase << "\"" << std::endl;
+    main_instance.log("[TaskRunner] Searching for automation matching: \"" + intent_phrase + "\"\n");
 
     // ---------------------------------------------------------
     // 3. SEARCH FOR THE TASK
@@ -943,7 +944,7 @@ void ollama_system::handle_instance_tools(bool& Keyboard_Input_Enabled)
         for (auto& tc : pending_calls) {
             if (tc.name == "get_current_time" || tc.name == "get_current_date") 
             {
-                cout << "[System] Tool call received: " << tc.name << endl;
+                log("[System] Tool call received: " + tc.name + "\n");
 
                 if (TOOL_PERMISSIONS.CURRENT_TIME)
                     current_time.handle_tool(*this, tc.name, tc.arguments, tc.id);
@@ -957,7 +958,7 @@ void ollama_system::handle_instance_tools(bool& Keyboard_Input_Enabled)
             } 
             else if (tc.name == "set_timer" || tc.name == "check_timer") 
             {
-                cout << "[System] Tool call received: " << tc.name << endl;
+                log("[System] Tool call received: " + tc.name + "\n");
                 
                 if (TOOL_PERMISSIONS.TIMER)
                     timer.handle_tool(*this, tc.name, tc.arguments, tc.id);
@@ -970,7 +971,7 @@ void ollama_system::handle_instance_tools(bool& Keyboard_Input_Enabled)
             }
             else if (tc.name == "set_hue_light" || tc.name == "list_hue_lights" || tc.name == "manage_hue_scenes") 
             {
-                cout << "[System] Tool call received: " << tc.name << endl;
+                log("[System] Tool call received: " + tc.name + "\n");
                 
                 if (TOOL_PERMISSIONS.HUE)
                     hue.handle_tool(*this, tc.name, tc.arguments, tc.id);
@@ -982,7 +983,7 @@ void ollama_system::handle_instance_tools(bool& Keyboard_Input_Enabled)
             }
             else if (tc.name == "set_thinking_mode") 
             {
-                cout << "[System] Tool call received: " << tc.name << endl;
+                log("[System] Tool call received: " + tc.name + "\n");
                 
                 if (TOOL_PERMISSIONS.THINKING)
                     thinking.handle_tool(*this, tc.name, tc.arguments, tc.id);
@@ -995,7 +996,7 @@ void ollama_system::handle_instance_tools(bool& Keyboard_Input_Enabled)
             } 
             else if (tc.name == "web_search" || tc.name == "fetch_website_content") 
             {
-                cout << "[System] Tool call received: " << tc.name << endl;
+                log("[System] Tool call received: " + tc.name + "\n");
                 
                 if (TOOL_PERMISSIONS.WEB)
                     web.handle_tool(*this, tc.name, tc.arguments, tc.id);
@@ -1009,7 +1010,7 @@ void ollama_system::handle_instance_tools(bool& Keyboard_Input_Enabled)
             } 
             else if (tc.name == "run_automation_task") 
             {
-                cout << "[System] Tool call received: " << tc.name << endl;
+                log("[System] Tool call received: " + tc.name + "\n");
                 
                 if (TOOL_PERMISSIONS.TASK_RUNNER)
                 {
@@ -1029,7 +1030,7 @@ void ollama_system::handle_instance_tools(bool& Keyboard_Input_Enabled)
             }
             else 
             {
-                cout << "[System] Tool error call received: " << tc.name << endl;
+                log("[System] Tool error call received: " + tc.name + "\n");
                 
                 // Build error message
                 std::string error_msg = 
@@ -1041,9 +1042,23 @@ void ollama_system::handle_instance_tools(bool& Keyboard_Input_Enabled)
     }
 }
 
-void ollama_system::open() 
+void ollama_system::log(const std::string& text)
 {
-    std::cout << "[System] Connecting to " << PROPS.host << ":" << PROPS.port << " (" << PROPS.model << ")" << std::endl;
+    std::lock_guard<std::mutex> lock(output_buffer_mutex);
+    log_buffer += text;
+}
+
+void ollama_system::pull_background_output(OUTPUT_CLASS& output)
+{
+    for (auto& task : background_tasks)
+    {
+        output.get_response(*task);
+    }
+}
+
+void ollama_system::open()
+{
+    log("[System] Connecting to " + PROPS.host + ":" + std::to_string(PROPS.port) + " (" + PROPS.model + ")\n");
     
     std::filesystem::create_directories(PROPS.OLLI_DIRECTORY / "output");
     std::filesystem::create_directories(PROPS.OLLI_DIRECTORY / "input");
@@ -1258,7 +1273,6 @@ void ollama_system::send(const std::string& user_input, const std::string& role)
     
     std::string accumulated_content = "";
     std::string accumulated_thinking = "";
-    bool in_thinking_block = false;
     bool stream_received_done_flag = false;
 
     httplib::Headers headers = { {"Content-Type", "application/json"} };
@@ -1287,23 +1301,21 @@ void ollama_system::send(const std::string& user_input, const std::string& role)
                         auto msg_chunk = j_chunk["message"];
                         
                         if (msg_chunk.contains("thinking")) {
-                            if (!in_thinking_block) {
-                                std::cout << "\n<thinking>\n";
-                                in_thinking_block = true;
-                            }
                             std::string t = msg_chunk["thinking"];
-                            std::cout << t << std::flush;
                             accumulated_thinking += t;
-                        } 
-                        else if (msg_chunk.contains("content")) {
-                            if (in_thinking_block) {
-                                std::cout << "\n</thinking>\n\n";
-                                in_thinking_block = false;
+                            {
+                                std::lock_guard<std::mutex> lock(output_buffer_mutex);
+                                thinking_buffer += t;
                             }
+                        }
+                        else if (msg_chunk.contains("content")) {
                             std::string c = msg_chunk["content"];
-                            std::cout << c << std::flush;
                             accumulated_content += c;
                             tts_buffer += c;
+                            {
+                                std::lock_guard<std::mutex> lock(output_buffer_mutex);
+                                response_buffer += c;
+                            }
                         }
 
                         if (msg_chunk.contains("tool_calls")) {
@@ -1322,16 +1334,11 @@ void ollama_system::send(const std::string& user_input, const std::string& role)
         );
 
         if (status.interrupt_signal.load()) {
-            std::cout << "\n[System: Response Interrupted by User]\n";
+            log("\n[System: Response Interrupted by User]\n");
         } else if (!res || res->status != 200) {
             std::cerr << "\n[Error] Stream failed: " << (res ? std::to_string(res->status) : "Connection error") << std::endl;
         }
 
-        if (in_thinking_block) {
-            std::cout << "\n</thinking>\n";
-            in_thinking_block = false;
-        }
-        
         last_received.complete = stream_received_done_flag && !status.interrupt_signal.load();
 
     } else {
@@ -1379,8 +1386,15 @@ void ollama_system::send(const std::string& user_input, const std::string& role)
         }
         history.push_back({"assistant", final_content});
     }
-    
-    std::cout << std::endl;
+
+    // Same trailing blank line the old direct-cout version always printed
+    // once a response finished - routed through response_buffer instead of
+    // printing straight to std::cout, so display() (see user_io.h/.cpp)
+    // stays the only thing that actually writes chat output to the screen.
+    {
+        std::lock_guard<std::mutex> lock(output_buffer_mutex);
+        response_buffer += "\n";
+    }
     status.is_active = false;
 }
 
@@ -1402,7 +1416,14 @@ void ollama_system::send_tool_result(const std::string& tool_call_id, const std:
 
 void ollama_system::stop()
 {
-    status.interrupt_signal = true; 
+    status.interrupt_signal = true;
+}
+
+void ollama_system::request_exit()
+{
+    running = false;
+    if (is_processing) stop();
+    if (chat_thread.joinable()) chat_thread.join();
 }
 
 /**
@@ -1575,9 +1596,7 @@ bool ollama_system::jump_input(CLASS_SYSTEM& System)
     if (trim(System.key_input.LINE) == "bye" || trim(System.key_input.LINE) == "quit" || trim(System.key_input.LINE) == "Goodbye.")
     {
         //System.key_input.reset();
-        running = false;
-        if (is_processing) stop();
-        if (chat_thread.joinable()) chat_thread.join();
+        request_exit();
         return true;
     }
     else if (trim(System.key_input.LINE) == "I'm home." || 
@@ -1595,8 +1614,7 @@ bool ollama_system::jump_input(CLASS_SYSTEM& System)
         jump_instance.PROPS.stream_output = false;
 
         // ----
-        cout << "[JUMP] " << flush;
-        cout << "[" << trim(System.key_input.LINE) << "] " << std::endl;
+        log("[JUMP] [" + trim(System.key_input.LINE) + "] \n");
 
         // ----
         // This needs compartmentalization and definable configuration.
@@ -1650,13 +1668,13 @@ bool ollama_system::input(CLASS_SYSTEM& System)
     // 1. ORIGINAL INTERRUPT LOGIC
     if (is_processing && System.key_input.INTERRUPTED) 
     {
-        std::cout << "." << std::flush;
+        log(".");
         System.key_input.reset();
-        
+
         stop();
         if (chat_thread.joinable()) chat_thread.join();
         is_processing = false;
-        std::cout << "\n[Interrupting for new input...]" << std::endl;
+        log("\n[Interrupting for new input...]\n");
     }
 
     // 2. ORIGINAL INPUT LOGIC
@@ -1674,6 +1692,14 @@ bool ollama_system::input(CLASS_SYSTEM& System)
             
             std::string tmp_line = System.key_input.LINE;
             System.key_input.reset();
+
+            // Record what was actually submitted in the transcript - LINE
+            // already ends in '\n' (see KEYBOARD_INPUT::keyboard_input()),
+            // matching the voice path's own user_input append in main.cpp.
+            // Without this, a typed message vanishes the instant Enter is
+            // pressed (key_input.reset() above just cleared LINE) and never
+            // appears anywhere in OUTPUT_CLASS - only voice input did.
+            System.output.user_input += tmp_line;
 
             // Ensure we don't leak a thread if one was somehow left joinable
             if (chat_thread.joinable()) chat_thread.join();
@@ -1787,7 +1813,7 @@ void ollama_system::process(bool& Keyboard_Input_Enabled)
     // ---------------------------------------------------------
     if (!is_processing && chat_thread.joinable()) {
         chat_thread.join();
-        cout << "\n[Response complete. Awaiting user input...]" << std::endl;
+        log("\n[Response complete. Awaiting user input...]\n");
         update_status();
         //std::cout << "You: " << std::flush;
     }

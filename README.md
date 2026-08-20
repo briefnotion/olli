@@ -68,6 +68,9 @@ whisper model file is large and has no reason to differ per person.
 - **libcurl** development headers — `sudo apt install libcurl4-openssl-dev`
 - **[cpp-httplib](https://github.com/yhirose/cpp-httplib)** (header-only)
 - **[nlohmann/json](https://github.com/nlohmann/json)** (header-only)
+- **ncursesw** (wide-char ncurses) — for the windowed display (see
+  [Display](#display) below). Not packaged system-wide here, so it's built
+  from source into its own local install prefix, kept separate from olli.
 
 By default the build looks for the two header-only libraries as sibling
 checkouts next to this repository:
@@ -76,7 +79,8 @@ checkouts next to this repository:
 code/
 ├── olli/            ← this repo
 ├── cpp-httplib/     ← git clone https://github.com/yhirose/cpp-httplib
-└── json/            ← git clone https://github.com/nlohmann/json
+├── json/            ← git clone https://github.com/nlohmann/json
+└── ncurses-snapshots/  ← see below
 ```
 
 If you keep them elsewhere (or installed system-wide), point CMake at them:
@@ -86,6 +90,29 @@ cmake -S source -B build \
       -DHTTPLIB_INCLUDE_DIR=/path/to/cpp-httplib \
       -DJSON_INCLUDE_DIR=/path/to/json/include
 ```
+
+#### Building ncursesw
+
+CMake looks for a *built* ncursesw next to this repo (`../../ncurses-snapshots`,
+same sibling convention as above) — it doesn't build ncurses itself, since
+ncurses uses autotools, not CMake. One-time setup:
+
+```bash
+git clone --depth 1 https://github.com/ThomasDickey/ncurses-snapshots.git
+cd ncurses-snapshots
+mkdir build && cd build
+../configure --prefix="$(pwd)/../install" \
+      --without-shared --with-normal --enable-widec \
+      --without-debug --without-ada --without-tests \
+      --without-manpages --without-progs
+make -j
+make install
+```
+
+Static (`--without-shared`) so the `olli` binary stays self-contained, and
+wide-char (`--enable-widec`) so UTF-8 renders correctly. The install prefix
+also ends up with its own bundled terminfo database, so nothing about it
+depends on what's installed system-wide.
 
 ### Compile
 
@@ -200,7 +227,47 @@ model's tool loop:
 | `I'm leaving.` | Load the *labor* scene |
 | `I'm sleeping.` / `Lights off.` | Load the *slumber* scene |
 
-**Exit:** type `bye`, `quit`, or `Goodbye.` — history is saved on the way out.
+**Exit:** type `bye`, `quit`, or `Goodbye.`, or press **Ctrl+C** — history is
+saved on the way out either way. (Raw-mode input disables the terminal's own
+signal generation, so Ctrl+C is handled explicitly rather than arriving as a
+real `SIGINT` — see `KEYBOARD_INPUT::EXIT_REQUESTED` in `user_io.h`.)
+
+---
+
+## Display
+
+All screen output goes through one `OUTPUT_CLASS` instance (`user_io.h`/`.cpp`),
+which sorts everything into four buckets: `system_message` (status/tool
+activity), `user_input` (an echo of what was typed/said), `chat_response`, and
+`chat_thinking` (the model's reasoning stream, when enabled).
+
+Two ways to render those buckets, chosen once at startup by the `USE_NCURSES`
+constant in `main.cpp`:
+
+- **`display_with_ncurses()`** (the default) — a windowed layout: a
+  system-message strip, a thinking window that appears only while the model
+  is reasoning and disappears once it's done, a scrolling chat transcript,
+  and an input line showing what you're typing live. Handles terminal
+  resizes (`SIGWINCH` → `resizeterm()`, re-laying out all four windows
+  without losing the transcript's scrollback).
+- **`display()`** — the original plain scrolling behavior: everything printed
+  straight to the terminal in order, no windows. Kept as a fallback in case
+  ncurses ever needs to be ruled out.
+
+Flip `USE_NCURSES` to `false` and rebuild to switch to the plain version;
+there's no runtime toggle.
+
+### How this stays decoupled from the chat engine
+
+`ollama_system` (the chat engine) never talks to `OUTPUT_CLASS` directly - it
+just has three public string members (`response_buffer`, `thinking_buffer`,
+`log_buffer`, in `olla.h`) that tool handlers and the streaming code append
+to, guarded by one shared `output_buffer_mutex`. `OUTPUT_CLASS::get_response()`
+is what reaches *in* and pulls (and clears) those buffers each tick - a pull,
+not a push, so `ollama_system` and its tool handlers never need a pointer
+back to the display layer. The same pull happens for sidetrack's background
+"second guess" review and for task-runner automation instances, so their
+output shows up on screen too, not just the main conversation's.
 
 ---
 
@@ -210,22 +277,23 @@ model's tool loop:
 source/
 ├── main.cpp / main.h          Entry point and the main event loop.
 ├── olla.{h,cpp}               ollama_system: chat engine, streaming, tool dispatch, all tools.
-├── helper_olli.{h,cpp}        Settings and raw-mode keyboard input.
+├── helper_olli.{h,cpp}        Settings (profile loading/saving).
+├── user_io.{h,cpp}            KEYBOARD_INPUT (raw-mode input) and OUTPUT_CLASS (all screen output).
 ├── audio_control.{h,cpp}      Owns TTS and Voca in-process, coordinates the two.
 ├── tts.{hpp,cpp}              TextToSpeech: in-process synthesis (espeak-ng) + playback (aplay).
 ├── voca.{hpp,cpp}             Voca: in-process wake-word + speech-to-text (whisper.cpp).
-├── sidetrack.{h,cpp}          Background thread: history consolidation + post-turn "second guess".
+├── sidetrack.{h,cpp}          Background thread: consolidation, "second guess", idle auto-clear.
 ├── tools_helper.{h,cpp}       HUE_LIGHT_CLASS, timers, task definitions, tool permissions.
 ├── stringthings.{h,cpp}       General-purpose string utility library.
 ├── fled_time.{h,cpp}          Timing / frame-pacing helpers used by the background threads.
 ├── threading.{h,cpp}          Thin std::async thread wrapper.
-├── system.h                   Aggregates Settings + keyboard + audio into one object.
+├── system.h                   Aggregates Settings + keyboard input + output + audio into one object.
 └── CMakeLists.txt             Build definition.
 ```
 
 ### The background "sidetrack" thread
 
-Two housekeeping routines run off the main thread (`sidetrack.cpp`):
+Three housekeeping routines run off the main thread (`sidetrack.cpp`):
 
 1. **Consolidation** — when the conversation grows past a threshold, older
    messages are summarised into a higher "consolidation level", compressing
@@ -235,6 +303,11 @@ Two housekeeping routines run off the main thread (`sidetrack.cpp`):
 2. **Second-guess** — after each turn, an "internal monologue" pass reviews the
    answer and, if it finds a genuinely useful addition, speaks a follow-up
    thought; otherwise it stays quiet.
+3. **Idle auto-clear** — after 30 minutes with no user activity, the
+   conversation history is wiped back down to just the protected,
+   `-1`-tagged persona message. Skipped if there's any activity in flight
+   when the timer fires. A stale or "poisoned" context can't outlive 30
+   minutes of silence.
 
 ---
 
@@ -242,9 +315,14 @@ Two housekeeping routines run off the main thread (`sidetrack.cpp`):
 
 - olli targets **Linux** (raw-terminal input, `localtime_r`, PulseAudio/ALSA).
   The settings path has a Windows branch but the audio/input paths are POSIX.
+- The ncurses display needs a real, recognized `$TERM` — ncurses' `initscr()`
+  exits the whole process immediately if it can't identify the terminal type
+  (e.g. `$TERM=dumb` or unset in some non-interactive/piped contexts). A
+  normal interactive terminal is unaffected; if you hit this, either run in
+  one, or flip `USE_NCURSES` to `false` in `main.cpp` and rebuild.
 - olli is a personal/experimental project; expect rough edges. Some source files
   carry commented-out experiments kept as design notes.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+GPL-3.0 — see [LICENSE](LICENSE).

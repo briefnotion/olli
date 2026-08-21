@@ -23,6 +23,15 @@ struct SIDETRACK_SIGNALS
 {
     bool INTERUPT_SIGNAL = false;      // user typed/spoke something - see SIDETRACK_CLASS::check
     bool CHAT_FINISHED_SIGNAL = false; // the main chat's response just finished
+
+    // The other direction: set by check() (main thread) when its context-
+    // clear routine (CLEAR_CONTEXT_STAGE) just cleared history, read and
+    // cleared by main.cpp right after calling check() - which then closes
+    // OUTPUT_CLASS's chat log (see OUTPUT_CLASS::close_chat_log() in
+    // user_io.cpp). sidetrack.cpp deliberately doesn't touch OUTPUT_CLASS
+    // directly - it only ever reaches main.cpp/pull_output() - so this flag
+    // is the hop instead, same shape as CHAT_FINISHED_SIGNAL just reversed.
+    bool CONTEXT_CLEARED_SIGNAL = false;
 };
 
 /**
@@ -201,7 +210,10 @@ class SIDETRACK_CLASS
         // Pulls SIDETRACK_CHAT_INSTANCE's response_buffer/thinking_buffer/
         // log_buffer into output - same shape as ollama_system's own
         // pull_background_output(), just for the one instance sidetrack
-        // owns privately instead of a container of them.
+        // owns privately instead of a container of them. One difference: a
+        // lone "DONE" response_buffer (the review found nothing worth
+        // adding) is routed into chat_thinking instead of chat_response -
+        // see the .cpp for why.
         void pull_output(OUTPUT_CLASS& output);
 };
 

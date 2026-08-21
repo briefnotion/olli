@@ -518,6 +518,10 @@ void SIDETRACK_CLASS::check(ollama_system& main_instance)
                 }
                 main_instance.history = protected_messages;
                 main_instance.save_history();
+
+                // Tell main.cpp to close the chat log too - see
+                // SIDETRACK_SIGNALS::CONTEXT_CLEARED_SIGNAL's comment.
+                SIGNALS.CONTEXT_CLEARED_SIGNAL = true;
             }
             CLEAR_CONTEXT_STAGE = 2;
         }
@@ -526,7 +530,36 @@ void SIDETRACK_CLASS::check(ollama_system& main_instance)
 
 void SIDETRACK_CLASS::pull_output(OUTPUT_CLASS& output)
 {
-    output.get_response(SIDETRACK_CHAT_INSTANCE);
+    // Same pull-and-clear shape as OUTPUT_CLASS::get_response() (inlined
+    // here instead of just calling it, so this can lock output_buffer_mutex
+    // once rather than double-locking it) with one addition: once the
+    // review's response settles on a lone "DONE" (see the prompt in
+    // check()'s SECOND_GUESS_PROCESSING_STAGE==2 block, and the matching
+    // starts_with() check further down in this file - it means the review
+    // found nothing worth adding), that's not a real reply worth cluttering
+    // the permanent chat transcript with. Route it into chat_thinking
+    // instead of chat_response - same place the rest of the review's
+    // reasoning already goes, where it disappears once real content
+    // arrives, rather than sitting in the transcript as a stray "DONE."
+    // line (see the TODO.md entry this replaces, "Filter DONE-only
+    // responses from display").
+    std::lock_guard<std::mutex> lock(output_buffer_mutex);
+
+    if (starts_with(SIDETRACK_CHAT_INSTANCE.response_buffer, "DONE"))
+    {
+        output.chat_thinking += SIDETRACK_CHAT_INSTANCE.response_buffer;
+    }
+    else
+    {
+        output.chat_response += SIDETRACK_CHAT_INSTANCE.response_buffer;
+    }
+    SIDETRACK_CHAT_INSTANCE.response_buffer.clear();
+
+    output.chat_thinking += SIDETRACK_CHAT_INSTANCE.thinking_buffer;
+    SIDETRACK_CHAT_INSTANCE.thinking_buffer.clear();
+
+    output.system_message += SIDETRACK_CHAT_INSTANCE.log_buffer;
+    SIDETRACK_CHAT_INSTANCE.log_buffer.clear();
 }
 
 

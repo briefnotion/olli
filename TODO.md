@@ -2,6 +2,12 @@
 
 Guiding principle for all of the below: keep code simple, easy to read, and
 well compartmentalized. That's the bar for new work here, not just a nice-to-have.
+Before writing a new function, check `helper_olli.cpp`/`.h` and
+`tools_helper.cpp`/`.h` for an existing one to reuse. When adding a new
+function that's frequently used and well-tested, put it in one of those two
+files rather than leaving it local to a single caller: `helper_olli` for
+general-purpose helpers, `tools_helper` for helpers reused across tools but
+not needed elsewhere.
 
 ## New tools
 
@@ -35,20 +41,16 @@ well compartmentalized. That's the bar for new work here, not just a nice-to-hav
 
 ## Display / OUTPUT_CLASS
 
-- **Filter DONE-only responses from display** - sidetrack's second-guess
-  review answers with the literal word "DONE" when it has nothing worth
-  adding (see the `starts_with(..., "DONE")` check in `sidetrack.cpp`). Now
-  that its output is actually wired into `OUTPUT_CLASS::display()`, a
-  DONE-only response shows up as visible clutter after a turn instead of
-  being silently dropped like it used to be.
-- **Add a visible cursor to the ncurses input window** - `display_with_ncurses()`
-  calls `curs_set(0)` at init (user_io.cpp), hiding the terminal cursor
-  entirely. The input window renders `"> " + LINE` as plain text each tick,
-  but there's nothing marking where in that line you actually are - no
-  blink, no visible insertion point, so backspace/edit feedback is weaker
-  than it should be. Needs `curs_set(1)` (or `2`) plus actually positioning
-  it (`wmove`) to the end of the rendered line in `win_input` before that
-  window's `wrefresh()`.
+- **Filter tool calls and other non-conversational text out of the chat
+  log** - `OUTPUT_CLASS::append_to_chat_log()` (user_io.cpp) just logs
+  whatever flows through `chat_response`, same as the screen shows. Seen
+  in testing: a malformed tool call streamed as plain content instead of
+  landing in the structured `tool_calls` field (`response_buffer += c;`,
+  olla.cpp ~line 1317, vs. the proper `tool_calls` handling right below
+  it at ~line 1321) - showed up as a literal
+  `<tools>{"name": "get_current_time", ...}</tools>` line in the log.
+  The log should probably strip that kind of artifact even where the
+  on-screen display doesn't bother.
 - **Revisit bringing Voca and Lira into input/output, using today's buffer
   pattern** - see "What we built today: the buffer-pull pattern" below for
   the mechanism this would reuse. When this first came up (before the
@@ -108,6 +110,17 @@ whether a given instance's output should even be visible (e.g. main.cpp
 currently pulls sidetrack and background tasks but nothing pulls the
 delegator's `sub_agent`, which can't be reached this way at all - it's a
 local variable, synchronous, gone before any tick could reach it).
+
+## Voice (Voca)
+
+- **Change the wake word from "voca" to "olli"** - `findWakeWord()`
+  (voca.cpp) matches "hey" followed by a "vo"-prefixed word
+  (`startsWithVo()`/`kVoPrefixMinLen`, loose - see its comment for why),
+  or a bare "voca"/"voka" anywhere. Needs the prefix/bare-word list
+  swapped to match "olli" instead (and probably the sleep-trigger side,
+  `findSleepTrigger()`, which also keys off a "vo"-prefixed word next to
+  a control word - see its own comment for the "hey voca, stop talking"
+  disambiguation it does).
 
 ## Remote access
 

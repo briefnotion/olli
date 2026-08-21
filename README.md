@@ -47,6 +47,8 @@ inter-process coordination:
 | `history_debug.txt` | Human-readable dump of the current history. |
 | `scenes.json` | Locally saved Hue light scenes. |
 | `models/` | Whisper model file(s) for Voca's speech-to-text. Always shared — see below. |
+| `chat_log.txt` | Live, flat-text transcript of the current session (see [Chat log](#chat-log) below). |
+| `chat_logs/` | Archived, timestamped past sessions' transcripts. |
 
 #### Profiles
 
@@ -68,9 +70,11 @@ whisper model file is large and has no reason to differ per person.
 - **libcurl** development headers — `sudo apt install libcurl4-openssl-dev`
 - **[cpp-httplib](https://github.com/yhirose/cpp-httplib)** (header-only)
 - **[nlohmann/json](https://github.com/nlohmann/json)** (header-only)
-- **ncursesw** (wide-char ncurses) — for the windowed display (see
-  [Display](#display) below). Not packaged system-wide here, so it's built
-  from source into its own local install prefix, kept separate from olli.
+- **ncursesw** (wide-char ncurses), including its **panel** library
+  (`libpanelw`) — for the windowed display (see [Display](#display)
+  below). Not packaged system-wide here, so it's built from source into
+  its own local install prefix, kept separate from olli. Panels come from
+  the same build, no extra configure flags needed.
 
 By default the build looks for the two header-only libraries as sibling
 checkouts next to this repository:
@@ -146,6 +150,7 @@ Then start olli:
 ```bash
 ./build/olli          # shared settings, ~/olli_files/
 ./build/olli ron      # ron's own settings, ~/olli_files_ron/ (see Profiles below)
+./build/olli --help   # usage, no model/audio/profile init - exits immediately
 ```
 
 Voice input and output both run in-process, so there's nothing else to start.
@@ -244,15 +249,24 @@ activity), `user_input` (an echo of what was typed/said), `chat_response`, and
 Two ways to render those buckets, chosen once at startup by the `USE_NCURSES`
 constant in `main.cpp`:
 
-- **`display_with_ncurses()`** (the default) — a windowed layout: a
-  system-message strip, a thinking window that appears only while the model
-  is reasoning and disappears once it's done, a scrolling chat transcript,
-  and an input line showing what you're typing live. Handles terminal
-  resizes (`SIGWINCH` → `resizeterm()`, re-laying out all four windows
-  without losing the transcript's scrollback).
+- **`display_with_ncurses()`** (the default) — a windowed layout: a 3-line
+  scrolling system-message strip, a scrolling chat transcript (what you typed,
+  dimmed grey, above the assistant's replies in the default foreground color),
+  and an input line showing what you're typing live with a reverse-video block
+  marking the cursor position. While the model is reasoning, a small bordered
+  box floats over the upper-right corner of the transcript instead of
+  displacing it, and lingers for ~2 seconds after reasoning ends before
+  closing. `win_chat` and that floating box are the only two windows that ever
+  overlap, so they're the only two backed by ncurses' **panel** library
+  (`PANEL`/`update_panels()`) rather than plain `wrefresh()` — panels track
+  which window is stacked on top and correctly repaint whatever a closed
+  panel was covering, which a window's own refresh can't do on its own (it
+  only knows about writes to its own buffer). Handles terminal resizes
+  (`SIGWINCH` → `resizeterm()`, re-laying out every window without losing the
+  transcript's scrollback).
 - **`display()`** — the original plain scrolling behavior: everything printed
-  straight to the terminal in order, no windows. Kept as a fallback in case
-  ncurses ever needs to be ruled out.
+  straight to the terminal in order, no windows, no color. Kept as a fallback
+  in case ncurses ever needs to be ruled out.
 
 Flip `USE_NCURSES` to `false` and rebuild to switch to the plain version;
 there's no runtime toggle.
@@ -268,6 +282,34 @@ not a push, so `ollama_system` and its tool handlers never need a pointer
 back to the display layer. The same pull happens for sidetrack's background
 "second guess" review and for task-runner automation instances, so their
 output shows up on screen too, not just the main conversation's.
+
+---
+
+## Chat log
+
+Independent of `history.json` (which is structured, periodically rewritten
+whole, and fed back into the model), `chat_log.txt` is a flat, human-readable,
+append-only transcript — `OUTPUT_CLASS::append_to_chat_log()` (`user_io.cpp`)
+writes it right where `user_input`/`chat_response` get shown, so it always
+matches exactly what appeared on screen. Theatrical-script style, labeled only
+on a speaker change so streamed replies don't repeat the label every chunk:
+
+```
+Ron: what's the weather like?
+
+Olli: I don't have a weather tool yet, sorry.
+```
+
+The speaker label for you is whatever name you gave at startup (`./build/olli
+ron`, or typed at the "What is your name?" prompt), capitalized — falls back
+to plain "You" for the shared/no-name profile.
+
+`chat_log.txt` gets **archived**, not appended to forever: `close_chat_log()`
+moves it into `chat_logs/<YYMMDD.HHMM>.chat_log.txt` and lets the next message
+start a fresh file. This happens at clean program exit, and whenever
+sidetrack's idle auto-clear wipes history (see [the background sidetrack
+thread](#the-background-sidetrack-thread) below) — both moments a
+conversation is considered "over."
 
 ---
 
@@ -302,7 +344,9 @@ Three housekeeping routines run off the main thread (`sidetrack.cpp`):
    `-1` and is never summarised.
 2. **Second-guess** — after each turn, an "internal monologue" pass reviews the
    answer and, if it finds a genuinely useful addition, speaks a follow-up
-   thought; otherwise it stays quiet.
+   thought; otherwise its "nothing to add" reply is routed into the thinking
+   window (see [Display](#display)) instead of the transcript, so it doesn't
+   show up as clutter.
 3. **Idle auto-clear** — after 30 minutes with no user activity, the
    conversation history is wiped back down to just the protected,
    `-1`-tagged persona message. Skipped if there's any activity in flight

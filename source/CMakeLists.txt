@@ -75,9 +75,19 @@ find_library(NCURSES_LIBRARY
         "${CMAKE_CURRENT_SOURCE_DIR}/../../ncurses-snapshots/install/lib"
 )
 
-if(NOT NCURSES_INCLUDE_DIR OR NOT NCURSES_LIBRARY)
+# Panels (panel.h/libpanelw - see user_io.h/.cpp's PANEL members): a
+# separate library built alongside ncursesw in the same install prefix, not
+# bundled into libncursesw itself, so it needs its own find_library/link
+# entry even though it shares ncursesw's include dir (ncursesw/panel.h).
+find_library(NCURSES_PANEL_LIBRARY
+    NAMES panelw
+    HINTS
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../ncurses-snapshots/install/lib"
+)
+
+if(NOT NCURSES_INCLUDE_DIR OR NOT NCURSES_LIBRARY OR NOT NCURSES_PANEL_LIBRARY)
     message(FATAL_ERROR
-        "Could not find a built ncursesw. Clone "
+        "Could not find a built ncursesw (with panels). Clone "
         "https://github.com/ThomasDickey/ncurses-snapshots.git next to this "
         "project (../../ncurses-snapshots) and build it there: "
         "mkdir build && cd build && "
@@ -88,6 +98,7 @@ endif()
 
 message(STATUS "Using ncursesw headers from: ${NCURSES_INCLUDE_DIR}")
 message(STATUS "Using ncursesw library at: ${NCURSES_LIBRARY}")
+message(STATUS "Using ncursesw panel library at: ${NCURSES_PANEL_LIBRARY}")
 
 # 2. Handle threading and CURL
 find_package(Threads REQUIRED)
@@ -174,4 +185,4 @@ else()
 endif()
 
 # 6. Link libraries
-target_link_libraries(olli PRIVATE Threads::Threads CURL::libcurl whisper PkgConfig::PORTAUDIO ${NCURSES_LIBRARY})
+target_link_libraries(olli PRIVATE Threads::Threads CURL::libcurl whisper PkgConfig::PORTAUDIO ${NCURSES_PANEL_LIBRARY} ${NCURSES_LIBRARY})

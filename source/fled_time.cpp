@@ -340,6 +340,7 @@ double TIMED_IS_READY::tir_now()
     auto tmeNow = std::chrono::steady_clock::now();
     std::chrono::duration<double> dur = tmeNow - TIME_START;
     double nowtime = dur.count();
+    nowtime *= 1000.0; // seconds -> ms, matching FLED_TIME::now() and set_e()/is_ready_e()'s "delay in ms" docs
     return nowtime;
 }
 

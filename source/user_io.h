@@ -3,6 +3,8 @@
 
 #include <string>
 #include <termios.h>
+#include <filesystem>
+#include <optional>
 
 #include "fled_time.h"
 
@@ -83,6 +85,18 @@ class ollama_system; // for get_response() below - see olla.h
 struct _win_st;
 typedef struct _win_st WINDOW;
 
+// Same reasoning/mechanism as WINDOW above, for ncurses' panel library
+// (panel.h, only included in user_io.cpp) - matches "typedef struct panel
+// PANEL;" there. Panels are what actually make win_chat/win_thinking's
+// overlap correct: a plain window's own refresh only knows about writes to
+// its own buffer, so it has no way to notice (and repaint over) another
+// window that drew on top of it and then went away - which is exactly the
+// bug a first, panel-free version of this hit (the thinking box's border
+// left behind after it closed). The panel library tracks that stacking
+// itself and repairs obscured regions correctly on update_panels().
+struct panel;
+typedef struct panel PANEL;
+
 /**
  * OUTPUT_CLASS
  *
@@ -118,6 +132,28 @@ class OUTPUT_CLASS
         // currently open," even though only one path runs in a given session.
         bool in_thinking_block = false;
 
+        // ---- chat log - see append_to_chat_log() in user_io.cpp ----
+        // nullopt until the first line is actually written this run; true/
+        // false after that tracks whether the LAST line written was the
+        // user's or the assistant's, so a run of streamed chat_response
+        // chunks (which arrive in many small pieces, not one shot - unlike
+        // user_input) gets appended as one continuous block under a single
+        // "Olli: " label instead of repeating the label every chunk.
+        std::optional<bool> chat_log_last_speaker_was_user;
+
+        // Appends text to chat_log_path (theatrical-script style:
+        // chat_log_user_label/"Olli: " labels, only on a speaker change) -
+        // a no-op if
+        // chat_log_path was never set (see its own comment below) or text
+        // is empty. Flat text, not JSON: this is meant to be human-readable
+        // and simply appendable, independent of history.json's own
+        // structured rewrite-the-whole-file persistence. Called from both
+        // display() and display_with_ncurses() at the same points
+        // user_input/chat_response get shown, so the log always matches
+        // exactly what the user actually saw - not threaded through
+        // ollama_system's own response_buffer cross-thread plumbing.
+        void append_to_chat_log(bool is_user, const std::string& text);
+
         // ---- ncurses state - see display_with_ncurses() in user_io.cpp ----
         // Lazily set up on the first display_with_ncurses() call (so plain
         // display() never touches ncurses at all, for the "fall back to it"
@@ -128,13 +164,49 @@ class OUTPUT_CLASS
         int ncurses_screen_h = 0;
         int ncurses_screen_w = 0;
         bool ncurses_thinking_visible = false;
+        // True for a couple seconds after in_thinking_block drops (chat
+        // content arrived, ending the block) - the box stays visible for
+        // that stretch instead of vanishing the instant it happens, so it
+        // actually registers on screen. Cleared early if fresh thinking
+        // content starts again first. TIMED_IS_READY (fled_time.h) tracks
+        // the countdown - already used elsewhere in this codebase (e.g.
+        // sidetrack.cpp's idle-wait timers) for the same "has enough time
+        // passed" shape.
+        bool ncurses_thinking_closing = false;
+        TIMED_IS_READY ncurses_thinking_close_timer;
+
+        // Set from has_colors() at init - guards every COLOR_PAIR() use
+        // below, since attron()-ing a pair that was never init_pair()'d
+        // (because the terminal doesn't support color at all) is undefined.
+        bool ncurses_colors_available = false;
         WINDOW* win_system = nullptr;
         WINDOW* win_thinking = nullptr;
+        // Interior-only subwindow (derwin) of win_thinking, offset one row/
+        // col in from its border on every side - streamed thinking text is
+        // written/scrolled in here instead of directly into win_thinking,
+        // so a window's ordinary line-wrap-at-full-width behavior can't
+        // write over the border's left/right columns. Always created and
+        // torn down together with win_thinking (see ncurses_layout()) since
+        // a derived window doesn't stay valid if its parent is resized/
+        // moved out from under it.
+        WINDOW* win_thinking_content = nullptr;
         WINDOW* win_chat = nullptr;
         WINDOW* win_input = nullptr;
 
-        void ncurses_layout(); // (re)creates the four windows for the current
-                                // terminal size and thinking-visibility state
+        // win_chat and win_thinking are the only two windows that ever
+        // spatially overlap, so those two - and only those two - are
+        // wrapped in panels (win_system/win_input never overlap anything
+        // and stay plain windows, refreshed with plain wrefresh()).
+        // Repositioning either paneled window must go through
+        // move_panel(), never a raw mvwin() on the WINDOW directly, or the
+        // panel library's own position bookkeeping falls out of sync with
+        // reality.
+        PANEL* pan_chat = nullptr;
+        PANEL* pan_thinking = nullptr;
+
+        void ncurses_layout(); // full rebuild - all windows, for a resize
+        void ncurses_update_thinking_box(); // just the floating thinking box
+        void ncurses_commit_panels(); // update_panels()+doupdate() - see .cpp
 
     public:
         std::string system_message = "";
@@ -142,7 +214,34 @@ class OUTPUT_CLASS
         std::string chat_response = "";
         std::string chat_thinking = "";
 
+        // Set once by main.cpp (alongside ollama_system::PROPS.OLLI_DIRECTORY
+        // - same profile directory, see Settings::get_settings_path()) right
+        // after settings load. Left empty (the default) disables the chat
+        // log entirely - append_to_chat_log() no-ops on an empty path.
+        std::filesystem::path chat_log_path;
+
+        // The speaker label append_to_chat_log() writes for user_input -
+        // set by main.cpp from the profile name given at startup (argv[1]
+        // or the "What is your name?" prompt), capitalized. Left at the
+        // "You" default when there's no real name (the shared/no-profile
+        // case).
+        std::string chat_log_user_label = "You";
+
         ~OUTPUT_CLASS();
+
+        // Archives whatever's currently at chat_log_path into a
+        // "chat_logs" subdirectory of its parent, renamed
+        // "<YYMMDD.HHMM>.chat_log.txt" (see timestamp_prefix() in
+        // helper_olli.h) - leaves chat_log_path itself free, so the next
+        // append_to_chat_log() call starts a brand-new file there, same as
+        // a fresh run. A no-op if chat_log_path was never set, doesn't
+        // exist, or is empty (nothing worth archiving). Called from
+        // main.cpp at shutdown, and from main.cpp's main loop when
+        // sidetrack's context-clear routine signals it just cleared
+        // history (see SIDETRACK_SIGNALS::CONTEXT_CLEARED_SIGNAL in
+        // sidetrack.h) - both moments a conversation is considered "over,"
+        // independent of each other.
+        void close_chat_log();
 
         // Ends ncurses (endwin()) and hands the real terminal screen back,
         // if display_with_ncurses() ever started it - a no-op otherwise.

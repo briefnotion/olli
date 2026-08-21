@@ -9,6 +9,8 @@
 #include <atomic>
 #include <filesystem>
 #include <fstream>
+#include <ctime>
+#include <cstdio>
 
 #include <nlohmann/json.hpp>
 
@@ -17,6 +19,11 @@
 // ----
 
 void simulateTyping(const std::string& text);
+
+// Current local time as "YYMMDD.HHMM" (e.g. "260821.1430") - for
+// timestamped file names, see e.g. OUTPUT_CLASS::close_chat_log()
+// (user_io.cpp).
+std::string timestamp_prefix();
 
 // ----
 

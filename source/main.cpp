@@ -31,6 +31,21 @@
 static const bool USE_NCURSES = true;
 
 int main(int argc, char* argv[]) {
+    // Checked before anything else: argv[1] is otherwise taken as-is for
+    // profile_name below (see the comment there), so a typo'd flag would
+    // silently become a brand-new profile instead of failing loudly.
+    if (argc > 1 && (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h")) {
+        std::cout << "Usage: olli [name]\n\n"
+                      "  name          Use your own settings, history, and scenes, kept\n"
+                      "                separate from everyone else's, under\n"
+                      "                ~/olli_files_<name> instead of the shared\n"
+                      "                ~/olli_files. Case-insensitive. Omit it and you'll\n"
+                      "                be prompted for one at startup; pressing Enter with\n"
+                      "                nothing typed uses the shared default.\n\n"
+                      "  --help, -h    Show this help and exit.\n";
+        return 0;
+    }
+
     // ./olli <name> gives that person their own settings/history/scenes
     // under ~/olli_files_<name> instead of the shared ~/olli_files - see
     // Settings::load_settings(). Without a name on the command line, ask
@@ -60,6 +75,20 @@ int main(int argc, char* argv[]) {
     std::filesystem::path settings_path = system.setings_vars.get_settings_path();
 
     chat.PROPS.OLLI_DIRECTORY = settings_path;
+    // Flat-text, human-readable transcript (speaker labels, "Olli: " for
+    // the assistant) kept independent of history.json's own structured,
+    // periodically-rewritten persistence - see
+    // OUTPUT_CLASS::append_to_chat_log() in user_io.cpp.
+    system.output.chat_log_path = settings_path / "chat_log.txt";
+    if (!profile_name.empty())
+    {
+        // profile_name is already lower_case()'d above (for the
+        // olli_files_<name> directory) - capitalize just the first letter
+        // for the log label, matching "Olli: "'s own capitalization.
+        std::string label = profile_name;
+        label[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(label[0])));
+        system.output.chat_log_user_label = label;
+    }
     chat.PROPS.web_search_api_key = system.setings_vars.tool_web_search_apiKey;
     chat.PROPS.hue_ip = system.setings_vars.tool_hue_lights_bridge_ip;
     chat.PROPS.hue_key = system.setings_vars.tool_hue_lights_apiKey;
@@ -202,6 +231,15 @@ int main(int argc, char* argv[]) {
         // machines - see SIDETRACK_CLASS::check's doc comment.
         sidetrack.check(chat);
 
+        if (sidetrack.SIGNALS.CONTEXT_CLEARED_SIGNAL)
+        {
+            sidetrack.SIGNALS.CONTEXT_CLEARED_SIGNAL = false;
+            // A cleared context is a conversation sidetrack considers
+            // "over" - close the chat log the same way real program exit
+            // does (see the other close_chat_log() call site below).
+            system.output.close_chat_log();
+        }
+
         // Pull whatever chat, its background tasks (task-runner automations),
         // and sidetrack's second-guess review each streamed since the last
         // tick, then show everything accumulated this tick - see
@@ -241,6 +279,12 @@ int main(int argc, char* argv[]) {
     // history size change) only runs from inside the loop above, which has
     // already exited by this point.
     chat.save_history();
+
+    // Archives this run's chat_log.txt into chat_logs/<timestamp>.chat_log.txt
+    // - see OUTPUT_CLASS::close_chat_log() in user_io.cpp. The other call
+    // site is inside the loop above, when sidetrack's context-clear routine
+    // signals it just cleared history.
+    system.output.close_chat_log();
 
     // PROPS.keep_alive_seconds (-1 by default) keeps the model loaded in
     // Ollama indefinitely across requests - that's independent of this

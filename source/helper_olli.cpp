@@ -21,6 +21,24 @@ void simulateTyping(const std::string& text) {
     std::cout << std::endl; // Final break after the message is "typed"
 }
 
+std::string timestamp_prefix() {
+    std::time_t now = std::time(nullptr);
+    std::tm local_tm{};
+    localtime_r(&now, &local_tm); // _r: thread-safe, unlike plain localtime()'s static buffer
+
+    char buf[32]; // comfortably over the realistic ~12 bytes - satisfies
+                   // -Wformat-truncation's worst-case (%d could in theory
+                   // print an 11-digit int) rather than the realistic one
+    std::snprintf(buf, sizeof(buf), "%02d%02d%02d.%02d%02d",
+                  (local_tm.tm_year + 1900) % 100,
+                  local_tm.tm_mon + 1,
+                  local_tm.tm_mday,
+                  local_tm.tm_hour,
+                  local_tm.tm_min);
+
+    return std::string(buf);
+}
+
 // ----
 
 // Helper to find the home directory across Windows/Linux/macOS

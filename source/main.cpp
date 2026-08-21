@@ -24,12 +24,6 @@
  * audio_control.h/voca.hpp) - its transcripts are drained each loop tick
  * below and fed into system.key_input the same way a typed line would be.
  */
-// Which OUTPUT_CLASS display path this run uses - see display_with_ncurses()
-// in user_io.h/.cpp. Flip to false to fall back to the plain scrolling
-// display() if ncurses ever needs to be ruled out (a bug, a terminal it
-// doesn't handle well, etc).
-static const bool USE_NCURSES = true;
-
 int main(int argc, char* argv[]) {
     // Checked before anything else: argv[1] is otherwise taken as-is for
     // profile_name below (see the comment there), so a typo'd flag would

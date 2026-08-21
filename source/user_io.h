@@ -120,6 +120,17 @@ typedef struct panel PANEL;
  * in all four buckets and clears them, the same check-act-clear shape
  * ollama_system::write_to_tts() already uses for tts_buffer.
  */
+
+// Which OUTPUT_CLASS display path this run uses, chosen once here rather
+// than duplicated per call site. Flip to false to fall back to the plain
+// scrolling display() if ncurses ever needs to be ruled out (a bug, a
+// terminal it doesn't handle well, etc). Anything that constructs its own
+// KEYBOARD_INPUT must set that instance's PROPS.RAW_ECHO = !USE_NCURSES too
+// (see KEYBOARD_INPUT_PROPERTIES::RAW_ECHO's comment above) - raw cout
+// echoing from a keypress corrupts the ncurses screen buffer if left at its
+// default true while ncurses owns the screen.
+inline constexpr bool USE_NCURSES = true;
+
 class OUTPUT_CLASS
 {
     private:

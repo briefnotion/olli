@@ -20,9 +20,24 @@ not needed elsewhere.
 - **RAG support** - retrieval-augmented generation over some corpus (notes?
   history? both?). Probably a big task. `nomic-embed-text` is already pulled
   in Ollama, so the embedding side has a natural starting point.
-- **Improve current tools** - a general polish pass over the existing tool
-  set (Hue lights, timers, web search, task runner) rather than one specific
-  fix.
+- **Tools rework - in progress, not done** (started 2026-08-21). Completed so
+  far: pulled every `TOOL_*` class out of `olla.h`/`olla.cpp` into their own
+  `tools.h`/`tools.cpp`; cleaned out stale/AI-session-artifact comments there;
+  gave every tool the same `configure`/`register_tool`/`check`/`monitor_tool`
+  shape via an abstract `TOOL_BASE`, replacing the six fixed named members on
+  `ollama_system` with `tools_list` (`std::vector<std::unique_ptr<TOOL_BASE>>`)
+  so adding a tool no longer touches `ollama_system` itself. Still open:
+  - Redo (or drop entirely, undecided) the `TOOL_PERMISSIONS_CLASS` system
+    (tools_helper.h) - a bare bool per tool, hand-maintained in parallel with
+    `tools_list` now that tools are stored generically.
+  - `ollama_system` can't reach `CLASS_SYSTEM` (`system.h`) at all right now -
+    `TOOL_TASK_RUNNER`'s dispatcher branch (`handle_instance_tools`,
+    tools.cpp) still special-cases toggling `Keyboard_Input_Enabled` by
+    checking the tool name directly, marked `TODO` inline, because `check()`'s
+    signature has no way to reach `key_input`/`output` otherwise.
+  - The task-runner display bug above.
+  - General polish pass over the existing tool set (Hue lights, timers, web
+    search, task runner) beyond the structural rework itself.
 
 ## Session & model behavior
 
@@ -41,6 +56,18 @@ not needed elsewhere.
 
 ## Display / OUTPUT_CLASS
 
+- **Task runner (`TOOL_TASK_RUNNER::handle_tool`, tools.cpp) doesn't display
+  text correctly during an automation** - running `run system test`
+  (2026-08-21) surfaced this. One specific cause is already fixed: its local
+  `KEYBOARD_INPUT` never set `PROPS.RAW_ECHO = false`, so raw keystrokes
+  (including a literal `\r\n` on Enter) were echoed straight to the terminal
+  every tick while ncurses owned the screen, corrupting the display - see
+  `KEYBOARD_INPUT_PROPERTIES::RAW_ECHO`'s comment in user_io.h. Still
+  outstanding: the function's own `cout <<`/`std::cout <<` debug prints
+  (`"PRESS ENTER TO CONTINUE"`, `"REQUEST: ..."`, `"INPUT: ..."`) write
+  straight to the terminal too, bypassing the buffer-pull pattern (see below)
+  the rest of the codebase uses for exactly this reason - they should route
+  through `chat.log()`/`response_buffer` like everything else instead.
 - **Filter tool calls and other non-conversational text out of the chat
   log** - `OUTPUT_CLASS::append_to_chat_log()` (user_io.cpp) just logs
   whatever flows through `chat_response`, same as the screen shows. Seen
@@ -135,4 +162,8 @@ local variable, synchronous, gone before any tick could reach it).
   it recurs. The 30-minute idle auto-clear (`SIDETRACK_CLASS` ROUTINE 3 in
   `sidetrack.cpp`/`.h`) is now in place as a plausible mitigation - a stale,
   poisoned context can't outlive 30 minutes of silence - but isn't confirmed
-  to actually fix the underlying issue.
+  to actually fix the underlying issue. `OLLAMA_OPENING` (olla.h) also
+  dropped the "snarky" persona for a cyberpunk-lingo one (2026-08-21) since
+  snark was suspected to correlate with getting stuck in this kind of
+  recursive-response loop as context grew large - also unconfirmed, revisit
+  together if it recurs.

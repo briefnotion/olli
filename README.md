@@ -318,7 +318,8 @@ conversation is considered "over."
 ```
 source/
 ├── main.cpp / main.h          Entry point and the main event loop.
-├── olla.{h,cpp}               ollama_system: chat engine, streaming, tool dispatch, all tools.
+├── olla.{h,cpp}               ollama_system: chat engine, streaming, history, tool dispatch.
+├── tools.{h,cpp}               TOOL_BASE and every TOOL_* tool implementation (see Tools below).
 ├── helper_olli.{h,cpp}        Settings (profile loading/saving).
 ├── user_io.{h,cpp}            KEYBOARD_INPUT (raw-mode input) and OUTPUT_CLASS (all screen output).
 ├── audio_control.{h,cpp}      Owns TTS and Voca in-process, coordinates the two.

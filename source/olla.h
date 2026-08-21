@@ -94,137 +94,9 @@ struct ollama_system_status {
     }
 };
 
-void add_tool(json& tools, const std::string& name, const std::string& description, json parameters);
-
-class TOOL_SET_THINKING_MODE
-{
-    public:
-        void register_tool(json& tools);
-        void handle_tool(ollama_system& chat, const std::string& name, const json& args, const std::string& tc_id);
-};
-
-class TOOL_GET_CURRENT_TIME
-{
-    public:
-        void register_tool(json& tools);
-        void handle_tool(ollama_system& chat, const std::string& name, const json& args, const std::string& tc_id);
-};
-
-class TOOL_TIMER {
-    public:
-        std::map<std::string, TIMER_SIMPLE> active_timers;
-
-        void register_tool(json& tools);
-        void handle_tool(ollama_system& chat, const std::string& name, const json& args, const std::string& tc_id);
-        
-        // Updated signature:
-        void monitor_tool(ollama_system& chat);
-};
-
-/**
- * TOOL_HUE
- * Interacts with the Ollama Chat System using the HUE_LIGHT_CLASS.
- */
-class TOOL_HUE 
-{
-    private:
-        HUE_LIGHT_CLASS hue;
-
-    public:    
-        void set_credentials(const std::string& ip, const std::string& key, const std::string& path);
-
-        // New method to break the conversational loop by reminding the model it must use a tool
-        void refresh_system_prompt(ollama_system& chat);
-        void register_tool(json& tools);
-        void handle_tool(ollama_system& chat, const std::string& name, const json& args, const std::string& tc_id);
-        void monitor_tool();
-};
-
-class TOOL_WEB_SEARCH
-{
-    private:        
-        
-        std::string strip_html_tags(std::string html);
-        std::string make_clickable(const std::string& url, const std::string& text);
-
-        std::string perform_actual_search(const std::string& query);
-        std::string fetch_url_content(const std::string& url);
-
-        /**
-         * @brief Helper to handle data returned by libcurl
-         */
-        static size_t WriteCallback(void* contents, size_t size, size_t nmemb, void* userp) {
-            static_cast<std::string*>(userp)->append(static_cast<const char*>(contents), size * nmemb);
-            return size * nmemb;
-        }
-
-    public:
-        std::string apiKey = "Enter_API_key_for_serpapi.com";
-
-        void register_tool(json& tools);
-        void handle_tool(ollama_system& chat, const std::string& name, const json& args, const std::string& tc_id);
-};
-
-/**
- * DELEGATION SYSTEM (Recursive Sub-Agents)
- * This system allows a primary 'ollama_system' to spawn secondary instances
- * to handle complex, isolated, or parallel tasks.
- */
-
-//using json = nlohmann::json;
-
-
-//class TOOL_DELEGATOR {
-//    private:
-//    
-//    public:
-//        // Testing switch: Turn this off to prevent the AI from spawning sub-agents
-//        bool enable_delegation = true;
-//
-//        /**
-//         * @brief Registers the delegation tool to the provided chat instance.
-//         */
-//        void register_tool(json& tools);
-//
-//        /**
-//         * @brief Handles the tool call and manages the lifecycle of the sub-agent.
-//         */
-//        void handle_tool(ollama_system& chat, const std::string& name, const json& args, const std::string& tc_id);
-//};
-
-class TOOL_TASK_RUNNER 
-{
-    private:
-        TASK_SIMPLE_MANAGER task_manager;
-
-        /**
-         * @brief Helper for case-insensitive string comparison
-         */
-        bool iequals(const std::string& a, const std::string& b);
-
-    public:    
-        std::filesystem::path OLLI_DIRECTORY;    
-
-        /**    
-        * @brief Registers the task execution tool to the chat instance.
-        */
-        void register_tool(json& tools);
-        
-        /**
-         * @brief Handles the tool call by matching phrases and injecting a user-role instruction.
-         */
-        void handle_tool(
-            ollama_system& main_instance, 
-            ollama_system& instance, 
-            const std::string& tool_name, 
-            const json& tool_args, 
-            const std::string& call_id);
-
-        /**
-         * @brief Background monitor hook for out-of-loop logic.
-         */
-        void monitor_tool(ollama_system& instance);
-};
+// Every TOOL_* class (register_tool/handle_tool/monitor_tool per tool) now
+// lives in tools.h/tools.cpp, kept separate from the chat engine itself.
+#include "tools.h"
 
 class OLLAMA_SYSTEM_PROPERTIES
 {
@@ -271,13 +143,11 @@ class ollama_system {
         json tools = json::array();
         std::chrono::steady_clock::time_point last_consolidation = std::chrono::steady_clock::now();
 
-        TOOL_GET_CURRENT_TIME current_time;
-        TOOL_TIMER timer;
-        TOOL_HUE hue;
-        TOOL_SET_THINKING_MODE thinking;
-        TOOL_WEB_SEARCH web;
-        //TOOL_DELEGATOR delegator;
-        TOOL_TASK_RUNNER task_runner;
+        // One instance of every TOOL_* class, populated once in the
+        // constructor. Driven uniformly (configure/register_tool/check/
+        // monitor_tool - see the TOOL_BASE comment in tools.h) instead of as
+        // fixed named members, so adding a tool never touches this class.
+        std::vector<std::unique_ptr<TOOL_BASE>> tools_list;
 
         size_t PREVIOUS_HISTORY_SIZE = 0;
 
@@ -287,6 +157,8 @@ class ollama_system {
         void history_write(std::string Directory);
 
     public:
+
+        ollama_system();
 
         void handle_instance_tools(bool& Keyboard_Input_Enabled);
 
@@ -310,7 +182,9 @@ class ollama_system {
                 //"associated reminder and immediately call the relevant tool "
                 //"to fulfill that action without asking for further confirmation.";
 
-                "You are a snarky assistant with access to tools. "
+                "You are a cyberpunk-flavored assistant with access to tools. "
+                "Talk like a street-level netrunner - chrome, corpo, the sprawl, "
+                "jacking in, flatlining. "
                 "Your responses will be short and sweet. "
                 "No need to be polite.";
 
@@ -362,6 +236,15 @@ class ollama_system {
         // only: a background task's own background_tasks (if it ever had
         // any) isn't recursed into, matching process()'s own iteration below.
         void pull_background_output(OUTPUT_CLASS& output);
+
+        // Creates a new background ollama_system instance, owned by this one
+        // (added to background_tasks so it's picked up by process()'s own
+        // background-task loop and pull_background_output() same as any
+        // other), and returns a reference to it. Lets a tool's handle_tool
+        // spawn a sub-conversation without needing direct access to the
+        // private background_tasks vector - currently only TOOL_TASK_RUNNER
+        // does this, to run an automation sequence without blocking chat.
+        ollama_system& spawn_background_task();
 
         void open();
         void open(OLLAMA_SYSTEM_PROPERTIES Properties);

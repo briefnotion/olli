@@ -217,6 +217,46 @@ input (`[[ASK]]`) or a keypress (`[[ENTER TO CONTINUE]]`).
 
 ---
 
+## Remote tools
+
+Beyond the built-in tools above, olli can load tools from **standalone
+external programs** at runtime — no recompiling or restarting olli required.
+Each one is its own independent process with its own build and its own
+lifecycle: it connects to olli over a small TCP protocol, registers whatever
+it wants to expose exactly the way a built-in tool would (`TOOL_REMOTE`,
+`source/remote_tools.h`/`.cpp`, never knows or cares what program it's
+proxying for), and can run before olli even starts, keep going if olli isn't
+reachable, and reconnect automatically once it is. Full wire protocol in
+[`tools/PROTOCOL.md`](tools/PROTOCOL.md).
+
+olli listens for these on **port 47601**, loopback-only for now (see
+`tools/PROTOCOL.md`'s Scope section).
+
+### Try the example
+
+[`tools/clock/`](tools/clock) is a full worked example — a big ASCII-art
+digital clock running in its own terminal that registers a `get_clock_time`
+tool with olli:
+
+```bash
+cd tools/clock
+make
+./clock          # connects to olli on this machine (127.0.0.1)
+./clock <ip>      # connects to olli on another machine
+./clock --help
+```
+
+### Write your own
+
+Start from [`tools/template/`](tools/template) rather than from scratch —
+copy the directory, fill in the two spots marked `CUSTOMIZE #1` (what your
+tool is called and what it does), and everything else — connecting,
+registering, heartbeat, automatic reconnect — is already there, working.
+See [`tools/template/README.md`](tools/template/README.md) for the exact
+steps.
+
+---
+
 ## Voice & keyboard commands
 
 **Wake / sleep (spoken to Voca):** say *"hey voca"* to wake it; *"stop

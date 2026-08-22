@@ -131,6 +131,7 @@ add_executable(olli
     ../source/main.cpp
     ../source/olla.cpp
     ../source/tools.cpp
+    ../source/remote_tools.cpp
     ../source/helper_olli.cpp
     ../source/user_io.cpp
     ../source/tools_helper.cpp

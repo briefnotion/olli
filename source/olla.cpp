@@ -4,6 +4,7 @@
 #include "olla.h"
 #include "audio_control.h"
 #include "user_io.h"
+#include <algorithm>
 
 // One instance of every TOOL_* class, in tools_list for the lifetime of this
 // ollama_system - see the field comment in olla.h and the TOOL_BASE comment
@@ -40,6 +41,11 @@ ollama_system& ollama_system::spawn_background_task()
     return ref;
 }
 
+void ollama_system::register_remote_tool(std::unique_ptr<TOOL_BASE> tool)
+{
+    tools_list.push_back(std::move(tool));
+}
+
 void ollama_system::open()
 {
     log("[System] Connecting to " + PROPS.host + ":" + std::to_string(PROPS.port) + " (" + PROPS.model + ")\n");
@@ -54,8 +60,10 @@ void ollama_system::open()
     PROPS.path_output = PROPS.OLLI_DIRECTORY / "output";
     PROPS.path_history = ".";
 
-    for (auto& tool : tools_list)
-        tool->register_tool(*this, tools);
+    // register_tool() itself is called from send() (below), not here - a
+    // remote tool (source/remote_tools.h) can join tools_list after open()
+    // already ran, so the tools array sent to Ollama needs rebuilding fresh
+    // on every request rather than fixed once at startup.
 
     if (PROPS.LOAD_SAVE_HISTORY_ON_DISK)
     {
@@ -216,6 +224,14 @@ void ollama_system::send(const std::string& user_input, const std::string& role)
             messages_json.push_back(m);
         }
     }
+
+    // Rebuilt fresh every call (see the comment in open()) rather than
+    // fixed once at startup, so a tool that joined tools_list after open()
+    // - a remote tool connecting mid-session - shows up on the very next
+    // request instead of never.
+    tools = json::array();
+    for (auto& tool : tools_list)
+        tool->register_tool(*this, tools);
 
     json body = {
         {"model", PROPS.model},
@@ -789,6 +805,23 @@ void ollama_system::process(bool& Keyboard_Input_Enabled)
     // ---------------------------------------------------------
     for (auto& tool : tools_list)
         tool->monitor_tool(*this);
+
+    // Drop any tool that's no longer alive (currently only ever a
+    // TOOL_REMOTE whose connection closed - see is_alive()'s comment in
+    // tools.h) so it stops showing up in the tools array sent to Ollama.
+    // monitor_tool() above is what actually notices a closed connection and
+    // flips is_alive() to false; this is just where that gets acted on.
+    {
+        size_t before = tools_list.size();
+        tools_list.erase(
+            std::remove_if(tools_list.begin(), tools_list.end(),
+                [](const std::unique_ptr<TOOL_BASE>& tool) { return !tool->is_alive(); }),
+            tools_list.end());
+        size_t removed = before - tools_list.size();
+        if (removed > 0) {
+            log("[RemoteTools] Removed " + std::to_string(removed) + " disconnected tool(s)\n");
+        }
+    }
 
     // ---------------------------------------------------------
     // PART 6: TTS OUTPUT

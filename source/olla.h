@@ -246,6 +246,14 @@ class ollama_system {
         // does this, to run an automation sequence without blocking chat.
         ollama_system& spawn_background_task();
 
+        // Adds a tool to tools_list after construction - lets a remote tool
+        // (source/remote_tools.h) join mid-session once its registration
+        // handshake completes, without exposing tools_list itself. Takes
+        // effect on the next send() call, which rebuilds the tools array
+        // sent to Ollama from tools_list fresh every time (see the comment
+        // there) rather than once at open().
+        void register_remote_tool(std::unique_ptr<TOOL_BASE> tool);
+
         void open();
         void open(OLLAMA_SYSTEM_PROPERTIES Properties);
         

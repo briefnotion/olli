@@ -55,6 +55,16 @@ class TOOL_BASE
         virtual void register_tool(ollama_system& chat, json& tools) = 0;
         virtual bool check(ollama_system& chat, const ToolCall& tc) = 0;
         virtual void monitor_tool(ollama_system& chat) = 0;
+
+        // Unlike the four above, not something each tool author has to
+        // consciously decide - it's a connection-lifecycle question that's
+        // permanently true for anything running in-process. Only
+        // TOOL_REMOTE (remote_tools.h) overrides it, once its socket
+        // closes; every hardcoded tool just inherits this default rather
+        // than needing a meaningless override. Checked once per
+        // process() tick - see ollama_system::process() in olla.cpp - to
+        // drop a dead tool from tools_list.
+        virtual bool is_alive() const { return true; }
 };
 
 class TOOL_SET_THINKING_MODE : public TOOL_BASE

@@ -2,9 +2,11 @@
 #define main_cpp
 
 #include "main.h"
+#include "remote_tools.h"
 #include <atomic>
 #include <thread>
 #include <filesystem>
+#include <csignal>
 
 /**
  * Entry point and the whole program's single-threaded main loop.
@@ -25,6 +27,14 @@
  * below and fed into system.key_input the same way a typed line would be.
  */
 int main(int argc, char* argv[]) {
+    // Writing to a remote tool's socket (source/remote_tools.cpp) after it's
+    // closed the connection raises SIGPIPE, whose default disposition kills
+    // the whole process - ignoring it here makes write()/send() just return
+    // -1 (EPIPE) instead, which the remote-tools code already checks for.
+    // Set once, as early as possible, before anything else can touch a
+    // socket.
+    std::signal(SIGPIPE, SIG_IGN);
+
     // Checked before anything else: argv[1] is otherwise taken as-is for
     // profile_name below (see the comment there), so a typo'd flag would
     // silently become a brand-new profile instead of failing loudly.
@@ -62,6 +72,12 @@ int main(int argc, char* argv[]) {
 
     ollama_system chat;
     SIDETRACK_CLASS sidetrack;
+
+    // Accepts remote-tool connections and hands off a completed
+    // registration as a TOOL_REMOTE (see tools/PROTOCOL.md and
+    // remote_tools.h) - polled once per tick below, right after the
+    // keyboard-input check.
+    REMOTE_TOOL_LISTENER remote_tools;
 
     system.setings_vars.profile_name = profile_name;
 
@@ -152,6 +168,21 @@ int main(int argc, char* argv[]) {
         // process text from the keyboard. Sets INTERRUPTED (below) and/or
         // ENTER_PRESSED (read by chat.input()).
         system.key_input.keyboard_input();
+
+        // Non-blocking check for a remote tool completing its registration
+        // handshake (see remote_tools' declaration above and
+        // tools/PROTOCOL.md) - if one just did, hand it to chat as a real
+        // tool. Scoped to the main chat instance only for now, not
+        // background task-runner/jump instances - see PROTOCOL.md's Scope
+        // section.
+        auto remote_registration = remote_tools.poll();
+        if (remote_registration.has_value())
+        {
+            chat.log("[RemoteTools] Registered " +
+                std::to_string(remote_registration->tools.size()) + " tool(s)\n");
+            chat.register_remote_tool(std::make_unique<TOOL_REMOTE>(
+                remote_registration->fd, std::move(remote_registration->tools)));
+        }
 
         // Ctrl+C - see EXIT_REQUESTED's comment in user_io.h for why this
         // needs its own handling instead of a real SIGINT. Checked before

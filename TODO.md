@@ -167,3 +167,15 @@ local variable, synchronous, gone before any tick could reach it).
   snark was suspected to correlate with getting stuck in this kind of
   recursive-response loop as context grew large - also unconfirmed, revisit
   together if it recurs.
+- Same shape of problem as the item above, but from plain persisted history,
+  not a consolidation summary - seen concretely while developing the
+  remote-tools feature (2026-08-22): early testing recorded "remote tool
+  call round-trip not implemented yet" in raw history while `TOOL_REMOTE`'s
+  round trip genuinely didn't work yet (Step 3). After it actually got
+  implemented (Step 4) and worked when tested standalone, the model still
+  insisted the clock didn't work in a session that had loaded the old
+  `history.json` - only went away after deleting it and restarting fresh.
+  A tool's own past failure getting cemented as a permanent fact is the same
+  underlying issue as the consolidation-drift case above, just without
+  consolidation involved - whatever fix eventually gets decided there should
+  probably account for plain history too, not just summaries.

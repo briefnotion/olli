@@ -53,6 +53,62 @@ not needed elsewhere.
   We hit real contention this session (a second instance hung waiting on the
   mic) - worth understanding and documenting properly, maybe guarding
   against it explicitly.
+- **Unexplained crash, seen twice now** - same shape both times: normal
+  usage, then a long idle stretch (hours, in a detached `screen` session),
+  then a brief interaction, then the process is just gone - no error
+  visible (the `screen` window itself closes when its process exits, and
+  neither time left a core dump - `ulimit -c` is 0 by default here). No
+  confirmed root cause. Investigated 2026-08-23 from the surviving
+  `history.json`/`chat_log.txt` of the second occurrence: found and fixed
+  one real latent bug while looking (`curl_global_init()` was never called
+  anywhere - `TOOL_WEB_SEARCH`/`TOOL_HUE`, tools.cpp/tools_helper.cpp, both
+  call `curl_easy_init()` directly, which makes libcurl do its own lazy
+  global init on first use - libcurl's own docs say that path isn't thread-
+  safe. Now called once in `main()` before any thread that could touch curl
+  spawns), but couldn't confirm it's actually what caused either crash - the
+  timing in both cases doesn't obviously line up with two threads' first
+  curl call racing. If it happens a third time: enable core dumps first
+  (`ulimit -c unlimited` before launching, or a persistent
+  `/etc/security/limits.conf` entry) so there's an actual stack trace to
+  work from instead of just the conversation log.
+  - **Mitigated 2026-08-23**: `main()` (main.cpp) is now a crash supervisor -
+    the actual program body moved to `main_process()`, wrapped in a top-level
+    try/catch (converts an uncaught C++ exception into a clean logged return
+    instead of an uncatchable `std::terminate()`/`SIGABRT`), and `main()`
+    `fork()`+`execv()`s it as a child, restarting on any abnormal exit
+    (crashed or non-zero return) rather than a clean one. `execv()`
+    specifically, not a plain `fork()` or function call - a genuinely fresh
+    process image each time, so a crash caused by memory corruption doesn't
+    ride along into the "fresh" restart. `RLIMIT_CORE` is raised once in the
+    supervisor (inherited across `execv()`) if it was 0, so a crash finally
+    leaves a real core file without needing to remember `ulimit -c
+    unlimited` by hand. Crash-loop protection: gives up after 3 restarts
+    within 30s rather than spinning forever, with a clear message. Doesn't
+    fix the underlying crash (still not diagnosed) - just stops it from
+    silently ending the session, and a `--crash-restart` marker makes a
+    recovery visible in the chat log (`[System] Recovered from a previous
+    crash - starting fresh.`) instead of invisible. A `--debug-crash` flag
+    (deliberately segfaults 5s into a real run, undocumented in
+    `--help`) exists to test this without waiting for a real crash - tested
+    the crash-loop-and-give-up path for real already (this sandbox has no
+    real TTY, so ncurses' own fatal exit on a bad `$TERM` triggered it
+    naturally: 3 clean restarts, each with a genuinely fresh re-init
+    - settings/audio/whisper all reloading from scratch - then a correct
+    give-up). The terminal (raw mode / ncurses alt-screen) is NOT restored
+    by the supervisor if a crash leaves it in a bad state - known,
+    deliberately deprioritized (finding the actual bug matters more).
+    Confirmed with the user's own real `--debug-crash` run (2026-08-23):
+    crashed, restarted, crashed, restarted, gave up correctly on the 3rd.
+    Also found: `RLIMIT_CORE` alone isn't enough on this machine - Ubuntu's
+    `apport` (the actual `core_pattern` handler, confirmed active and
+    otherwise working) silently drops crashes from any binary that isn't
+    from an installed package unless `unpackaged=true` is set, so a locally-
+    built binary like `olli` produces no `/var/crash/` entry at all by
+    default. Rather than depend on that (system-specific, not something
+    olli controls), the supervisor now also writes its own persistent
+    `crash_log.txt` in the profile's `olli_files_<name>/` directory directly
+    - durable regardless of terminal/screen state or OS crash-reporting
+    config, which core dumps and `std::cerr` messages both are not.
 
 ## Display / OUTPUT_CLASS
 
@@ -166,7 +222,17 @@ local variable, synchronous, gone before any tick could reach it).
   dropped the "snarky" persona for a cyberpunk-lingo one (2026-08-21) since
   snark was suspected to correlate with getting stuck in this kind of
   recursive-response loop as context grew large - also unconfirmed, revisit
-  together if it recurs.
+  together if it recurs. A concrete instance of the same shape caught
+  2026-08-23 in a real `history.json`: sidetrack's second-guess review
+  (`SECOND_GUESS_PROCESSING_STAGE`, `sidetrack.cpp`) kept re-raising the
+  exact same stale point ("only group 0 was confirmed" after a Hue command)
+  after four consecutive unrelated turns - it's shown the whole
+  conversation but only told to review "the turn that just ended," with
+  nothing marking where that boundary is or telling it not to repeat a
+  point it already made in an earlier note. Added an explicit
+  don't-repeat-yourself instruction to that prompt as a mitigation - not a
+  structural fix (the model still has to notice its own prior notes and
+  self-censor), so revisit if it still recurs.
 - Same shape of problem as the item above, but from plain persisted history,
   not a consolidation summary - seen concretely while developing the
   remote-tools feature (2026-08-22): early testing recorded "remote tool

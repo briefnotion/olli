@@ -285,6 +285,11 @@ void SIDETRACK_CLASS::thread_main()
                         "that just ended. If there are technical details, edge cases, or deeper insights that were "
                         "missed for the sake of brevity, provide them now. "
 
+                        "IMPORTANT: You are shown the whole conversation, not just the turn that just ended. If you "
+                        "(this Internal Monologue) already raised a point in an earlier note here, do not raise it "
+                        "again - only speak up if you have something genuinely new to add about the turn that just "
+                        "ended specifically. "
+
                         "CRITICAL: Speak directly to the user as if you just had a 'lightbulb moment.' Do not use "
                         "phrases like 'The assistant should have...' or 'Analysis shows...' "
 

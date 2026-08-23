@@ -3,32 +3,9 @@
 
 #include "tools_helper.h"
 
-void TIMER_SIMPLE::start() {
-    m_startTime = std::chrono::steady_clock::now();
-    m_running = true;
-}
-
-bool TIMER_SIMPLE::isFinished() const {
-    if (!m_running) return false;
-    auto now = std::chrono::steady_clock::now();
-    return (now - m_startTime) >= m_duration;
-}
-
-double TIMER_SIMPLE::getRemainingTime() const {
-    if (!m_running) return 0.0;
-    auto now = std::chrono::steady_clock::now();
-    auto elapsed = now - m_startTime;
-    
-    if (elapsed >= m_duration) return 0.0;
-    
-    std::chrono::duration<double> remaining = m_duration - elapsed;
-    return remaining.count();
-}
-
-std::string TIMER_SIMPLE::getReminder() const 
-{ 
-    return m_reminder; 
-}
+// TIMER_SIMPLE used to live here - moved to tools/clock/clock.cpp along
+// with TOOL_TIMER itself (see the comment where that class used to be in
+// source/tools.cpp).
 
 // ----
 
@@ -52,8 +29,6 @@ void TASK_SIMPLE_MANAGER::load_all_task()
     tmp_task.clear();
     tmp_task.TASK_PHRASE = "run system test";
     tmp_task.TASK_PURPOSE = "This is a series of a few simple questions to check responses.";
-    tmp_task.TOOL_PERMISSIONS.CURRENT_TIME = true;
-    tmp_task.TOOL_PERMISSIONS.TIMER = true;
     tmp_task.TOOL_PERMISSIONS.HUE = true;
     tmp_task.TOOL_PERMISSIONS.THINKING = true;
     tmp_task.TOOL_PERMISSIONS.WEB = true;

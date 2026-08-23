@@ -11,8 +11,6 @@
 // in tools.h for why. Add a new tool here, nowhere else in this class.
 ollama_system::ollama_system()
 {
-    tools_list.push_back(std::make_unique<TOOL_GET_CURRENT_TIME>());
-    tools_list.push_back(std::make_unique<TOOL_TIMER>());
     tools_list.push_back(std::make_unique<TOOL_HUE>());
     tools_list.push_back(std::make_unique<TOOL_SET_THINKING_MODE>());
     tools_list.push_back(std::make_unique<TOOL_WEB_SEARCH>());
@@ -209,6 +207,13 @@ void ollama_system::send(const std::string& user_input, const std::string& role)
     last_received.response = "";
     last_received.thinking = "";
     last_received.tool_calls.clear();
+
+    // A real user message (or a background task-runner's next scripted
+    // command - also sent with role "user") starts a fresh turn - see
+    // tool_calls_this_turn's comment in olla.h. A "system"-role send()
+    // (DIRECTOR_NOTE follow-ups) deliberately does NOT reset this; those
+    // are still part of the same turn the guard is bounding.
+    if (role == "user") tool_calls_this_turn = 0;
 
     {
         std::lock_guard<std::mutex> lock(history_mutex);
@@ -467,7 +472,7 @@ bool ollama_system::loadHistoryFromJson(std::filesystem::path filepath) {
 
         json j;
         file >> j;
-        
+
         // Convert the JSON array back into the vector of Messages
         history = j.get<std::vector<Message>>();
         

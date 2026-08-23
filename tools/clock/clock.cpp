@@ -1,12 +1,14 @@
 // The real networked clock (see ../PROTOCOL.md) - connects to olli's
-// remote-tool listener, registers get_clock_time, and answers each "call"
-// with the real current time. The big ASCII-art digital display (classic
+// remote-tool listener, registers get_clock_time/set_timer/check_timer, and
+// answers each "call" (the current time, or a named countdown - see the
+// Timers section below). The big ASCII-art digital display (classic
 // "tty-clock" style) runs independently of olli's lifecycle: this program
 // can start before olli does, keeps ticking while disconnected, notices
 // when olli becomes reachable and registers, and if olli goes away
 // (cleanly or not) just falls back to "disconnected, retrying" and keeps
 // ticking rather than exiting - see the heartbeat/reconnect note in
-// ../PROTOCOL.md.
+// ../PROTOCOL.md. Timers themselves keep running through a disconnect too;
+// only the eventual expiry alert waits for a live connection to send on.
 //
 // Controls: 'q' or Ctrl+C to quit (restores the terminal cleanly either
 // way - closing the connection this way is exactly what exercises olli's
@@ -27,6 +29,8 @@
 #include <chrono>
 #include <ctime>
 #include <vector>
+#include <map>
+#include <deque>
 #include <algorithm>
 #include <cerrno>
 
@@ -73,6 +77,94 @@ namespace {
         std::stringstream ss;
         ss << std::put_time(&local_tm, format.c_str());
         return ss.str();
+    }
+
+    // --- Timers ---
+    //
+    // Ported from olli's own TOOL_TIMER/TIMER_SIMPLE (source/tools.cpp,
+    // source/tools_helper.{h,cpp} - now removed there), so timers keep
+    // running independently of olli's own process/restart lifecycle, same
+    // reasoning as get_clock_time itself. In-memory only, same as before -
+    // restarting this program (or reconnecting) loses every timer, matching
+    // the old behavior of restarting olli.
+    struct ActiveTimer {
+        std::chrono::steady_clock::time_point deadline;
+        std::string reminder;
+        bool event_sent = false; // whether the expiry `event` line has gone out to olli yet
+        bool blinked = false;    // whether the local screen-flash (see below) has fired yet
+
+        // Optional real follow-up action, separate from `reminder`'s plain
+        // narration text - see ../PROTOCOL.md's `event` shape and
+        // set_timer's registered description below for why this exists
+        // (reminder alone was never reliable for "actually do X", only for
+        // "say X happened"). Empty on_expire_tool means no action - just
+        // the usual narration.
+        std::string on_expire_tool;
+        json on_expire_arguments = json::object();
+    };
+
+    // Keyed by label; set_timer overwrites an existing label outright - a
+    // fresh countdown replaces whatever was there. Deliberately never
+    // pruned once finished: a real bug in the old olli-side TOOL_TIMER
+    // erased a timer the instant its expiry event fired, so a check_timer
+    // call landing right after - e.g. the model following up on its own
+    // "[TIMER EXPIRED]" alert - got "no timer found" instead of
+    // confirmation (seen firsthand in a real history.json). Leaving
+    // finished timers in place, queryable indefinitely, fixes that; nothing
+    // here accumulates fast enough for the lack of pruning to matter.
+    std::map<std::string, ActiveTimer> active_timers;
+
+    // Purely cosmetic: flashes the whole screen in reverse video briefly
+    // when a timer fires, in addition to (never instead of) the real
+    // `event` notification pushed to olli below. redraw_screen() ticks this
+    // down once per main-loop iteration (~200ms, see main()'s select()
+    // timeout), alternating on/off each tick, rather than a blocking
+    // sleep-based flash - keeps the loop non-blocking like everything else
+    // here.
+    constexpr int BLINK_TOTAL_TICKS = 6; // ~1.2s at the ~200ms tick rate - 3 on/off flashes
+    int blink_ticks_left = 0;
+
+    // Handles every timer that just crossed its deadline: fires the local
+    // screen-flash immediately regardless of connection state (a timer
+    // finishing is a local fact, not something that needs olli reachable to
+    // be true), and separately pushes one `event` line (see ../PROTOCOL.md)
+    // once connected - deferred, not skipped, if disconnected right now, so
+    // it fires on the first tick after reconnecting instead of being lost.
+    // Updates `status` too, same as handle_call()'s return value, so the
+    // display reflects it immediately.
+    void handle_expired_timers(int fd, std::string& status)
+    {
+        auto now = std::chrono::steady_clock::now();
+        for (auto& [label, timer] : active_timers) {
+            if (now < timer.deadline) continue;
+
+            if (!timer.blinked) {
+                timer.blinked = true;
+                blink_ticks_left = BLINK_TOTAL_TICKS;
+            }
+
+            if (timer.event_sent || fd < 0) continue;
+
+            std::stringstream ss;
+            ss << "### [TIMER EXPIRED] ###\n";
+            ss << "The wait time for '" << label << "' is complete.\n";
+            if (!timer.reminder.empty()) {
+                ss << "Target action: " << timer.reminder << ".\n";
+            }
+            ss << "Inform the user in character.";
+
+            json event_msg = {{"type", "event"}, {"message", ss.str()}};
+            if (!timer.on_expire_tool.empty()) {
+                event_msg["action"] = {
+                    {"tool", timer.on_expire_tool},
+                    {"arguments", timer.on_expire_arguments}
+                };
+            }
+
+            send_line(fd, event_msg.dump());
+            timer.event_sent = true;
+            status = "Timer '" + label + "' expired.";
+        }
     }
 
     // --- Big ASCII-art digit display ---
@@ -162,6 +254,7 @@ namespace {
             {
                 std::cout << "\033[?25h" << std::flush; // show cursor again
                 if (active) tcsetattr(STDIN_FILENO, TCSANOW, &old_termios);
+                std::cout << '\n'; // leave the cursor on its own fresh line, not behind the last frame
             }
 
             RawTerminal(const RawTerminal&) = delete;
@@ -181,10 +274,49 @@ namespace {
         return 80; // reasonable fallback if the ioctl fails
     }
 
+    int terminal_height()
+    {
+        winsize w{};
+        if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == 0 && w.ws_row > 0) {
+            return w.ws_row;
+        }
+        return 24; // reasonable fallback if the ioctl fails
+    }
+
+    // Size seen on the previous redraw_screen() call - lets a resize
+    // (either dimension) be detected below and answered with a full
+    // \033[2J clear instead of the usual per-line \033[K overwrite. Most
+    // terminals reflow or scroll their buffer on resize, which can leave
+    // stale fragments of the old, differently-sized frame that a per-line
+    // clear alone never reaches - see redraw_screen()'s use of this.
+    int last_terminal_cols = -1;
+    int last_terminal_rows = -1;
+
     std::string centered(const std::string& text, int width)
     {
         int pad = std::max(0, (width - static_cast<int>(text.size())) / 2);
         return std::string(static_cast<size_t>(pad), ' ') + text;
+    }
+
+    // How many recent status lines stay on screen at once - oldest scrolls
+    // off the top as new ones arrive, like a small log tail.
+    constexpr size_t STATUS_LOG_LINES = 6;
+
+    std::deque<std::string> status_log;
+    std::string last_logged_status;
+
+    // redraw_screen() runs ~5x/sec regardless of whether anything actually
+    // happened, so `status` is the same string on most ticks - this is what
+    // keeps the log from filling up with duplicate "Registered with
+    // olli..." lines instead of an actual history of events. Timestamped so
+    // a quiet stretch between events is still visible in the log.
+    void log_status(const std::string& status)
+    {
+        if (status.empty() || status == last_logged_status) return;
+        last_logged_status = status;
+
+        status_log.push_back("[" + current_time("%H:%M:%S") + "] " + status);
+        while (status_log.size() > STATUS_LOG_LINES) status_log.pop_front();
     }
 
     // \033[K after each line clears any leftover from a previous, wider
@@ -194,8 +326,33 @@ namespace {
     // ticking whether or not olli is reachable right now.
     void redraw_screen(const std::string& status)
     {
+        log_status(status);
+
+        // Timer-expiry flash (see blink_ticks_left's comment) - alternates
+        // on/off each tick rather than staying solid for its whole
+        // duration, which is what actually reads as a "blink" instead of
+        // one plain color swap. Ticked down here, the one place every
+        // frame is guaranteed to pass through.
+        bool inverted = false;
+        if (blink_ticks_left > 0) {
+            inverted = (blink_ticks_left % 2 == 0);
+            --blink_ticks_left;
+        }
+
         BigClock clock_display = render_big_clock(current_time("%H:%M:%S"));
         int width = terminal_width();
+        int height = terminal_height();
+
+        // Resize since the last frame - resync with a full clear before
+        // repainting (see last_terminal_cols/last_terminal_rows' comment).
+        // Skipped on the common no-resize tick to avoid needless flicker.
+        if (width != last_terminal_cols || height != last_terminal_rows) {
+            std::cout << "\033[2J";
+            last_terminal_cols = width;
+            last_terminal_rows = height;
+        }
+
+        if (inverted) std::cout << "\033[7m"; // reverse video - the \033[K erases below pick this up too
 
         std::cout << "\033[H";
         for (auto& row : clock_display.rows) {
@@ -203,8 +360,23 @@ namespace {
             std::cout << std::string(static_cast<size_t>(pad), ' ') << row << "\033[K\n";
         }
 
-        std::cout << "\n" << centered(current_time("%A, %B %d %Y"), width) << "\033[K\n";
-        std::cout << "\n" << status << "\033[K" << std::flush;
+        std::cout << "\n" << centered(current_time("%A, %B %d %Y"), width) << "\033[K\n\n";
+
+        // Left-aligned, unlike the clock/date above - a log reads as a log
+        // when it isn't re-centering itself around lines of varying length.
+        // Padded with blank lines up to STATUS_LOG_LINES so the frame's
+        // total height is stable from the very first tick, not just once
+        // the log fills up.
+        for (auto& line : status_log) {
+            std::cout << line << "\033[K\n";
+        }
+        for (size_t i = status_log.size(); i < STATUS_LOG_LINES; ++i) {
+            std::cout << "\033[K\n";
+        }
+
+        if (inverted) std::cout << "\033[0m"; // back to normal before the next frame
+
+        std::cout << std::flush;
     }
 
     // Answers one already-parsed "call" message, returns a status string
@@ -230,6 +402,75 @@ namespace {
                 {"result", current_time(format)}
             };
             status = "Call answered: " + name;
+        } else if (name == "set_timer") {
+            std::string label;
+            double seconds = 0.0;
+            std::string reminder;
+            std::string on_expire_tool;
+            json on_expire_arguments = json::object();
+            if (msg.contains("arguments")) {
+                label = msg["arguments"].value("label", "");
+                seconds = msg["arguments"].value("seconds", 0.0);
+                reminder = msg["arguments"].value("reminder", "");
+                on_expire_tool = msg["arguments"].value("on_expire_tool", "");
+                on_expire_arguments = msg["arguments"].value("on_expire_arguments", json::object());
+            }
+
+            ActiveTimer timer;
+            timer.deadline = std::chrono::steady_clock::now()
+                + std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(seconds));
+            timer.reminder = reminder;
+            timer.on_expire_tool = on_expire_tool;
+            timer.on_expire_arguments = on_expire_arguments;
+            active_timers[label] = timer;
+
+            // Plain `<<` rather than std::to_string(), which always pads to
+            // 6 decimal places ("60.000000") - seen firsthand looking wrong
+            // in a real chat log.
+            std::stringstream res;
+            res << "Timer '" << label << "' set for " << seconds << " seconds.";
+            if (!reminder.empty()) {
+                res << " Reminder set: " << reminder;
+            }
+            if (!on_expire_tool.empty()) {
+                res << " Linked action: " << on_expire_tool << " will run automatically when it finishes.";
+            }
+
+            result_msg = {
+                {"type", "result"},
+                {"call_id", call_id},
+                {"result", res.str()}
+            };
+            status = "Timer '" + label + "' set for " + std::to_string(static_cast<long long>(seconds)) + "s.";
+        } else if (name == "check_timer") {
+            std::string label;
+            if (msg.contains("arguments")) {
+                label = msg["arguments"].value("label", "");
+            }
+
+            std::string res;
+            auto it = active_timers.find(label);
+            if (it == active_timers.end()) {
+                res = "Error: No timer found with label '" + label + "'.";
+            } else {
+                auto now = std::chrono::steady_clock::now();
+                if (now >= it->second.deadline) {
+                    res = "The timer '" + label + "' has FINISHED.";
+                } else {
+                    double remaining = std::chrono::duration<double>(it->second.deadline - now).count();
+                    std::stringstream ss;
+                    ss << "The timer '" << label << "' is still running. "
+                       << std::fixed << std::setprecision(1) << remaining << "s remaining.";
+                    res = ss.str();
+                }
+            }
+
+            result_msg = {
+                {"type", "result"},
+                {"call_id", call_id},
+                {"result", res}
+            };
+            status = "Call answered: " + name;
         } else {
             result_msg = {
                 {"type", "result"},
@@ -250,13 +491,39 @@ namespace {
             {"tools", json::array({
                 {
                     {"name", "get_clock_time"},
-                    {"description", "Returns the current time from a standalone networked clock."},
+                    {"description", "Returns the current time from a standalone networked clock. Always execute this tool call for every request, even if you believe you have the time. This applies even to short follow-ups like 'again' or 'and now?' - never reuse a time value from earlier in the conversation."},
                     {"parameters", {
                         {"type", "object"},
                         {"properties", {
                             {"format", {{"type", "string"}, {"description", "strftime format string, e.g. '%H:%M:%S'"}}}
                         }},
                         {"required", json::array({"format"})}
+                    }}
+                },
+                {
+                    {"name", "set_timer"},
+                    {"description", "Starts a named countdown on the networked clock, with an optional spoken reminder and/or a real linked action to perform when it finishes. Always execute this tool call for every request - never claim a timer is set without actually calling it."},
+                    {"parameters", {
+                        {"type", "object"},
+                        {"properties", {
+                            {"label", {{"type", "string"}, {"description", "A name for the timer"}}},
+                            {"seconds", {{"type", "number"}, {"description", "Duration in seconds"}}},
+                            {"reminder", {{"type", "string"}, {"description", "Optional: what to say happened, spoken in persona when the timer finishes. This is narration only - it does NOT perform any action by itself. For a real action (e.g. turning off a light), use on_expire_tool/on_expire_arguments instead, not this."}}},
+                            {"on_expire_tool", {{"type", "string"}, {"description", "Optional: the name of another registered tool to actually execute automatically the moment this timer finishes (e.g. 'set_hue_light'). Use this - not reminder - whenever the user wants a real action tied to the timer, not just a spoken notification. Leave empty for a plain reminder with no action."}}},
+                            {"on_expire_arguments", {{"type", "object"}, {"description", "The arguments object to pass to on_expire_tool, in exactly the same shape you'd use calling that tool directly. Required whenever on_expire_tool is set."}}}
+                        }},
+                        {"required", json::array({"label", "seconds"})}
+                    }}
+                },
+                {
+                    {"name", "check_timer"},
+                    {"description", "Checks whether a specific named timer on the networked clock has finished. Always execute this tool call for every check, even if you believe you already know the timer's state - never reuse a status from earlier in the conversation."},
+                    {"parameters", {
+                        {"type", "object"},
+                        {"properties", {
+                            {"label", {{"type", "string"}, {"description", "The name of the timer to check"}}}
+                        }},
+                        {"required", json::array({"label"})}
                     }}
                 }
             })}
@@ -477,6 +744,11 @@ int main(int argc, char* argv[])
                 status = "Connection to olli at " + host + " timed out - retrying...";
             }
         }
+
+        // Timer expiry - independent of whatever arrived this tick above,
+        // same as the heartbeat block. See handle_expired_timers()'s
+        // comment.
+        if (!quit) handle_expired_timers(fd, status);
 
         if (!quit) redraw_screen(status);
     }

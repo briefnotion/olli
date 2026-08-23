@@ -133,6 +133,15 @@ class OLLAMA_SYSTEM_PROPERTIES
         //int consolitation_sizes = 2;
 
         bool LOAD_SAVE_HISTORY_ON_DISK = true;
+
+        // Hard ceiling on how many tool calls handle_instance_tools() will
+        // actually execute within one turn (see ollama_system::
+        // tool_calls_this_turn's comment for what a "turn" means and why
+        // this exists). A real multi-step request ("set a timer AND tell me
+        // the time") legitimately needs more than one - this just bounds
+        // the worst case (a runaway loop) to a small, fixed number instead
+        // of unbounded.
+        int max_tool_calls_per_turn = 4;
 };
 
 class ollama_system {
@@ -150,6 +159,15 @@ class ollama_system {
         std::vector<std::unique_ptr<TOOL_BASE>> tools_list;
 
         size_t PREVIOUS_HISTORY_SIZE = 0;
+
+        // Shared by both call sources handle_instance_tools() drains (the
+        // model's own last_received.tool_calls, and the system-injected
+        // pending_tool_calls) - same cap check, same tools_list dispatch,
+        // same "unrecognized name" fallback either way. Keyboard_Input_Enabled
+        // is only ever actually toggled for a model-issued run_automation_task
+        // call (see its own TODO comment in tools.cpp) - always true for
+        // anything from pending_tool_calls, which never contains that name.
+        void dispatch_tool_call(const ToolCall& tc, bool& Keyboard_Input_Enabled);
 
         bool saveHistoryToJson(std::filesystem::path filepath);
         bool loadHistoryFromJson(std::filesystem::path filepath);
@@ -197,7 +215,35 @@ class ollama_system {
         std::atomic<bool> is_processing{false};
         std::atomic<bool> running{true};
 
+        // System-injected tool calls - not from the model's own
+        // last_received.tool_calls, but constructed elsewhere and queued
+        // for real execution regardless (currently: TOOL_REMOTE::
+        // monitor_tool() building one from an `action` field on an
+        // incoming `event`, see tools/PROTOCOL.md - a remote timer's
+        // pre-authored on-expire action). Drained in
+        // handle_instance_tools() through the same tools_list dispatch and
+        // tool_calls_this_turn cap as every other call, just via a
+        // separate queue - last_received gets reset at the top of every
+        // send() call, so anything sitting in it could be silently dropped
+        // if a new turn started before this got a chance to run; this
+        // queue has no such lifecycle tied to it.
         std::queue<ToolCall> pending_tool_calls;
+
+        // Counts tool calls executed since the last real "user"-role
+        // send() - reset to 0 there (see send()'s body), incremented in
+        // handle_instance_tools() for every call actually dispatched.
+        // Guards against a specific real bug: a tool's result gets
+        // "explained" back to the model via integrate_tool_result()'s
+        // DIRECTOR_NOTE, asking it to acknowledge the result in persona -
+        // but the model can respond to that with *another* tool call
+        // instead of text, which itself gets dispatched and DIRECTOR_NOTE'd
+        // the same way, with nothing to stop the chain (seen firsthand: 6
+        // identical set_timer calls in a row for one request, no assistant
+        // text anywhere in between). "Turn" here means one real user
+        // message (or, for a background task-runner instance, one scripted
+        // command - each is fed in via send(..., "user") too, so the same
+        // reset applies there without special-casing it).
+        int tool_calls_this_turn = 0;
 
         ollama_system_status status;    
 

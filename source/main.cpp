@@ -171,8 +171,6 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         chat.PROPS.hue_ip = system.setings_vars.tool_hue_lights_bridge_ip;
         chat.PROPS.hue_key = system.setings_vars.tool_hue_lights_apiKey;
 
-        chat.TOOL_PERMISSIONS.CURRENT_TIME = true;
-        chat.TOOL_PERMISSIONS.TIMER = true;
         chat.TOOL_PERMISSIONS.HUE = true;
         chat.TOOL_PERMISSIONS.THINKING = true;
         chat.TOOL_PERMISSIONS.WEB = true;

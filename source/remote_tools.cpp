@@ -312,8 +312,8 @@ bool TOOL_REMOTE::check(ollama_system& chat, const ToolCall& tc)
 // process() tick alongside every other tool's monitor_tool(), so it must
 // never wait. Three things happen here, in order: (1) check for one line
 // arriving unprompted - an event gets forwarded via
-// chat.integrate_tool_result() the same way TOOL_TIMER::monitor_tool does
-// for an expired timer, a ping gets an immediate pong reply, anything else
+// chat.integrate_tool_result(), e.g. tools/clock/clock.cpp's set_timer
+// noticing an expired timer, a ping gets an immediate pong reply, anything else
 // (including a plain pong) just counts as proof of life; (2) send our own
 // ping if nothing's been sent in PING_INTERVAL_SECONDS; (3) mark_dead() if
 // nothing's been received at all in DEAD_TIMEOUT_SECONDS - see the class
@@ -370,6 +370,26 @@ void TOOL_REMOTE::monitor_tool(ollama_system& chat)
                 if (!message.empty()) {
                     chat.log("[RemoteTools] Event from remote tool: " + message + "\n");
                     chat.integrate_tool_result("", message);
+                }
+
+                // Optional structured follow-up action, separate from
+                // message's narration above - see tools/PROTOCOL.md's
+                // `event` shape. Queued via pending_tool_calls (olla.h) for
+                // real execution through the normal tools_list dispatch
+                // (ollama_system::handle_instance_tools()), same as any
+                // model-issued call - this class has no idea what the
+                // named tool actually is, same as everywhere else here.
+                if (msg.contains("action") && msg["action"].is_object()) {
+                    std::string action_tool = msg["action"].value("tool", "");
+                    json action_args = msg["action"].value("arguments", json::object());
+                    if (!action_tool.empty()) {
+                        static int next_id = 0;
+                        chat.pending_tool_calls.push({
+                            "system_action_" + std::to_string(++next_id),
+                            action_tool,
+                            action_args
+                        });
+                    }
                 }
             }
             // "pong", or anything else: the last_received update above is

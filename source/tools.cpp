@@ -81,200 +81,12 @@ void TOOL_SET_THINKING_MODE::monitor_tool(ollama_system&) {}
 
 // ---
 
-// No per-instance setup needed - part of the common tool interface (see the note in tools.h).
-void TOOL_GET_CURRENT_TIME::configure(ollama_system&) {}
-
-void TOOL_GET_CURRENT_TIME::register_tool(ollama_system& chat, json& tools) {
-    if (!chat.TOOL_PERMISSIONS.CURRENT_TIME) return;
-
-    json get_time_params = {
-        {"type", "object"},
-        {"properties", {
-            {"format", {
-                {"type", "string"},
-                {"description", "The strftime format string (e.g., '%H:%M:%S'). Required."}
-            }}
-        }},
-        {"required", {"format"}}
-    };
-
-    json get_date_params = {
-        {"type", "object"},
-        {"properties", {
-            {"format", {
-                {"type", "string"},
-                {"description", "The strftime format string (e.g., '%Y-%m-%d'). Required."}
-            }}
-        }},
-        {"required", {"format"}}
-    };
-
-    add_tool(tools, "get_current_time", "Returns the current system time using a specific format. Always execute this tool call for every request, even if you believe you have the time.", get_time_params);
-    add_tool(tools, "get_current_date", "Returns the current system date using a specific format. Always execute this tool call for every request, even if you believe you have the date.", get_date_params);
-}
-
-void TOOL_GET_CURRENT_TIME::handle_tool(ollama_system& chat, const std::string& name, const json& args, const std::string& tc_id) {
-    if (name != "get_current_time" && name != "get_current_date") return;
-
-    std::string format = (name == "get_current_time") ? "%H:%M:%S" : "%Y-%m-%d";
-
-    if (args.is_object() && args.contains("format") && args["format"].is_string()) {
-        format = args["format"].get<std::string>();
-    }
-
-    auto now = std::chrono::system_clock::now();
-    std::time_t now_time = std::chrono::system_clock::to_time_t(now);
-
-    // localtime_r, not localtime: thread-safe (no shared static buffer),
-    // needed since tool handlers can run from more than one ollama_system
-    // instance/thread.
-    std::tm local_tm;
-    if (localtime_r(&now_time, &local_tm) == nullptr) {
-        chat.send_tool_result(tc_id, "Error: Failed to process system clock.");
-        return;
-    }
-
-    std::stringstream ss;
-    ss << std::put_time(&local_tm, format.c_str());
-    std::string result_str = ss.str();
-
-    chat.send_tool_result(tc_id, result_str);
-    chat.integrate_tool_result(tc_id, result_str);
-}
-
-bool TOOL_GET_CURRENT_TIME::check(ollama_system& chat, const ToolCall& tc) {
-    if (tc.name != "get_current_time" && tc.name != "get_current_date")
-        return false;
-
-    chat.log("[System] Tool call received: " + tc.name + "\n");
-
-    if (chat.TOOL_PERMISSIONS.CURRENT_TIME)
-        handle_tool(chat, tc.name, tc.arguments, tc.id);
-    else
-        chat.send_tool_result(tc.id, "Error: Tool '" + tc.name + "' is not enabled.");
-
-    return true;
-}
-
-// No periodic work needed - part of the common tool interface (see the note in tools.h).
-void TOOL_GET_CURRENT_TIME::monitor_tool(ollama_system&) {}
-
-// ---
-
-// No per-instance setup needed - part of the common tool interface (see the note in tools.h).
-void TOOL_TIMER::configure(ollama_system&) {}
-
-void TOOL_TIMER::register_tool(ollama_system& chat, json& tools) {
-    if (!chat.TOOL_PERMISSIONS.TIMER) return;
-
-    json set_timer_params = {
-        {"type", "object"},
-        {"properties", {
-            {"label", {{"type", "string"}, {"description", "A name for the timer"}}},
-            {"seconds", {{"type", "number"}, {"description", "Duration in seconds"}}},
-            {"reminder", {{"type", "string"}, {"description", "Optional: Action to perform when finished. Leave empty for a simple notification."}}}
-        }},
-        {"required", {"label", "seconds"}}
-    };
-
-    json check_timer_params = {
-        {"type", "object"},
-        {"properties", {
-            {"label", {{"type", "string"}, {"description", "The name of the timer to check"}}}
-        }},
-        {"required", {"label"}}
-    };
-
-    add_tool(tools, "set_timer", "Starts a countdown and schedules a future action (optional)", set_timer_params);
-    add_tool(tools, "check_timer", "Checks if a specific named timer has finished", check_timer_params);
-}
-
-void TOOL_TIMER::handle_tool(ollama_system& chat, const std::string& name, const json& args, const std::string& tc_id) {
-    if (name == "set_timer") {
-        chat.log("[System (set_timer)]\n");
-        std::string label = args["label"];
-        double seconds = args["seconds"];
-
-        std::string reminder = "";
-        if (args.contains("reminder") && !args["reminder"].is_null()) {
-            reminder = args["reminder"];
-        }
-
-        TIMER_SIMPLE new_timer(seconds, reminder);
-        new_timer.start();
-        active_timers[label] = new_timer;
-
-        std::string res = "Timer '" + label + "' set for " + std::to_string(seconds) + " seconds.";
-        if (!reminder.empty()) {
-            res += " Reminder set: " + reminder;
-        }
-
-        chat.send_tool_result(tc_id, res);
-        chat.integrate_tool_result("", res);
-    }
-    else if (name == "check_timer") {
-        std::string label = args["label"];
-        if (active_timers.find(label) == active_timers.end()) {
-            std::string err = "Error: No timer found with label '" + label + "'.";
-            chat.send_tool_result(tc_id, err);
-            chat.integrate_tool_result("", err);
-            return;
-        }
-        bool finished = active_timers[label].isFinished();
-        double remaining = active_timers[label].getRemainingTime();
-        std::stringstream ss;
-        if (finished) {
-            ss << "The timer '" << label << "' has FINISHED.";
-        } else {
-            ss << "The timer '" << label << "' is still running. " << std::fixed << std::setprecision(1) << remaining << "s remaining.";
-        }
-        std::string res = ss.str();
-        chat.send_tool_result(tc_id, res);
-        chat.integrate_tool_result("", res);
-    }
-}
-
-bool TOOL_TIMER::check(ollama_system& chat, const ToolCall& tc) {
-    if (tc.name != "set_timer" && tc.name != "check_timer")
-        return false;
-
-    chat.log("[System] Tool call received: " + tc.name + "\n");
-
-    if (chat.TOOL_PERMISSIONS.TIMER)
-        handle_tool(chat, tc.name, tc.arguments, tc.id);
-    else
-        chat.send_tool_result(tc.id, "Error: Tool '" + tc.name + "' is not enabled.");
-
-    return true;
-}
-
-void TOOL_TIMER::monitor_tool(ollama_system& chat) {
-    if (!chat.is_processing) {
-        auto it = active_timers.begin();
-        while (it != active_timers.end()) {
-            if (it->second.isFinished()) {
-                std::string label = it->first;
-                std::string action = it->second.getReminder();
-
-                std::stringstream ss;
-                ss << "### [TIMER EXPIRED] ###\n";
-                ss << "The wait time for '" << label << "' is complete.\n";
-                if (!action.empty()) {
-                    ss << "Target action: " << action << ".\n";
-                }
-                ss << "Inform the user in character.";
-
-                std::string event_msg = ss.str();
-                chat.log("[Event] Triggering persona alert: " + label + "\n");
-
-                chat.integrate_tool_result("", event_msg);
-                it = active_timers.erase(it);
-            } else {
-                ++it;
-            }
-        }
-    }
-}
+// TOOL_TIMER used to live here - moved to tools/clock/clock.cpp as a
+// remote tool (set_timer/check_timer, alongside get_clock_time) so it runs
+// independently of olli's own process/restart lifecycle, same reasoning as
+// get_clock_time's own move. See PROTOCOL.md's `event` message type for how
+// expiry alerts reach olli now (TOOL_REMOTE::monitor_tool(), same
+// integrate_tool_result() path this used to call directly).
 
 // ----
 
@@ -326,7 +138,7 @@ void TOOL_HUE::register_tool(ollama_system& chat, json& tools) {
     };
 
     add_tool(tools, "set_hue_light", "Controls Hue lights by ID or Name. Use this for general commands like 'turn off all lights' by setting light_id to 'all'. Always execute this tool call for every request, even if you believe the state is already set.", set_params);
-    add_tool(tools, "list_hue_lights", "Returns status of all connected lights", {{"type", "object"}});
+    add_tool(tools, "list_hue_lights", "Returns status of all connected lights. Always execute this tool call for every request, even if you believe you already know the state - never answer a status question (on/off, brightness, color) from a value stated earlier in the conversation.", {{"type", "object"}});
     add_tool(tools, "manage_hue_scenes", "Saves, loads, or removes local light scenes. Only use for specific named snapshots (e.g., 'home', 'away').", scene_params);
 }
 
@@ -931,12 +743,62 @@ bool TOOL_TASK_RUNNER::check(ollama_system& chat, const ToolCall& tc) {
 // No periodic work needed - part of the common tool interface (see the note in tools.h).
 void TOOL_TASK_RUNNER::monitor_tool(ollama_system&) {}
 
-// Routes each pending tool call from last_received.tool_calls to whichever
-// tool's check() claims it (see the TOOL_BASE comment in tools.h) - an
-// unrecognized name gets an error result back instead of ever reaching a
-// tool.
+// Shared by both call sources handle_instance_tools() drains - see its own
+// comment in olla.h. Applies the tool_calls_this_turn cap (see olla.h),
+// then routes to whichever tool's check() claims tc.name (see the
+// TOOL_BASE comment in tools.h) - an unrecognized name gets an error
+// result back instead of ever reaching a tool.
+void ollama_system::dispatch_tool_call(const ToolCall& tc, bool& Keyboard_Input_Enabled)
+{
+    // TODO: special-cased until ollama_system can reach CLASS_SYSTEM
+    // directly (see TODO.md) - only run_automation_task needs the main
+    // keyboard input disabled while its spawned instance runs.
+    bool disable_keyboard = (tc.name == "run_automation_task");
+    if (disable_keyboard) Keyboard_Input_Enabled = false;
+
+    // Guard against a runaway chain - see tool_calls_this_turn's comment in
+    // olla.h. Deliberately calls send_tool_result() only, not
+    // integrate_tool_result() - the latter is what would start another
+    // DIRECTOR_NOTE round-trip and keep a chain going. This just logs the
+    // refusal and stops dead; the model gets a real chance to reply in
+    // text on its next natural turn instead.
+    if (tool_calls_this_turn >= PROPS.max_tool_calls_per_turn) {
+        log("[System] Tool call capped this turn: " + tc.name + "\n");
+        send_tool_result(tc.id, "Error: Too many tool calls this turn - stopping here to avoid a loop.");
+        if (disable_keyboard) Keyboard_Input_Enabled = true;
+        return;
+    }
+    ++tool_calls_this_turn;
+
+    bool handled = false;
+    for (auto& tool : tools_list) {
+        if (tool->check(*this, tc)) { handled = true; break; }
+    }
+
+    if (!handled) {
+        log("[System] Tool error call received: " + tc.name + "\n");
+        send_tool_result(tc.id, "Error: Tool '" + tc.name + "' is not recognized by the system.");
+    }
+
+    if (disable_keyboard) Keyboard_Input_Enabled = true;
+}
+
 void ollama_system::handle_instance_tools(bool& Keyboard_Input_Enabled)
 {
+    // System-injected calls (e.g. a timer's on_expire action - see
+    // TOOL_REMOTE::monitor_tool()) - drained independently of the model's
+    // own last_received.tool_calls below, see pending_tool_calls' comment
+    // in olla.h for why. Held back while a response is actively streaming,
+    // same as the model-issued path below, so it never interleaves with
+    // in-flight generation.
+    if (!is_processing) {
+        while (!pending_tool_calls.empty()) {
+            ToolCall tc = pending_tool_calls.front();
+            pending_tool_calls.pop();
+            dispatch_tool_call(tc, Keyboard_Input_Enabled);
+        }
+    }
+
     bool is_ready_for_tools = !is_processing &&
                               last_received.complete &&
                               !last_received.tool_calls.empty();
@@ -947,23 +809,7 @@ void ollama_system::handle_instance_tools(bool& Keyboard_Input_Enabled)
         last_received.tool_calls.clear();
 
         for (auto& tc : pending_calls) {
-            // TODO: special-cased until ollama_system can reach CLASS_SYSTEM
-            // directly (see TODO.md) - only run_automation_task needs the
-            // main keyboard input disabled while its spawned instance runs.
-            bool disable_keyboard = (tc.name == "run_automation_task");
-            if (disable_keyboard) Keyboard_Input_Enabled = false;
-
-            bool handled = false;
-            for (auto& tool : tools_list) {
-                if (tool->check(*this, tc)) { handled = true; break; }
-            }
-
-            if (!handled) {
-                log("[System] Tool error call received: " + tc.name + "\n");
-                send_tool_result(tc.id, "Error: Tool '" + tc.name + "' is not recognized by the system.");
-            }
-
-            if (disable_keyboard) Keyboard_Input_Enabled = true;
+            dispatch_tool_call(tc, Keyboard_Input_Enabled);
         }
     }
 }

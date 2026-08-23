@@ -97,7 +97,6 @@ bool consolidate(std::vector<Message>& chat_history, OLLAMA_SYSTEM_PROPERTIES& c
     return any_consolidation_occurred;
 }
 
-
 // ----
 
 SIDETRACK_CLASS::SIDETRACK_CLASS()

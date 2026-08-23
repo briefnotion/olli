@@ -14,30 +14,11 @@ using json = nlohmann::json;
 class TOOL_PERMISSIONS_CLASS
 {
     public:
-    bool CURRENT_TIME = false;
-    bool TIMER = false;
     bool HUE = false;
     bool THINKING = false;
     bool WEB = false;
     bool DELEGATOR = false;
     bool TASK_RUNNER = false;
-};
-
-class TIMER_SIMPLE 
-{
-    public:
-        explicit TIMER_SIMPLE(double seconds = 0.0, std::string reminder = "") 
-            : m_duration(seconds), m_reminder(reminder), m_running(false) {}
-        void start();
-        bool isFinished() const;
-        double getRemainingTime() const;
-        std::string getReminder() const;
-
-    private:
-        std::chrono::duration<double> m_duration;
-        std::chrono::steady_clock::time_point m_startTime;
-        std::string m_reminder; 
-        bool m_running;
 };
 
 struct TASK_SIMPLE

@@ -198,8 +198,6 @@ is the model, thinking mode, and persona (`OLLAMA_OPENING`).
 
 | Tool | What it does |
 |------|--------------|
-| `get_current_time` / `get_current_date` | Reads the system clock with a `strftime` format. |
-| `set_timer` / `check_timer` | Named countdown timers with an optional follow-up action; olli announces expiry in-character. |
 | `set_hue_light` | Turns lights on/off, sets brightness, colour (preset, hex, or xy), alerts/flashes. `light_id: "all"` targets every light. |
 | `list_hue_lights` | Reports the current state of every connected light. |
 | `manage_hue_scenes` | Save / load / remove / list local light scenes (stored in `scenes.json`). |
@@ -235,8 +233,9 @@ olli listens for these on **port 47601**, loopback-only for now (see
 ### Try the example
 
 [`tools/clock/`](tools/clock) is a full worked example — a big ASCII-art
-digital clock running in its own terminal that registers a `get_clock_time`
-tool with olli:
+digital clock running in its own terminal that registers `get_clock_time`,
+`set_timer`, and `check_timer` with olli (named countdown timers with an
+optional follow-up action; olli announces expiry in-character):
 
 ```bash
 cd tools/clock
@@ -366,7 +365,7 @@ source/
 ├── tts.{hpp,cpp}              TextToSpeech: in-process synthesis (espeak-ng) + playback (aplay).
 ├── voca.{hpp,cpp}             Voca: in-process wake-word + speech-to-text (whisper.cpp).
 ├── sidetrack.{h,cpp}          Background thread: consolidation, "second guess", idle auto-clear.
-├── tools_helper.{h,cpp}       HUE_LIGHT_CLASS, timers, task definitions, tool permissions.
+├── tools_helper.{h,cpp}       HUE_LIGHT_CLASS, task definitions, tool permissions.
 ├── stringthings.{h,cpp}       General-purpose string utility library.
 ├── fled_time.{h,cpp}          Timing / frame-pacing helpers used by the background threads.
 ├── threading.{h,cpp}          Thin std::async thread wrapper.

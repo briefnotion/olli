@@ -207,11 +207,38 @@ or, on failure:
 {"type": "event", "message": "Alarm: wake up!"}
 ```
 
-- The remote equivalent of `TOOL_TIMER::monitor_tool()` noticing an expired
-  timer and calling `chat.integrate_tool_result()` unprompted.
-  `TOOL_REMOTE::monitor_tool()` polls its socket each tick; if an `event`
-  line is waiting, it gets forwarded into `integrate_tool_result()` the same
-  way.
+- `TOOL_REMOTE::monitor_tool()` polls its socket each tick; if an `event`
+  line is waiting, `message` gets forwarded into `chat.integrate_tool_result()`
+  unprompted, asking the model to narrate/acknowledge it in persona - e.g.
+  `tools/clock/clock.cpp`'s `set_timer` noticing an expired timer.
+
+- Optional `action` field - a real tool call for olli to execute itself,
+  separate from (and in addition to) `message`'s narration:
+
+  ```json
+  {"type": "event", "message": "...", "action": {"tool": "set_hue_light", "arguments": {"light_id": "all", "on": false}}}
+  ```
+
+  `action.tool`/`action.arguments` are handed to the exact same dispatch
+  `ollama_system::handle_instance_tools()` uses for a call the model issued
+  itself (matched against `tools_list` by name) - so this works for *any*
+  registered tool, built-in or remote, with no tool-specific code anywhere
+  in this path. Queued via `pending_tool_calls` (`source/olla.h`) rather
+  than injected into the model's own `last_received.tool_calls`, since the
+  latter gets reset at the top of every `send()` call and could silently
+  drop a queued action if a new turn started first.
+
+  This exists because `message`/narration alone was never reliable for
+  "when the timer goes off, actually do X" - it depended on the model
+  correctly inferring and re-issuing a real action from a text hint at the
+  right moment, with less context than it had when the timer was first set.
+  `set_timer`'s `on_expire_tool`/`on_expire_arguments` params (see
+  `tools/clock/clock.cpp`) are what let the model pre-author this action
+  once, up front, instead. Still subject to the same
+  `PROPS.max_tool_calls_per_turn` cap every tool call is (see olla.h) - one
+  action barely dents that budget, and one uniform rule for every
+  execution, regardless of origin, is simpler to reason about than a
+  separate exemption.
 
 ### `ping` / `pong` (either direction - heartbeat, see the status note above)
 

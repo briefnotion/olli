@@ -79,32 +79,6 @@ class TOOL_SET_THINKING_MODE : public TOOL_BASE
         void monitor_tool(ollama_system& chat) override;
 };
 
-class TOOL_GET_CURRENT_TIME : public TOOL_BASE
-{
-    private:
-        void handle_tool(ollama_system& chat, const std::string& name, const json& args, const std::string& tc_id);
-
-    public:
-        void configure(ollama_system& chat) override;
-        void register_tool(ollama_system& chat, json& tools) override;
-        bool check(ollama_system& chat, const ToolCall& tc) override;
-        void monitor_tool(ollama_system& chat) override;
-};
-
-class TOOL_TIMER : public TOOL_BASE
-{
-    private:
-        void handle_tool(ollama_system& chat, const std::string& name, const json& args, const std::string& tc_id);
-
-    public:
-        std::map<std::string, TIMER_SIMPLE> active_timers;
-
-        void configure(ollama_system& chat) override;
-        void register_tool(ollama_system& chat, json& tools) override;
-        bool check(ollama_system& chat, const ToolCall& tc) override;
-        void monitor_tool(ollama_system& chat) override;
-};
-
 class TOOL_HUE : public TOOL_BASE
 {
     private:
@@ -188,8 +162,8 @@ class TOOL_TASK_RUNNER : public TOOL_BASE
         bool check(ollama_system& chat, const ToolCall& tc) override;
 
         // No periodic work needed - no automation-loop equivalent of
-        // TOOL_TIMER/TOOL_HUE's monitor_tool exists (yet). A no-op, but
-        // still called every process() tick like every other tool's.
+        // TOOL_HUE's monitor_tool exists (yet). A no-op, but still called
+        // every process() tick like every other tool's.
         void monitor_tool(ollama_system& chat) override;
 };
 

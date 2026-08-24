@@ -141,18 +141,23 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         ollama_system chat;
         SIDETRACK_CLASS sidetrack;
 
-        // Accepts remote-tool connections and hands off a completed
-        // registration as a TOOL_REMOTE (see tools/PROTOCOL.md and
-        // remote_tools.h) - polled once per tick below, right after the
-        // keyboard-input check.
-        REMOTE_TOOL_LISTENER remote_tools;
-
         system.setings_vars.profile_name = profile_name;
+        system.user.name = profile_name;
 
         system.setings_vars.load_settings();
         std::filesystem::path settings_path = system.setings_vars.get_settings_path();
 
         chat.PROPS.OLLI_DIRECTORY = settings_path;
+
+        // Raw, unfiltered debug log of every message any ollama_system
+        // instance ever creates (main chat, sidetrack, task-runner
+        // background tasks) - review only, wiped fresh on every startup.
+        // See debug_log_message()'s declaration in helper_olli.h for why
+        // this exists: prune_turn_scaffolding() (olla.cpp) now deletes
+        // 'tool'/DIRECTOR_NOTE messages from the live history (and so from
+        // history.json too) shortly after they're created.
+        debug_log_reset(settings_path / "debug_full_history.txt");
+
         // Flat-text, human-readable transcript (speaker labels, "Olli: " for
         // the assistant) kept independent of history.json's own structured,
         // periodically-rewritten persistence - see
@@ -246,18 +251,28 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
             system.key_input.keyboard_input();
 
             // Non-blocking check for a remote tool completing its registration
-            // handshake (see remote_tools' declaration above and
+            // handshake (see system.remote_tools' declaration in system.h and
             // tools/PROTOCOL.md) - if one just did, hand it to chat as a real
             // tool. Scoped to the main chat instance only for now, not
             // background task-runner/jump instances - see PROTOCOL.md's Scope
             // section.
-            auto remote_registration = remote_tools.poll();
+            auto remote_registration = system.remote_tools.poll();
             if (remote_registration.has_value())
             {
                 chat.log("[RemoteTools] Registered " +
                     std::to_string(remote_registration->tools.size()) + " tool(s)\n");
-                chat.register_remote_tool(std::make_unique<TOOL_REMOTE>(
-                    remote_registration->fd, std::move(remote_registration->tools)));
+
+                auto remote_tool = std::make_unique<TOOL_REMOTE>(
+                    remote_registration->fd, std::move(remote_registration->tools));
+
+                // Tell it who's running olli right now - see tools/PROTOCOL.md's
+                // "identity" message and TOOL_REMOTE::send_identity()'s comment
+                // (remote_tools.h). Sent once, right after registration - a
+                // reconnect re-registers from scratch, so it lands here again
+                // naturally rather than needing its own separate trigger.
+                remote_tool->send_identity(system.user.name, system.user.full_name, system.user.about);
+
+                chat.register_remote_tool(std::move(remote_tool));
             }
 
             // Ctrl+C - see EXIT_REQUESTED's comment in user_io.h for why this
@@ -326,7 +341,7 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
             // Dispatches any pending tool calls, flushes new text to TTS
             // (write_to_tts), periodically writes history to disk if it
             // changed. See ollama_system::process in olla.cpp.
-            chat.process(system.key_input.PROPS.ENABLED);
+            chat.process(&system, system.key_input.PROPS.ENABLED);
 
             // Runs sidetrack's main-thread half of both routines' state
             // machines - see SIDETRACK_CLASS::check's doc comment.

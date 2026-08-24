@@ -130,10 +130,21 @@ class TOOL_REMOTE : public TOOL_BASE
         TOOL_REMOTE(const TOOL_REMOTE&) = delete;
         TOOL_REMOTE& operator=(const TOOL_REMOTE&) = delete;
 
+        // One-way "identity" message (see tools/PROTOCOL.md) - who's
+        // running olli right now. Sent once, right after registration
+        // completes (see the call site in main.cpp), not part of the
+        // request/response call path, so there's no result to wait for.
+        // Takes plain strings rather than USER_IDENTITY/CLASS_SYSTEM
+        // directly (system.h) - this class doesn't otherwise need to know
+        // either type exists, matching the "JSON in, plain string(s) out"
+        // convention the rest of the tool-call path already uses. A failed
+        // write just marks the connection dead, same as any other.
+        void send_identity(const std::string& name, const std::string& full_name, const std::string& about);
+
         void configure(ollama_system& chat) override;
         void register_tool(ollama_system& chat, json& tools) override;
-        bool check(ollama_system& chat, const ToolCall& tc) override;
-        void monitor_tool(ollama_system& chat) override;
+        bool check(ollama_system& chat, CLASS_SYSTEM* system, const ToolCall& tc) override;
+        void monitor_tool(ollama_system& chat, CLASS_SYSTEM* system) override;
 
         // False once the connection's closed (monitor_tool() or check()
         // noticing a dead fd resets it to -1) - ollama_system::process()

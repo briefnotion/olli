@@ -41,6 +41,19 @@ std::string timestamp_prefix() {
 
 // ----
 
+void debug_log_reset(const std::filesystem::path& filepath) {
+    std::lock_guard<std::mutex> lock(g_debug_log_mutex);
+    g_debug_log_file.open(filepath, std::ios::out | std::ios::trunc);
+}
+
+void debug_log_message(const std::string& role, const std::string& content) {
+    std::lock_guard<std::mutex> lock(g_debug_log_mutex);
+    if (!g_debug_log_file.is_open()) return;
+    g_debug_log_file << "[" << role << "] " << content << "\n" << std::flush;
+}
+
+// ----
+
 // Helper to find the home directory across Windows/Linux/macOS
 static fs::path get_home_dir() {
     #ifdef _WIN32

@@ -50,13 +50,22 @@ void ollama_system::open()
     
     std::filesystem::create_directories(PROPS.OLLI_DIRECTORY / "output");
     std::filesystem::create_directories(PROPS.OLLI_DIRECTORY / "input");
-    
-    for (auto& tool : tools_list)
-        tool->configure(*this);
 
+    // Must happen before the configure() loop below - TOOL_HUE::configure()
+    // (tools.cpp) reads PROPS.hue_path immediately to load scenes.json, so
+    // setting this after would leave it on the class's bare default
+    // ("scenes.json", a relative path - see OLLAMA_SYSTEM_PROPERTIES in
+    // olla.h) instead of this profile's real, absolute path. Confirmed as
+    // a real bug, not theoretical: it was silently reading/writing whatever
+    // "scenes.json" happened to exist relative to olli's launch directory
+    // (a stale leftover in build/, in one real case) instead of the
+    // intended ~/olli_files_<name>/scenes.json.
     PROPS.hue_path = (PROPS.OLLI_DIRECTORY / "scenes.json").string();
     PROPS.path_output = PROPS.OLLI_DIRECTORY / "output";
     PROPS.path_history = ".";
+
+    for (auto& tool : tools_list)
+        tool->configure(*this);
 
     // register_tool() itself is called from send() (below), not here - a
     // remote tool (source/remote_tools.h) can join tools_list after open()
@@ -211,14 +220,19 @@ void ollama_system::send(const std::string& user_input, const std::string& role)
     // A real user message (or a background task-runner's next scripted
     // command - also sent with role "user") starts a fresh turn - see
     // tool_calls_this_turn's comment in olla.h. A "system"-role send()
-    // (DIRECTOR_NOTE follow-ups) deliberately does NOT reset this; those
-    // are still part of the same turn the guard is bounding.
-    if (role == "user") tool_calls_this_turn = 0;
+    // (DIRECTOR_NOTE follow-ups) deliberately does NOT reset this, or prune
+    // below; those are still part of the same turn the guard is bounding.
+    if (role == "user")
+    {
+        tool_calls_this_turn = 0;
+        prune_turn_scaffolding();
+    }
 
     {
         std::lock_guard<std::mutex> lock(history_mutex);
         history.push_back({role, new_user_input});
     }
+    debug_log_message(role, new_user_input);
 
     json messages_json = json::array();
     {
@@ -371,6 +385,7 @@ void ollama_system::send(const std::string& user_input, const std::string& role)
             final_content += "... [Interrupted]";
         }
         history.push_back({"assistant", final_content});
+        debug_log_message("assistant", final_content);
     }
 
     // Same trailing blank line the old direct-cout version always printed
@@ -395,8 +410,27 @@ void ollama_system::send_tool_result(const std::string& tool_call_id, const std:
     msg.content = result;
     msg.tool_call_id = tool_call_id;
 
+    {
+        std::lock_guard<std::mutex> lock(history_mutex);
+        history.push_back(msg);
+    }
+    debug_log_message(msg.role, msg.content);
+}
+
+// See the declaration in olla.h for the full reasoning. Erase-remove over
+// 'tool' and non-protected 'system' messages - by construction the only
+// producers of either in main history are send_tool_result() above and the
+// DIRECTOR_NOTE prompt in integrate_tool_result() (via send(..., "system")),
+// both of which only ever exist to lead up to the assistant's own reply.
+void ollama_system::prune_turn_scaffolding() {
     std::lock_guard<std::mutex> lock(history_mutex);
-    history.push_back(msg);
+    history.erase(
+        std::remove_if(history.begin(), history.end(), [](const Message& msg) {
+            return msg.role == "tool" ||
+                   (msg.role == "system" && msg.consolidation_level >= 0);
+        }),
+        history.end()
+    );
 }
 
 
@@ -614,7 +648,7 @@ bool ollama_system::jump_input(CLASS_SYSTEM& System)
             jump_instance.TOOL_PERMISSIONS.HUE = true;
             jump_instance.open(PROPS);
             jump_instance.send("Load the repose scene.");
-            jump_instance.process(System.key_input.PROPS.ENABLED);
+            jump_instance.process(&System, System.key_input.PROPS.ENABLED);
         }
         else if (trim(System.key_input.LINE) == "I'm leaving.")
         {
@@ -622,7 +656,7 @@ bool ollama_system::jump_input(CLASS_SYSTEM& System)
             jump_instance.TOOL_PERMISSIONS.HUE = true;
             jump_instance.open(PROPS);
             jump_instance.send("Load the labor scene.");
-            jump_instance.process(System.key_input.PROPS.ENABLED);
+            jump_instance.process(&System, System.key_input.PROPS.ENABLED);
         }
         else if (trim(System.key_input.LINE) == "I'm sleeping." || 
                     trim(System.key_input.LINE) == "Lights off." )
@@ -631,7 +665,7 @@ bool ollama_system::jump_input(CLASS_SYSTEM& System)
             jump_instance.TOOL_PERMISSIONS.HUE = true;
             jump_instance.open(PROPS);
             jump_instance.send("Load the slumber scene.");
-            jump_instance.process(System.key_input.PROPS.ENABLED);
+            jump_instance.process(&System, System.key_input.PROPS.ENABLED);
         }
 
         integrate_tool_result("Describe what happened.", gather_history());
@@ -727,7 +761,7 @@ bool ollama_system::input(CLASS_SYSTEM& System)
  * 4. Trigger background consolidation (memory cleanup) every 60 seconds.
  */
 
-void ollama_system::process(bool& Keyboard_Input_Enabled) 
+void ollama_system::process(CLASS_SYSTEM* system, bool& Keyboard_Input_Enabled)
 {
     // ---------------------------------------------------------
     // PART 0: WRITE HISTORY TO FILE
@@ -752,7 +786,7 @@ void ollama_system::process(bool& Keyboard_Input_Enabled)
     // ---------------------------------------------------------
     // PART 1: PROCESS MAIN CHAT TOOLS
     // ---------------------------------------------------------
-    handle_instance_tools(Keyboard_Input_Enabled);
+    handle_instance_tools(system, Keyboard_Input_Enabled);
 
     // ---------------------------------------------------------
     // PART 2: MANAGE BACKGROUND TASKS
@@ -767,7 +801,7 @@ void ollama_system::process(bool& Keyboard_Input_Enabled)
         // instance (*this) — otherwise a background task's tool calls would
         // never be serviced and the main instance would be re-processed
         // once per background task instead.
-        task_instance.handle_instance_tools(Keyboard_Input_Enabled);
+        task_instance.handle_instance_tools(system, Keyboard_Input_Enabled);
 
         // B. Thread Management: Join finished network threads
         if (!task_instance.is_processing && task_instance.chat_thread.joinable()) {
@@ -809,7 +843,7 @@ void ollama_system::process(bool& Keyboard_Input_Enabled)
     // Continuous checks for time-based triggers or hardware state.
     // ---------------------------------------------------------
     for (auto& tool : tools_list)
-        tool->monitor_tool(*this);
+        tool->monitor_tool(*this, system);
 
     // Drop any tool that's no longer alive (currently only ever a
     // TOOL_REMOTE whose connection closed - see is_alive()'s comment in

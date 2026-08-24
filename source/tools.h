@@ -13,10 +13,13 @@
 using json = nlohmann::json;
 
 // Forward declarations only - TOOL_BASE and every TOOL_* method below just
-// takes/returns a reference, never needs the complete type. Both complete
-// types live in olla.h, which includes this header (ollama_system holds
-// tools_list, a vector of these).
+// takes/returns a reference (or, for CLASS_SYSTEM, a pointer), never needs
+// the complete type. ollama_system/ToolCall's complete types live in olla.h,
+// which includes this header (ollama_system holds tools_list, a vector of
+// these); CLASS_SYSTEM's lives in system.h, deliberately not included here -
+// see the CLASS_SYSTEM* parameter's own comment on TOOL_BASE::check() below.
 class ollama_system;
+class CLASS_SYSTEM;
 struct ToolCall;
 
 // Appends one tool definition (name/description/JSON-schema parameters) to
@@ -53,8 +56,23 @@ class TOOL_BASE
 
         virtual void configure(ollama_system& chat) = 0;
         virtual void register_tool(ollama_system& chat, json& tools) = 0;
-        virtual bool check(ollama_system& chat, const ToolCall& tc) = 0;
-        virtual void monitor_tool(ollama_system& chat) = 0;
+
+        // 'system' is the one real CLASS_SYSTEM for the whole process
+        // (constructed once in main.cpp) - reachable here, unlike chat.PROPS,
+        // for things like the current user's identity (CLASS_SYSTEM, once
+        // it grows one), the real keyboard/display/audio, etc. Nullable: the
+        // entire tool-dispatch spine these two run through (process() ->
+        // handle_instance_tools() -> dispatch_tool_call(), olla.h/.cpp) is
+        // main-thread-only except for one caller - sidetrack.cpp's
+        // background thread drives its own throwaway SIDETRACK_CHAT_INSTANCE
+        // through process() directly, with no real CLASS_SYSTEM of its own
+        // and no business touching the real one from a second thread - that
+        // call site passes nullptr rather than a dangling/cross-thread
+        // reference. A tool that needs 'system' must null-check it; every
+        // tool below still ignores it entirely for now (leaves the parameter
+        // unnamed), since nothing in tools_list has a use for it yet.
+        virtual bool check(ollama_system& chat, CLASS_SYSTEM* system, const ToolCall& tc) = 0;
+        virtual void monitor_tool(ollama_system& chat, CLASS_SYSTEM* system) = 0;
 
         // Unlike the four above, not something each tool author has to
         // consciously decide - it's a connection-lifecycle question that's
@@ -75,8 +93,8 @@ class TOOL_SET_THINKING_MODE : public TOOL_BASE
     public:
         void configure(ollama_system& chat) override;
         void register_tool(ollama_system& chat, json& tools) override;
-        bool check(ollama_system& chat, const ToolCall& tc) override;
-        void monitor_tool(ollama_system& chat) override;
+        bool check(ollama_system& chat, CLASS_SYSTEM* system, const ToolCall& tc) override;
+        void monitor_tool(ollama_system& chat, CLASS_SYSTEM* system) override;
 };
 
 class TOOL_HUE : public TOOL_BASE
@@ -94,8 +112,8 @@ class TOOL_HUE : public TOOL_BASE
 
         void configure(ollama_system& chat) override;
         void register_tool(ollama_system& chat, json& tools) override;
-        bool check(ollama_system& chat, const ToolCall& tc) override;
-        void monitor_tool(ollama_system& chat) override;
+        bool check(ollama_system& chat, CLASS_SYSTEM* system, const ToolCall& tc) override;
+        void monitor_tool(ollama_system& chat, CLASS_SYSTEM* system) override;
 };
 
 class TOOL_WEB_SEARCH : public TOOL_BASE
@@ -120,8 +138,8 @@ class TOOL_WEB_SEARCH : public TOOL_BASE
 
         void configure(ollama_system& chat) override;
         void register_tool(ollama_system& chat, json& tools) override;
-        bool check(ollama_system& chat, const ToolCall& tc) override;
-        void monitor_tool(ollama_system& chat) override;
+        bool check(ollama_system& chat, CLASS_SYSTEM* system, const ToolCall& tc) override;
+        void monitor_tool(ollama_system& chat, CLASS_SYSTEM* system) override;
 };
 
 // Disabled: recursive sub-agent delegation (a chat instance spawning a
@@ -159,12 +177,12 @@ class TOOL_TASK_RUNNER : public TOOL_BASE
 
         void configure(ollama_system& chat) override;
         void register_tool(ollama_system& chat, json& tools) override;
-        bool check(ollama_system& chat, const ToolCall& tc) override;
+        bool check(ollama_system& chat, CLASS_SYSTEM* system, const ToolCall& tc) override;
 
         // No periodic work needed - no automation-loop equivalent of
         // TOOL_HUE's monitor_tool exists (yet). A no-op, but still called
         // every process() tick like every other tool's.
-        void monitor_tool(ollama_system& chat) override;
+        void monitor_tool(ollama_system& chat, CLASS_SYSTEM* system) override;
 };
 
 #endif

@@ -319,7 +319,12 @@ void SIDETRACK_CLASS::thread_main()
                             break;
                         }
 
-                        SIDETRACK_CHAT_INSTANCE.process(dummy_enable_keyboard_input);
+                        // nullptr, not the real CLASS_SYSTEM: this runs on
+                        // the sidetrack background thread, not the main
+                        // thread - see TOOL_BASE::check()'s comment in
+                        // tools.h for why every other call site can pass the
+                        // real one and this one specifically can't.
+                        SIDETRACK_CHAT_INSTANCE.process(nullptr, dummy_enable_keyboard_input);
                     }
 
                     // Reaching here without hitting the DONE break above

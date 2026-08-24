@@ -181,6 +181,24 @@ void TOOL_REMOTE::mark_dead()
     read_buffer.clear();
 }
 
+void TOOL_REMOTE::send_identity(const std::string& name, const std::string& full_name, const std::string& about)
+{
+    if (fd < 0) return;
+
+    json identity_msg = {
+        {"type", "identity"},
+        {"name", name},
+        {"full_name", full_name},
+        {"about", about}
+    };
+
+    if (write_line(fd, identity_msg.dump())) {
+        last_sent = std::chrono::steady_clock::now();
+    } else {
+        mark_dead();
+    }
+}
+
 // No per-instance setup needed - part of the common tool interface (see the note in tools.h).
 void TOOL_REMOTE::configure(ollama_system&) {}
 
@@ -232,7 +250,7 @@ bool TOOL_REMOTE::read_line_blocking(std::string& out, int timeout_ms)
     }
 }
 
-bool TOOL_REMOTE::check(ollama_system& chat, const ToolCall& tc)
+bool TOOL_REMOTE::check(ollama_system& chat, CLASS_SYSTEM*, const ToolCall& tc)
 {
     bool is_mine = false;
     for (auto& def : tool_defs) {
@@ -321,7 +339,7 @@ bool TOOL_REMOTE::check(ollama_system& chat, const ToolCall& tc)
 // cleanly closed connection, same as before the heartbeat existed - either
 // way, is_alive() flips to false, which ollama_system::process() (olla.cpp)
 // checks every tick to actually drop this instance from tools_list.
-void TOOL_REMOTE::monitor_tool(ollama_system& chat)
+void TOOL_REMOTE::monitor_tool(ollama_system& chat, CLASS_SYSTEM*)
 {
     if (fd < 0) return;
 

@@ -62,7 +62,7 @@ void TOOL_SET_THINKING_MODE::handle_tool(ollama_system& chat, const std::string&
     }
 }
 
-bool TOOL_SET_THINKING_MODE::check(ollama_system& chat, const ToolCall& tc) {
+bool TOOL_SET_THINKING_MODE::check(ollama_system& chat, CLASS_SYSTEM*, const ToolCall& tc) {
     if (tc.name != "set_thinking_mode")
         return false;
 
@@ -77,7 +77,7 @@ bool TOOL_SET_THINKING_MODE::check(ollama_system& chat, const ToolCall& tc) {
 }
 
 // No periodic work needed - part of the common tool interface (see the note in tools.h).
-void TOOL_SET_THINKING_MODE::monitor_tool(ollama_system&) {}
+void TOOL_SET_THINKING_MODE::monitor_tool(ollama_system&, CLASS_SYSTEM*) {}
 
 // ---
 
@@ -118,6 +118,17 @@ void TOOL_HUE::register_tool(ollama_system& chat, json& tools) {
         {"properties", {
             {"light_id", {{"type", "string"}, {"description", "ID or Name (e.g., '2' or 'Computer'). Use 'all' to target every light."}}},
             {"on", {{"type", "boolean"}}},
+            // NOTE (not fixed yet - revisit when this tool gets reworked as
+            // a remote tool): no unit given here, so the model has no way
+            // to know this is Hue's own raw 0-254 'bri' scale (passed
+            // straight through to the bridge in handle_tool() below), not a
+            // 0-100 percentage. Seen for real: user asked for "100"
+            // expecting near-full brightness, got ~39% and had to ask again
+            // with "255" (silently clamped to the bridge's actual max, 254,
+            // by the Hue API itself). Either convert here (0-100 percent <->
+            // 0-254 bri) or spell the real range out in this description -
+            // either way, list_hue_lights' "Bri: " report further down has
+            // the same raw-scale issue and should get the same treatment.
             {"brightness", {{"type", "integer"}}},
             {"preset", {{"type", "string"}, {"enum", {"red", "green", "blue", "yellow", "magenta", "cyan", "orange", "purple", "pink", "white"}}}},
             {"hex", {{"type", "string"}}},
@@ -154,6 +165,8 @@ void TOOL_HUE::handle_tool(ollama_system& chat, const std::string& name, const j
         std::stringstream ss;
         ss << "Current Lights: ";
         for (auto const& [id, state] : lights) {
+            // Bri is Hue's raw 0-254 scale, not a percentage - see the
+            // "brightness" param note in register_tool() above.
             ss << "[" << id << "] " << state.name << " (Power: " << (state.on ? "ON" : "OFF")
                 << ", Bri: " << state.brightness << (state.reachable ? "" : " *UNREACHABLE*") << "), ";
         }
@@ -202,6 +215,8 @@ void TOOL_HUE::handle_tool(ollama_system& chat, const std::string& name, const j
         if (args.contains("on")) body["on"] = args.at("on").get<bool>();
         else if (!args.contains("alert") && !args.contains("flash_count")) body["on"] = true;
 
+        // Raw pass-through of whatever scale the model assumed for
+        // "brightness" - see that param's note in register_tool() above.
         if (args.contains("brightness")) body["bri"] = args.at("brightness");
 
         std::string alert_mode = args.value("alert", "none");
@@ -258,7 +273,7 @@ void TOOL_HUE::handle_tool(ollama_system& chat, const std::string& name, const j
     }
 }
 
-bool TOOL_HUE::check(ollama_system& chat, const ToolCall& tc) {
+bool TOOL_HUE::check(ollama_system& chat, CLASS_SYSTEM*, const ToolCall& tc) {
     if (tc.name != "set_hue_light" && tc.name != "list_hue_lights" && tc.name != "manage_hue_scenes")
         return false;
 
@@ -272,7 +287,7 @@ bool TOOL_HUE::check(ollama_system& chat, const ToolCall& tc) {
     return true;
 }
 
-void TOOL_HUE::monitor_tool(ollama_system& chat)
+void TOOL_HUE::monitor_tool(ollama_system& chat, CLASS_SYSTEM*)
 {
     if (!chat.TOOL_PERMISSIONS.HUE) return;
 
@@ -450,7 +465,7 @@ void TOOL_WEB_SEARCH::handle_tool(ollama_system& chat, const std::string& name, 
     }
 }
 
-bool TOOL_WEB_SEARCH::check(ollama_system& chat, const ToolCall& tc) {
+bool TOOL_WEB_SEARCH::check(ollama_system& chat, CLASS_SYSTEM*, const ToolCall& tc) {
     if (tc.name != "web_search" && tc.name != "fetch_website_content")
         return false;
 
@@ -465,7 +480,7 @@ bool TOOL_WEB_SEARCH::check(ollama_system& chat, const ToolCall& tc) {
 }
 
 // No periodic work needed - part of the common tool interface (see the note in tools.h).
-void TOOL_WEB_SEARCH::monitor_tool(ollama_system&) {}
+void TOOL_WEB_SEARCH::monitor_tool(ollama_system&, CLASS_SYSTEM*) {}
 
 
 /*
@@ -702,7 +717,13 @@ void TOOL_TASK_RUNNER::handle_tool(ollama_system& chat, const std::string& name,
                 instance.send(found_task.COMMANDS[i]);
             }
 
-            instance.process(keyboard_input.PROPS.ENABLED);
+            // nullptr, not the real CLASS_SYSTEM: this automation instance
+            // deliberately drives its own local keyboard_input above (see
+            // its declaration/comment near the top of this function),
+            // isolated from the real system's - it has no business reaching
+            // the real one, same reasoning as sidetrack.cpp's own nullptr
+            // call site (see TOOL_BASE::check()'s comment in tools.h).
+            instance.process(nullptr, keyboard_input.PROPS.ENABLED);
             instance.last_received.complete = false;
         }
 
@@ -726,7 +747,7 @@ void TOOL_TASK_RUNNER::handle_tool(ollama_system& chat, const std::string& name,
     }
 }
 
-bool TOOL_TASK_RUNNER::check(ollama_system& chat, const ToolCall& tc) {
+bool TOOL_TASK_RUNNER::check(ollama_system& chat, CLASS_SYSTEM*, const ToolCall& tc) {
     if (tc.name != "run_automation_task")
         return false;
 
@@ -741,14 +762,14 @@ bool TOOL_TASK_RUNNER::check(ollama_system& chat, const ToolCall& tc) {
 }
 
 // No periodic work needed - part of the common tool interface (see the note in tools.h).
-void TOOL_TASK_RUNNER::monitor_tool(ollama_system&) {}
+void TOOL_TASK_RUNNER::monitor_tool(ollama_system&, CLASS_SYSTEM*) {}
 
 // Shared by both call sources handle_instance_tools() drains - see its own
 // comment in olla.h. Applies the tool_calls_this_turn cap (see olla.h),
 // then routes to whichever tool's check() claims tc.name (see the
 // TOOL_BASE comment in tools.h) - an unrecognized name gets an error
 // result back instead of ever reaching a tool.
-void ollama_system::dispatch_tool_call(const ToolCall& tc, bool& Keyboard_Input_Enabled)
+void ollama_system::dispatch_tool_call(const ToolCall& tc, CLASS_SYSTEM* system, bool& Keyboard_Input_Enabled)
 {
     // TODO: special-cased until ollama_system can reach CLASS_SYSTEM
     // directly (see TODO.md) - only run_automation_task needs the main
@@ -772,7 +793,7 @@ void ollama_system::dispatch_tool_call(const ToolCall& tc, bool& Keyboard_Input_
 
     bool handled = false;
     for (auto& tool : tools_list) {
-        if (tool->check(*this, tc)) { handled = true; break; }
+        if (tool->check(*this, system, tc)) { handled = true; break; }
     }
 
     if (!handled) {
@@ -783,7 +804,7 @@ void ollama_system::dispatch_tool_call(const ToolCall& tc, bool& Keyboard_Input_
     if (disable_keyboard) Keyboard_Input_Enabled = true;
 }
 
-void ollama_system::handle_instance_tools(bool& Keyboard_Input_Enabled)
+void ollama_system::handle_instance_tools(CLASS_SYSTEM* system, bool& Keyboard_Input_Enabled)
 {
     // System-injected calls (e.g. a timer's on_expire action - see
     // TOOL_REMOTE::monitor_tool()) - drained independently of the model's
@@ -795,7 +816,7 @@ void ollama_system::handle_instance_tools(bool& Keyboard_Input_Enabled)
         while (!pending_tool_calls.empty()) {
             ToolCall tc = pending_tool_calls.front();
             pending_tool_calls.pop();
-            dispatch_tool_call(tc, Keyboard_Input_Enabled);
+            dispatch_tool_call(tc, system, Keyboard_Input_Enabled);
         }
     }
 
@@ -809,7 +830,7 @@ void ollama_system::handle_instance_tools(bool& Keyboard_Input_Enabled)
         last_received.tool_calls.clear();
 
         for (auto& tc : pending_calls) {
-            dispatch_tool_call(tc, Keyboard_Input_Enabled);
+            dispatch_tool_call(tc, system, Keyboard_Input_Enabled);
         }
     }
 }

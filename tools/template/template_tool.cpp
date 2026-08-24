@@ -330,6 +330,23 @@ int main(int argc, char* argv[])
     RawTerminal raw_terminal; // hides cursor, enables raw stdin - restores both on scope exit
     std::cout << "\033[2J"; // one full clear at startup, redraw_screen() only overwrites from here on
 
+    // A file at EOF (stdin redirected from /dev/null, or genuinely closed -
+    // e.g. this program ever run unattended, with no controlling terminal)
+    // is always "ready to read" as far as select() is concerned, since
+    // reading it returns immediately (0 bytes) rather than blocking. If
+    // STDIN_FILENO were unconditionally watched below, that would make
+    // select()'s 200ms timeout never actually apply - the loop would spin
+    // as fast as the CPU allows instead of pacing itself, hammering the
+    // socket/display logic at full speed (seen for real: 37GB written in 18
+    // minutes at ~95% CPU, testing a tool built on this same plumbing).
+    // Watching it only when it's a real terminal sidesteps that entirely:
+    // with nothing in read_fds but a (possibly absent) socket, select()
+    // genuinely blocks for the timeout, same as intended. There's no
+    // 'q'-to-quit to watch for anyway without a real terminal for someone
+    // to press it on. If your tool has no display at all (see the note
+    // above RawTerminal), this still matters just as much - keep it.
+    bool has_real_terminal = isatty(STDIN_FILENO) != 0;
+
     int fd = -1;
     std::string status = "Not connected to olli at " + host + " - retrying...";
     std::string read_buffer;
@@ -350,11 +367,14 @@ int main(int argc, char* argv[])
 
         fd_set read_fds;
         FD_ZERO(&read_fds);
-        FD_SET(STDIN_FILENO, &read_fds);
-        int max_fd = STDIN_FILENO;
+        int max_fd = -1;
+        if (has_real_terminal) {
+            FD_SET(STDIN_FILENO, &read_fds);
+            max_fd = STDIN_FILENO;
+        }
         if (fd >= 0) {
             FD_SET(fd, &read_fds);
-            max_fd = std::max(fd, STDIN_FILENO);
+            max_fd = std::max(fd, max_fd);
         }
 
         int ready = select(max_fd + 1, &read_fds, nullptr, nullptr, &tv);

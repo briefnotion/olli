@@ -92,6 +92,43 @@ to recover if olli restarted.
   viable later, per the Scope note about "anywhere on the network, localhost
   for now."
 
+### Identity broadcast (2026-08-24)
+
+- New message type: `identity` (see Message shapes below), olli -> tool,
+  sent once right after registration completes - `main.cpp` calls
+  `TOOL_REMOTE::send_identity()` (`source/remote_tools.h`/`.cpp`)
+  immediately after constructing the `TOOL_REMOTE`, using `CLASS_SYSTEM`'s
+  new `USER_IDENTITY` (`source/helper_olli.h`/`system.h`) - see the
+  architecture discussion this came out of for why that struct exists and
+  lives there.
+- Not tied to any lifecycle beyond registration itself: a reconnect
+  re-registers from scratch (see the heartbeat/reconnect note above), so it
+  naturally lands here again with no separate trigger needed. There's no
+  "user changed mid-session" case to handle either - the active profile is
+  fixed for olli's whole process lifetime (chosen once at startup, see
+  `main.cpp`'s `[name]` argument), so `identity` is genuinely sent-once per
+  connection, not something that can go stale while still connected.
+- Deliberately sends the actual identity fields over the wire (`name`/
+  `full_name`/`about`), not just enough for the tool to go read
+  `~/olli_files_<name>/` itself - that directory is on *olli's* machine,
+  and per the Scope note above this protocol targets "anywhere on the
+  network" as the long-term goal, not just loopback. A same-machine tool
+  that wants to keep real per-user settings on disk is still free to use
+  `name` as a lookup key into its own directory convention (see
+  `tools/clock/clock.cpp`'s `handle_identity()` for a commented-out sketch
+  of exactly that) - the wire message just doesn't *require* filesystem
+  co-location to be useful.
+- `tools/clock/clock.cpp` is the reference implementation: `handle_identity()`
+  records the fields and returns a status string for the display (same
+  convention as `handle_call()`); `reset_to_default_profile()`, called from
+  both places the connection drops (a clean close and a heartbeat timeout),
+  clears them back out so a stale identity from whoever was just connected
+  never lingers for whoever (or nothing) connects next. Clock itself has no
+  real per-user settings to load or revert, so both functions carry a
+  commented-out sketch of what a tool that *does* have some (a Hue-lights
+  remote tool's per-user scenes, say) would do there instead - copy the
+  shape, not the emptiness, when building the next one.
+
 ### Remote host support (2026-08-22)
 
 `clock.cpp` now takes an optional `[host]` argument (default `127.0.0.1`)
@@ -171,6 +208,25 @@ Six message types, distinguished by `"type"`.
   instead of written in C++.
 - On olli's side, `TOOL_REMOTE::register_tool()` does nothing but re-emit
   this array into the `tools` JSON sent to Ollama - no tool-specific code.
+
+### `identity` (olli -> tool, sent once, right after registration completes)
+
+```json
+{"type": "identity", "name": "ron", "full_name": "", "about": ""}
+```
+
+- Who's running olli right now - `name` mirrors the profile name that
+  selected `~/olli_files_<name>/` (empty for the shared/no-profile default),
+  `full_name`/`about` are whatever's set on `CLASS_SYSTEM`'s `USER_IDENTITY`
+  (`source/helper_olli.h`), also empty if unset. All three are always
+  present in the message, even when empty - a tool can rely on the keys
+  existing rather than needing `.value()`-style fallbacks for missing ones.
+- One-way, not a `call` - there's no matching `result` to send back.
+- See the "Identity broadcast" status note above for the full design
+  reasoning (why it's sent fields-and-all instead of just enough to look up
+  a local file, why there's no "identity changed" case to handle, etc.) and
+  `tools/clock/clock.cpp`'s `handle_identity()`/`reset_to_default_profile()`
+  for the reference implementation.
 
 ### `call` (olli -> tool, when the model invokes one of its registered names)
 

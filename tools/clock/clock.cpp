@@ -114,6 +114,15 @@ namespace {
     // here accumulates fast enough for the lack of pruning to matter.
     std::map<std::string, ActiveTimer> active_timers;
 
+    // Who's currently running olli, per its own "identity" message (see
+    // ../PROTOCOL.md and handle_identity() below) - empty means either not
+    // told yet, or olli's shared/no-profile default. Reset back to empty by
+    // reset_to_default_profile() on disconnect, so a stale identity from a
+    // previous session/user never lingers once olli goes away.
+    std::string current_user_name;
+    std::string current_user_full_name;
+    std::string current_user_about;
+
     // Purely cosmetic: flashes the whole screen in reverse video briefly
     // when a timer fires, in addition to (never instead of) the real
     // `event` notification pushed to olli below. redraw_screen() ticks this
@@ -379,6 +388,64 @@ namespace {
         std::cout << std::flush;
     }
 
+    // Answers one already-parsed "identity" message (see ../PROTOCOL.md) -
+    // who's running olli right now, sent once, right after this program's
+    // own registration completes. Same status-string-return convention as
+    // handle_call() below, for the same reason (redraw_screen() owns the
+    // screen).
+    //
+    // clock has no real per-user settings to reload, so this just records
+    // the identity for display. A future remote tool that DOES have its own
+    // settings - e.g. reworking TOOL_HUE (source/tools.cpp) into a remote
+    // tool, per-user light preferences or scenes - would do real work here
+    // instead of the commented-out sketch below: look for a settings file
+    // of its own keyed by this name and load it, falling back to defaults
+    // if none exists for this user yet.
+    std::string handle_identity(const json& msg)
+    {
+        current_user_name = msg.value("name", "");
+        current_user_full_name = msg.value("full_name", "");
+        current_user_about = msg.value("about", "");
+
+        // Example of what a tool with real per-user settings would do here
+        // (clock has none, so this stays commented out):
+        //
+        // if (!current_user_name.empty()) {
+        //     std::filesystem::path profile_path =
+        //         std::filesystem::path(std::getenv("HOME")) /
+        //         ("olli_files_" + current_user_name) / "tools" / "clock" / "settings.json";
+        //     if (std::filesystem::exists(profile_path)) {
+        //         load_settings_from(profile_path); // hypothetical - clock has no settings yet
+        //     } else {
+        //         load_default_settings(); // no profile for this user - fall back cleanly
+        //     }
+        // }
+
+        if (current_user_name.empty()) {
+            return "Identified: olli's shared default (no profile)";
+        }
+        return "Identified: " + current_user_name;
+    }
+
+    // Called on every disconnect (both places fd gets reset to -1 below) -
+    // a stale identity from whoever was just talking to olli must not
+    // silently carry over to whoever (or nothing) connects next.
+    //
+    // clock has no per-user state to actually revert, so this just clears
+    // what handle_identity() above recorded. A future remote tool with real
+    // per-user settings loaded above would reload its own defaults here -
+    // symmetric with the commented-out sketch in handle_identity().
+    void reset_to_default_profile()
+    {
+        current_user_name.clear();
+        current_user_full_name.clear();
+        current_user_about.clear();
+
+        // Example of what a tool with real per-user settings would do here:
+        //
+        // load_default_settings(); // hypothetical - clock has no settings yet
+    }
+
     // Answers one already-parsed "call" message, returns a status string
     // for the display instead of printing directly - see redraw_screen()
     // above, which owns the whole screen via cursor positioning, so a plain
@@ -631,6 +698,22 @@ int main(int argc, char* argv[])
     RawTerminal raw_terminal; // hides cursor, enables raw stdin - restores both on scope exit
     std::cout << "\033[2J"; // one full clear at startup, redraw_screen() only overwrites from here on
 
+    // A file at EOF (stdin redirected from /dev/null, or genuinely closed -
+    // e.g. this program ever run unattended, with no controlling terminal)
+    // is always "ready to read" as far as select() is concerned, since
+    // reading it returns immediately (0 bytes) rather than blocking. If
+    // STDIN_FILENO were unconditionally watched below, that would make
+    // select()'s 200ms timeout never actually apply - the loop would spin
+    // as fast as the CPU allows instead of pacing itself, hammering the
+    // socket/display/timer logic at full speed (seen for real: 37GB written
+    // in 18 minutes at ~95% CPU, testing a sibling tool built on this same
+    // plumbing). Watching it only when it's a real terminal sidesteps that
+    // entirely: with nothing in read_fds but a (possibly absent) socket,
+    // select() genuinely blocks for the timeout, same as intended. There's
+    // no 'q'-to-quit to watch for anyway without a real terminal for
+    // someone to press it on.
+    bool has_real_terminal = isatty(STDIN_FILENO) != 0;
+
     int fd = -1;
     std::string status = "Not connected to olli at " + host + " - retrying...";
     std::string read_buffer;
@@ -651,11 +734,14 @@ int main(int argc, char* argv[])
 
         fd_set read_fds;
         FD_ZERO(&read_fds);
-        FD_SET(STDIN_FILENO, &read_fds);
-        int max_fd = STDIN_FILENO;
+        int max_fd = -1;
+        if (has_real_terminal) {
+            FD_SET(STDIN_FILENO, &read_fds);
+            max_fd = STDIN_FILENO;
+        }
         if (fd >= 0) {
             FD_SET(fd, &read_fds);
-            max_fd = std::max(fd, STDIN_FILENO);
+            max_fd = std::max(fd, max_fd);
         }
 
         int ready = select(max_fd + 1, &read_fds, nullptr, nullptr, &tv);
@@ -694,6 +780,7 @@ int main(int argc, char* argv[])
                 // to "not connected" and keep ticking rather than exiting.
                 close(fd);
                 fd = -1;
+                reset_to_default_profile();
                 status = "Disconnected from olli at " + host + " - retrying...";
             } else {
                 read_buffer.append(buf, static_cast<size_t>(n));
@@ -714,6 +801,8 @@ int main(int argc, char* argv[])
                             } else if (type == "ping") {
                                 send_line(fd, json{{"type", "pong"}}.dump());
                                 last_sent = std::chrono::steady_clock::now();
+                            } else if (type == "identity") {
+                                status = handle_identity(msg);
                             }
                             // "pong", or anything else: the last_received
                             // update above is already all that's needed.
@@ -741,6 +830,7 @@ int main(int argc, char* argv[])
             if (std::chrono::duration_cast<std::chrono::seconds>(now - last_received).count() >= DEAD_TIMEOUT_SECONDS) {
                 close(fd);
                 fd = -1;
+                reset_to_default_profile();
                 status = "Connection to olli at " + host + " timed out - retrying...";
             }
         }

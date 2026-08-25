@@ -258,8 +258,8 @@ steps.
 
 ## Voice & keyboard commands
 
-**Wake / sleep (spoken to Voca):** say *"hey voca"* to wake it; *"stop
-listening"* / *"sleep voca"* to sleep it; *"stop talking"* to interrupt speech.
+**Wake / sleep (spoken to Voca):** say *"hey olli"* to wake it; *"stop
+listening"* / *"sleep olli"* to sleep it; *"stop talking"* to interrupt speech.
 Voca also auto-sleeps after 5 minutes of silence.
 
 **Jump phrases (typed or spoken)** trigger a scene macro directly, bypassing the

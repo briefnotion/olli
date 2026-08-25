@@ -29,7 +29,7 @@ public:
     struct Callbacks {
         // Normal transcript heard while awake and not paused.
         std::function<void(const std::string& text)> onTranscript;
-        // Woken by a wake phrase (e.g. "hey voca"). trigger is the phrase matched.
+        // Woken by a wake phrase (e.g. "hey olli"). trigger is the phrase matched.
         std::function<void(const std::string& trigger)> onWake;
         // Went back to sleep, either via a sleep phrase or the auto-sleep timeout.
         std::function<void()> onSleep;

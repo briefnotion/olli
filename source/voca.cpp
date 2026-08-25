@@ -44,16 +44,22 @@ const std::vector<std::string> kInterruptPhrases = {
 };
 const std::vector<std::string> kSleepControlWords = {"sleep", "stop", "rest"};
 
-// whisper doesn't know "voca" is a word, so it guesses a real one close to
-// however it was actually pronounced - observed so far: "voka", "boca",
-// "volca", "volka", "vocer"/"vocaah", even "volker" (a real name, once it
-// heard enough to commit to one). All of them start with "vo", so that's
-// the net cast right after "hey" - safe precisely because "hey vo-<word>"
-// essentially never occurs by chance in ordinary conversation. Without that
-// "hey" context, only the exact bare fallbacks "voca"/"voka" are accepted -
-// a bare prefix match would also catch ordinary words like "voice" or "vote".
-constexpr size_t kVoPrefixMinLen = 3;
-constexpr size_t kVoPrefixMaxLen = 8;
+// Unlike the old "voca" (a made-up word whisper had to guess a phonetic
+// neighbor for), "olli"/"ollie" are real words/names whisper already knows,
+// so it's less prone to wild mis-transcription - but the same "hey
+// <prefix>" loose net is kept as a safety margin for however it mishears
+// the vowel, e.g. a softer "o". "ol" right after "hey" is about as rare in
+// ordinary conversation as "vo" was ("hey old", "hey olive" are about the
+// extent of it) - safe for the same reason "hey vo-<word>" was. Without
+// that "hey" context, only the exact bare fallbacks "olli"/"ollie" are
+// accepted - a bare prefix match would also catch ordinary words like "old"
+// or "olive". Not yet tuned against real mis-hearings the way the previous
+// wake word was (its own list, before this one, was built from actual
+// observed transcriptions over time - see git history) - adjust
+// kOlPrefixMinLen/MaxLen or add more bare fallbacks below if real use turns
+// up other variants worth catching.
+constexpr size_t kOlPrefixMinLen = 3;
+constexpr size_t kOlPrefixMaxLen = 8;
 
 double monotonicSeconds() {
     using namespace std::chrono;
@@ -117,9 +123,9 @@ std::string findPhraseWords(const std::vector<Word>& words, const std::vector<st
     return {};
 }
 
-bool startsWithVo(const std::string& word) {
-    if (word.size() < kVoPrefixMinLen || word.size() > kVoPrefixMaxLen) return false;
-    return word[0] == 'v' && word[1] == 'o';
+bool startsWithOl(const std::string& word) {
+    if (word.size() < kOlPrefixMinLen || word.size() > kOlPrefixMaxLen) return false;
+    return word[0] == 'o' && word[1] == 'l';
 }
 
 bool containsWord(const std::vector<Word>& words, const std::string& target) {
@@ -129,21 +135,21 @@ bool containsWord(const std::vector<Word>& words, const std::string& target) {
     return false;
 }
 
-// Finds a wake-word occurrence: a "vo"-prefixed word immediately following
-// "hey" (loose - see the comment on kVoPrefixMinLen above for why that's
-// safe), or a bare "voca"/"voka" anywhere with no "hey" needed (tight, to
-// avoid catching ordinary words - see kVoPrefixMinLen). On a match,
+// Finds a wake-word occurrence: an "ol"-prefixed word immediately following
+// "hey" (loose - see the comment on kOlPrefixMinLen above for why that's
+// safe), or a bare "olli"/"ollie" anywhere with no "hey" needed (tight, to
+// avoid catching ordinary words - see kOlPrefixMinLen). On a match,
 // `matchEndPos` is set to the original-text byte offset right after the
 // matched word.
 std::string findWakeWord(const std::vector<Word>& words, size_t& matchEndPos) {
     for (size_t i = 0; i + 1 < words.size(); ++i) {
-        if (words[i].text == "hey" && startsWithVo(words[i + 1].text)) {
+        if (words[i].text == "hey" && startsWithOl(words[i + 1].text)) {
             matchEndPos = words[i + 1].end;
             return words[i + 1].text;
         }
     }
     for (const auto& w : words) {
-        if (w.text == "voca" || w.text == "voka") {
+        if (w.text == "olli" || w.text == "ollie") {
             matchEndPos = w.end;
             return w.text;
         }
@@ -152,8 +158,8 @@ std::string findWakeWord(const std::vector<Word>& words, size_t& matchEndPos) {
 }
 
 // Sleep trigger: "stop listening", or a control word ("sleep"/"stop"/
-// "rest") immediately next to a "vo"-prefixed word in either order
-// ("sleep voca", "voca stop", ...).
+// "rest") immediately next to an "ol"-prefixed word in either order
+// ("sleep olli", "olli stop", ...).
 bool findSleepTrigger(const std::vector<Word>& words) {
     if (containsWord(words, "stop") && containsWord(words, "listening")) return true;
     for (size_t i = 0; i < words.size(); ++i) {
@@ -161,15 +167,15 @@ bool findSleepTrigger(const std::vector<Word>& words) {
                               kSleepControlWords.end();
         if (!isControlWord) continue;
         // "stop talking"/"stop speaking"/"stop now" is the interrupt idiom
-        // (see kInterruptPhrases), not the standalone "<voca> stop" sleep
-        // synonym - don't let coincidental word order ("hey voca, stop
+        // (see kInterruptPhrases), not the standalone "<olli> stop" sleep
+        // synonym - don't let coincidental word order ("hey olli, stop
         // talking") also read as a sleep command.
         if (words[i].text == "stop" && i + 1 < words.size()) {
             const std::string& next = words[i + 1].text;
             if (next == "talking" || next == "speaking" || next == "now") continue;
         }
-        if (i > 0 && startsWithVo(words[i - 1].text)) return true;
-        if (i + 1 < words.size() && startsWithVo(words[i + 1].text)) return true;
+        if (i > 0 && startsWithOl(words[i - 1].text)) return true;
+        if (i + 1 < words.size() && startsWithOl(words[i + 1].text)) return true;
     }
     return false;
 }

@@ -11,7 +11,6 @@
 // in tools.h for why. Add a new tool here, nowhere else in this class.
 ollama_system::ollama_system()
 {
-    tools_list.push_back(std::make_unique<TOOL_HUE>());
     tools_list.push_back(std::make_unique<TOOL_SET_THINKING_MODE>());
     tools_list.push_back(std::make_unique<TOOL_WEB_SEARCH>());
     tools_list.push_back(std::make_unique<TOOL_TASK_RUNNER>());
@@ -51,16 +50,6 @@ void ollama_system::open()
     std::filesystem::create_directories(PROPS.OLLI_DIRECTORY / "output");
     std::filesystem::create_directories(PROPS.OLLI_DIRECTORY / "input");
 
-    // Must happen before the configure() loop below - TOOL_HUE::configure()
-    // (tools.cpp) reads PROPS.hue_path immediately to load scenes.json, so
-    // setting this after would leave it on the class's bare default
-    // ("scenes.json", a relative path - see OLLAMA_SYSTEM_PROPERTIES in
-    // olla.h) instead of this profile's real, absolute path. Confirmed as
-    // a real bug, not theoretical: it was silently reading/writing whatever
-    // "scenes.json" happened to exist relative to olli's launch directory
-    // (a stale leftover in build/, in one real case) instead of the
-    // intended ~/olli_files_<name>/scenes.json.
-    PROPS.hue_path = (PROPS.OLLI_DIRECTORY / "scenes.json").string();
     PROPS.path_output = PROPS.OLLI_DIRECTORY / "output";
     PROPS.path_history = ".";
 
@@ -174,13 +163,23 @@ void ollama_system::integrate_tool_result(std::string Special_Instruction, const
      * Uses a 'system' whisper to transform raw data into persona-driven speech.
      */
     {
-        // 1. Construct a "Director's Note" prompt. 
+        // 1. Construct a "Director's Note" prompt.
         // We use clear delimiters like [DATA] to help the model parse quickly.
-        std::string prompt = 
+        //
+        // TASK/CONSTRAINTS wording deliberately frames raw_result as a real
+        // fact to *report*, not raw material to freely improvise around -
+        // the previous wording ("Acknowledge this info as the Assistant.
+        // Stay in persona") said nothing about staying faithful to it, and
+        // "Do NOT say 'The system found'" pushed toward making a real tool
+        // result and a made-up one read identically. Confirmed contributing
+        // to a real failure mode alongside this history no longer getting
+        // deleted after one turn - see send_tool_result()'s comment further
+        // down for the full history.
+        std::string prompt =
             "[DIRECTOR_NOTE]\n"
             "The following raw data was just retrieved: '" + raw_result + "'.\n"
-            "TASK: Acknowledge this info as the Assistant. Stay in persona.\n"
-            "CONSTRAINTS: Be concise. No technical jargon. Do NOT say 'The system found' or 'Rewriting data'.\n";
+            "TASK: Report this real result to the user, in persona, without changing the facts/values it contains.\n"
+            "CONSTRAINTS: Be concise. No technical jargon. Do not claim this didn't come from a real check.\n";
 
         if (!Special_Instruction.empty()) 
         {
@@ -196,16 +195,70 @@ void ollama_system::integrate_tool_result(std::string Special_Instruction, const
         // This prevents the "What was the last thing I said?" confusion 
         // because the model treats this as a 'state' rather than 'user input'.
         this->send(prompt, "system");
-        
-        // 3. Logic Note:
-        // If your 'send' function adds the prompt to the history vector, 
-        // I recommend adding a 'pop_back()' or a flag to your Message class 
-        // called 'is_transient' so this prompt doesn't bloat your VRAM 
-        // over a long session.
+
+        // 3. This DIRECTOR_NOTE, and the raw tool result send_tool_result()
+        // pushed just before it, both stay in history now rather than being
+        // deleted after one turn (see send_tool_result()'s comment for why)
+        // - unbounded growth is handled the same way the rest of history
+        // is, by consolidate() (sidetrack.cpp) once a level actually fills
+        // up, not by specially erasing these two message types early.
     }
 }
 
 
+
+// Parses one "message" chunk's "tool_calls" array (if present) into out,
+// appending to whatever's already there - shared by send()'s streaming and
+// non-streaming paths below, which used to each hand-roll this with
+// tc["function"].value("name", "") / tc["function"]["arguments"]: plain
+// operator[] on a possibly-missing key, which nlohmann::json auto-vivifies
+// to null rather than failing loudly, and calling .value() on that null
+// throws json::type_error. That throw used to propagate into either the
+// streaming callback's blanket 'catch (...) {}' (silently dropping that
+// tool call, and every later one in the same chunk, with zero trace) or
+// past the non-streaming path's narrower 'catch (const json::parse_error&)'
+// (which doesn't even match json::type_error) into chat_thread's own
+// outermost catch-all - same silent loss, different route. Confirmed
+// exploitable: is_ready_for_tools (tools.cpp) only dispatches when
+// last_received.tool_calls is non-empty, so a swallowed parse failure here
+// was indistinguishable from "the model chose not to call anything."
+// .at()/.value() throughout instead - never auto-vivifies - and a per-entry
+// try/catch with an actual log line, so one malformed entry can't take out
+// the rest of the array, and a real failure is visible instead of silent.
+static void parse_tool_calls(const json& msg_chunk, std::vector<ToolCall>& out)
+{
+    if (!msg_chunk.contains("tool_calls")) return;
+
+    for (const auto& tc : msg_chunk["tool_calls"]) {
+        try {
+            json function = tc.at("function");
+            out.push_back({
+                tc.value("id", ""),
+                function.value("name", ""),
+                function.value("arguments", json::object())
+            });
+        } catch (const std::exception& e) {
+            std::cerr << "[Error] Skipping malformed tool_calls entry from Ollama (" << e.what() << "): "
+                      << tc.dump() << std::endl;
+        }
+    }
+}
+
+// One-line human-readable summary of a pure tool-call turn (no
+// accompanying text) for debug_log_message()/history_write()'s debug
+// text, e.g. "[tool_calls: set_hue_light({\"light_id\":\"2\",\"on\":false})]" -
+// used wherever there'd otherwise just be an empty content string.
+static std::string summarize_tool_calls(const std::vector<ToolCall>& calls)
+{
+    std::stringstream ss;
+    ss << "[tool_calls: ";
+    for (size_t i = 0; i < calls.size(); ++i) {
+        if (i > 0) ss << ", ";
+        ss << calls[i].name << "(" << calls[i].arguments.dump() << ")";
+    }
+    ss << "]";
+    return ss.str();
+}
 
 void ollama_system::send(const std::string& user_input, const std::string& role) {
     std::string new_user_input = filter_non_printable(user_input);
@@ -220,17 +273,19 @@ void ollama_system::send(const std::string& user_input, const std::string& role)
     // A real user message (or a background task-runner's next scripted
     // command - also sent with role "user") starts a fresh turn - see
     // tool_calls_this_turn's comment in olla.h. A "system"-role send()
-    // (DIRECTOR_NOTE follow-ups) deliberately does NOT reset this, or prune
-    // below; those are still part of the same turn the guard is bounding.
+    // (DIRECTOR_NOTE follow-ups) deliberately does NOT reset this; those
+    // are still part of the same turn the guard is bounding.
     if (role == "user")
     {
         tool_calls_this_turn = 0;
-        prune_turn_scaffolding();
     }
 
     {
         std::lock_guard<std::mutex> lock(history_mutex);
-        history.push_back({role, new_user_input});
+        Message input_msg;
+        input_msg.role = role;
+        input_msg.content = new_user_input;
+        history.push_back(input_msg);
     }
     debug_log_message(role, new_user_input);
 
@@ -240,6 +295,25 @@ void ollama_system::send(const std::string& user_input, const std::string& role)
         for (const auto& msg : history) {
             json m = {{"role", msg.role}, {"content", msg.content}};
             if (!msg.tool_call_id.empty()) m["tool_call_id"] = msg.tool_call_id;
+            // Echoed back in the same shape parse_tool_calls() (below)
+            // parses it out of Ollama's own responses in - see
+            // Message::tool_calls' comment (olla.h) for why this exists:
+            // without it, the model's own past tool invocations were
+            // invisible in its own context, only ever their results were.
+            if (!msg.tool_calls.empty()) {
+                json tc_array = json::array();
+                for (const auto& tc : msg.tool_calls) {
+                    tc_array.push_back({
+                        {"id", tc.id},
+                        {"type", "function"},
+                        {"function", {
+                            {"name", tc.name},
+                            {"arguments", tc.arguments}
+                        }}
+                    });
+                }
+                m["tool_calls"] = tc_array;
+            }
             messages_json.push_back(m);
         }
     }
@@ -299,7 +373,18 @@ void ollama_system::send(const std::string& user_input, const std::string& role)
 
                     if (j_chunk.contains("message")) {
                         auto msg_chunk = j_chunk["message"];
-                        
+
+                        // Independent ifs, not if/else if - a chunk that
+                        // happens to carry both a "thinking" key (even an
+                        // empty one) and real "content" used to have its
+                        // content silently dropped, since checking key
+                        // *presence* (not whether thinking is non-empty)
+                        // made the content branch unreachable whenever
+                        // "thinking" was present at all. The non-streaming
+                        // path below never had this restriction - it reads
+                        // both fields independently via .value() - so this
+                        // was an inconsistency between the two, not a
+                        // deliberate choice.
                         if (msg_chunk.contains("thinking")) {
                             std::string t = msg_chunk["thinking"];
                             accumulated_thinking += t;
@@ -308,7 +393,7 @@ void ollama_system::send(const std::string& user_input, const std::string& role)
                                 thinking_buffer += t;
                             }
                         }
-                        else if (msg_chunk.contains("content")) {
+                        if (msg_chunk.contains("content")) {
                             std::string c = msg_chunk["content"];
                             accumulated_content += c;
                             tts_buffer += c;
@@ -318,15 +403,7 @@ void ollama_system::send(const std::string& user_input, const std::string& role)
                             }
                         }
 
-                        if (msg_chunk.contains("tool_calls")) {
-                            for (auto& tc : msg_chunk["tool_calls"]) {
-                                last_received.tool_calls.push_back({
-                                    tc.value("id", ""),
-                                    tc["function"].value("name", ""),
-                                    tc["function"]["arguments"]
-                                });
-                            }
-                        }
+                        parse_tool_calls(msg_chunk, last_received.tool_calls);
                     }
                 } catch (...) {}
                 return true;
@@ -354,15 +431,7 @@ void ollama_system::send(const std::string& user_input, const std::string& role)
                     accumulated_content = msg_obj.value("content", "");
                     accumulated_thinking = msg_obj.value("thinking", "");
 
-                    if (msg_obj.contains("tool_calls")) {
-                        for (auto& tc : msg_obj["tool_calls"]) {
-                            last_received.tool_calls.push_back({
-                                tc.value("id", ""),
-                                tc["function"].value("name", ""),
-                                tc["function"]["arguments"]
-                            });
-                        }
-                    }
+                    parse_tool_calls(msg_obj, last_received.tool_calls);
                 }
             } catch (const json::parse_error& e) {
                 last_received.complete = false;
@@ -378,14 +447,25 @@ void ollama_system::send(const std::string& user_input, const std::string& role)
     last_received.response = accumulated_content;
     last_received.thinking = accumulated_thinking;
     
-    if (!last_received.response.empty() && last_received.tool_calls.empty()) {
+    // No longer requires tool_calls to be empty - a response that includes
+    // both explanatory text AND a tool call used to have that text silently
+    // discarded here: it was already live in response_buffer (so the user
+    // saw/heard it), but never recorded in history, meaning the model had
+    // no memory of having said it on the very next turn.
+    if (!last_received.response.empty() || !last_received.tool_calls.empty()) {
         std::lock_guard<std::mutex> lock(history_mutex);
         std::string final_content = last_received.response;
         if (status.interrupt_signal.load()) {
             final_content += "... [Interrupted]";
         }
-        history.push_back({"assistant", final_content});
-        debug_log_message("assistant", final_content);
+
+        Message assistant_msg;
+        assistant_msg.role = "assistant";
+        assistant_msg.content = final_content;
+        assistant_msg.tool_calls = last_received.tool_calls;
+        history.push_back(assistant_msg);
+
+        debug_log_message("assistant", final_content.empty() ? summarize_tool_calls(last_received.tool_calls) : final_content);
     }
 
     // Same trailing blank line the old direct-cout version always printed
@@ -403,6 +483,16 @@ void ollama_system::send(const std::string& user_input, const std::string& role)
  * REFINED: SEND_TOOL_RESULT (For your main ollama_system class)
  * This version updates the history but allows the Integration Task
  * to handle the actual conversational output.
+ *
+ * The 'tool'-role message this pushes used to get deleted from history
+ * (along with integrate_tool_result()'s DIRECTOR_NOTE) right before the
+ * model's very next turn, via a since-removed prune_turn_scaffolding() -
+ * see where that function used to be defined, further down this file, for
+ * why: confirmed against real session logs, erasing this evidence one turn
+ * later is what let the model drift into confidently narrating fake tool
+ * successes once enough tool-trace-free turns had piled up in history. It
+ * now stays, aged out by consolidate() (sidetrack.cpp) like everything
+ * else, not specially deleted early.
  */
 void ollama_system::send_tool_result(const std::string& tool_call_id, const std::string& result) {
     Message msg;
@@ -417,21 +507,17 @@ void ollama_system::send_tool_result(const std::string& tool_call_id, const std:
     debug_log_message(msg.role, msg.content);
 }
 
-// See the declaration in olla.h for the full reasoning. Erase-remove over
-// 'tool' and non-protected 'system' messages - by construction the only
-// producers of either in main history are send_tool_result() above and the
-// DIRECTOR_NOTE prompt in integrate_tool_result() (via send(..., "system")),
-// both of which only ever exist to lead up to the assistant's own reply.
-void ollama_system::prune_turn_scaffolding() {
-    std::lock_guard<std::mutex> lock(history_mutex);
-    history.erase(
-        std::remove_if(history.begin(), history.end(), [](const Message& msg) {
-            return msg.role == "tool" ||
-                   (msg.role == "system" && msg.consolidation_level >= 0);
-        }),
-        history.end()
-    );
-}
+// prune_turn_scaffolding() used to live here - deleted every 'tool' message
+// and every non-protected 'system' message (raw tool results and
+// DIRECTOR_NOTE prompts) right before the next real user turn. Removed:
+// that erased all evidence a tool was ever called before the model's very
+// next turn, which - confirmed against real session logs - is what let the
+// model drift into narrating fake tool successes once enough clean-looking
+// "user asks, assistant confidently answers" turns had accumulated with no
+// trace of the tool machinery behind them. 'tool'/'system' messages now
+// just ride along as normal consolidation_level 0 history like everything
+// else, aged out by consolidate() (sidetrack.cpp) once a level actually
+// fills up, instead of being specially deleted after one turn regardless.
 
 
 void ollama_system::stop()
@@ -556,6 +642,9 @@ void ollama_system::history_write(std::string Directory)
                 outFile << "Content: " << msg.content << std::endl;
                 if (!msg.tool_call_id.empty()) {
                     outFile << "Tool ID: " << msg.tool_call_id << std::endl;
+                }
+                if (!msg.tool_calls.empty()) {
+                    outFile << "Tool Calls: " << summarize_tool_calls(msg.tool_calls) << std::endl;
                 }
                 outFile << "------------------------------------" << std::endl;
             }

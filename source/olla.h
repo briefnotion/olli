@@ -26,14 +26,53 @@ using json = nlohmann::json;
 class ollama_system;
 class AUDIO_CONTROL_CLASS; // for the text-to-speech output hook; see g_audio_control below
 class CLASS_SYSTEM; // see the CLASS_SYSTEM* parameter's comment on TOOL_BASE::check() (tools.h)
+
+// Declared before Message - Message::tool_calls (below) holds a vector of
+// these, and needs the type (and its own JSON (de)serialization) already
+// available.
+struct ToolCall {
+    std::string id;
+    std::string name;
+    json arguments;
+
+    // .value() throughout, not .at() - unlike Message's own to_json/
+    // from_json below, there's no legacy history.json to stay compatible
+    // with here (this type is new), but a malformed/unexpected entry
+    // should still degrade to empty fields rather than throw and take an
+    // entire Message (and everything after it in a from_json array walk)
+    // down with it.
+    friend void to_json(json& j, const ToolCall& tc) {
+        j = json{
+            {"id", tc.id},
+            {"name", tc.name},
+            {"arguments", tc.arguments}
+        };
+    }
+
+    friend void from_json(const json& j, ToolCall& tc) {
+        tc.id = j.value("id", "");
+        tc.name = j.value("name", "");
+        tc.arguments = j.value("arguments", json::object());
+    }
+};
+
 /**
  * @brief Structure representing a single chat message in the history.
  */
 struct Message {
-    std::string role = "";    
+    std::string role = "";
     std::string content = "";
-    std::string tool_call_id = ""; 
+    std::string tool_call_id = "";
     int consolidation_level = 0;
+
+    // The assistant's own tool_calls request for this message, if any -
+    // see ollama_system::send()'s comment on why this is recorded now
+    // (it used to not exist anywhere, even transiently: only the tool's
+    // *result* and a persona-narrated version of it ever made it into
+    // history, never the actual structured call the model itself made).
+    // Empty for every message that isn't an assistant turn that called a
+    // tool.
+    std::vector<ToolCall> tool_calls;
 
     // Helper to convert a Message object to a JSON object
     // This allows nlohmann::json to handle the struct automatically
@@ -42,7 +81,8 @@ struct Message {
             {"role", m.role},
             {"content", m.content},
             {"tool_call_id", m.tool_call_id},
-            {"consolidation_level", m.consolidation_level}
+            {"consolidation_level", m.consolidation_level},
+            {"tool_calls", m.tool_calls}
         };
     }
 
@@ -52,13 +92,12 @@ struct Message {
         j.at("content").get_to(m.content);
         j.at("tool_call_id").get_to(m.tool_call_id);
         j.at("consolidation_level").get_to(m.consolidation_level);
+        // .value(), not .at() - every history.json saved before this field
+        // existed is missing this key entirely; .at() would throw loading
+        // any of them. This is the one field here that must tolerate
+        // being absent.
+        m.tool_calls = j.value("tool_calls", json::array()).get<std::vector<ToolCall>>();
     }
-};
-
-struct ToolCall {
-    std::string id;
-    std::string name;
-    json arguments;
 };
 
 struct ChatResult {
@@ -121,9 +160,6 @@ class OLLAMA_SYSTEM_PROPERTIES
         int keep_alive_seconds = -1;
 
         string web_search_api_key = "Enter_API_key_for_serpapi.com";
-        std::string hue_ip = "127.0.0.1";
-        std::string hue_key = "Enter_Hue_Bridge_API_Key";
-        std::string hue_path = "scenes.json";
 
         // parameters
         int consolitation_starts_starts_at = 20;
@@ -171,19 +207,6 @@ class ollama_system {
         // 'system' is just forwarded to each tool's check() - see that
         // parameter's own comment on TOOL_BASE::check() (tools.h).
         void dispatch_tool_call(const ToolCall& tc, CLASS_SYSTEM* system, bool& Keyboard_Input_Enabled);
-
-        // Called from send() right as a new real "user" turn starts (see
-        // tool_calls_this_turn's comment just below, and send()'s own
-        // comment, for what counts as a turn boundary). Erases every 'tool'
-        // message and every non-protected (consolidation_level >= 0)
-        // 'system' message still in history - the raw tool results and
-        // DIRECTOR_NOTE prompts (integrate_tool_result()) the previous turn
-        // generated. Safe to drop unconditionally at this point: whatever
-        // they were for is already captured in the assistant's own reply
-        // (which this leaves untouched, along with every 'user' message).
-        // The protected persona message (consolidation_level -1) is exempt
-        // by the level check, same as consolidation's own bucketing.
-        void prune_turn_scaffolding();
 
         bool saveHistoryToJson(std::filesystem::path filepath);
         bool loadHistoryFromJson(std::filesystem::path filepath);

@@ -115,9 +115,7 @@ void Settings::load_settings() {
         //volume = j.value("volume", volume);
 
         tool_web_search_apiKey = j.value("tool_web_search_apiKey", tool_web_search_apiKey);
-        tool_hue_lights_apiKey = j.value("tool_hue_lights_apiKey", tool_hue_lights_apiKey);
-        tool_hue_lights_bridge_ip = j.value("tool_hue_lights_bridge_ip", tool_hue_lights_bridge_ip);
-        
+
         std::cout << "Settings loaded successfully from: " << config_path << std::endl;
     } catch (const std::exception& e) {
         std::cerr << "Error loading settings: " << e.what() << " - Using defaults." << std::endl;
@@ -136,8 +134,6 @@ void Settings::save_settings() {
     //j["volume"] = volume;
 
     j["tool_web_search_apiKey"] = tool_web_search_apiKey;
-    j["tool_hue_lights_apiKey"] = tool_hue_lights_apiKey;
-    j["tool_hue_lights_bridge_ip"] = tool_hue_lights_bridge_ip;
 
     std::ofstream file(config_path);
     if (file.is_open()) {

@@ -3,6 +3,8 @@
 
 #include <regex>
 
+#include <curl/curl.h>
+
 #include "tools.h"
 #include "olla.h"
 #include "user_io.h"
@@ -88,212 +90,13 @@ void TOOL_SET_THINKING_MODE::monitor_tool(ollama_system&, CLASS_SYSTEM*) {}
 // expiry alerts reach olli now (TOOL_REMOTE::monitor_tool(), same
 // integrate_tool_result() path this used to call directly).
 
-// ----
-
-void TOOL_HUE::set_credentials(const std::string& ip, const std::string& key, const std::string& path) {
-    hue.set_credentials(ip, key, path);
-    hue.refresh_lights();
-}
-
-void TOOL_HUE::configure(ollama_system& chat) {
-    set_credentials(chat.PROPS.hue_ip, chat.PROPS.hue_key, chat.PROPS.hue_path);
-}
-
-// Sends a direct system-level nudge forcing a tool call, for when the
-// model just confirms a lighting request in text instead of acting on it.
-void TOOL_HUE::refresh_system_prompt(ollama_system& chat) {
-    std::stringstream ss;
-    ss << "[SYSTEM COMMAND] You are a logic-first controller. ";
-    ss << "If the user asks to turn lights on/off, set a color, or change a scene, ";
-    ss << "you MUST call the corresponding tool immediately. ";
-    ss << "Do not provide conversational confirmation without also calling the tool.";
-    chat.send(ss.str(), "user");
-}
-
-void TOOL_HUE::register_tool(ollama_system& chat, json& tools) {
-    if (!chat.TOOL_PERMISSIONS.HUE) return;
-
-    json set_params = {
-        {"type", "object"},
-        {"properties", {
-            {"light_id", {{"type", "string"}, {"description", "ID or Name (e.g., '2' or 'Computer'). Use 'all' to target every light."}}},
-            {"on", {{"type", "boolean"}}},
-            // NOTE (not fixed yet - revisit when this tool gets reworked as
-            // a remote tool): no unit given here, so the model has no way
-            // to know this is Hue's own raw 0-254 'bri' scale (passed
-            // straight through to the bridge in handle_tool() below), not a
-            // 0-100 percentage. Seen for real: user asked for "100"
-            // expecting near-full brightness, got ~39% and had to ask again
-            // with "255" (silently clamped to the bridge's actual max, 254,
-            // by the Hue API itself). Either convert here (0-100 percent <->
-            // 0-254 bri) or spell the real range out in this description -
-            // either way, list_hue_lights' "Bri: " report further down has
-            // the same raw-scale issue and should get the same treatment.
-            {"brightness", {{"type", "integer"}}},
-            {"preset", {{"type", "string"}, {"enum", {"red", "green", "blue", "yellow", "magenta", "cyan", "orange", "purple", "pink", "white"}}}},
-            {"hex", {{"type", "string"}}},
-            {"alert", {{"type", "string"}, {"enum", {"none", "select", "lselect"}}}},
-            {"flash_count", {{"type", "integer"}}},
-            {"transition_ms", {{"type", "integer"}}}
-        }},
-        {"required", {"light_id"}}
-    };
-
-    json scene_params = {
-        {"type", "object"},
-        {"properties", {
-            {"action", {{"type", "string"}, {"enum", {"save", "load", "remove", "list"}}}},
-            {"name", {{"type", "string"}, {"description", "The name of a SAVED local scene. Do not use for general actions like 'all lights off'."}}}
-        }},
-        {"required", {"action"}}
-    };
-
-    add_tool(tools, "set_hue_light", "Controls Hue lights by ID or Name. Use this for general commands like 'turn off all lights' by setting light_id to 'all'. Always execute this tool call for every request, even if you believe the state is already set.", set_params);
-    add_tool(tools, "list_hue_lights", "Returns status of all connected lights. Always execute this tool call for every request, even if you believe you already know the state - never answer a status question (on/off, brightness, color) from a value stated earlier in the conversation.", {{"type", "object"}});
-    add_tool(tools, "manage_hue_scenes", "Saves, loads, or removes local light scenes. Only use for specific named snapshots (e.g., 'home', 'away').", scene_params);
-}
-
-void TOOL_HUE::handle_tool(ollama_system& chat, const std::string& name, const json& args, const std::string& tc_id) {
-    if (name == "list_hue_lights") {
-        if(!hue.refresh_lights()) {
-            std::string err = "Error: Could not reach the Hue Bridge.";
-            chat.send_tool_result(tc_id, err);
-            chat.integrate_tool_result("", err);
-            return;
-        }
-        auto& lights = hue.get_cached_lights();
-        std::stringstream ss;
-        ss << "Current Lights: ";
-        for (auto const& [id, state] : lights) {
-            // Bri is Hue's raw 0-254 scale, not a percentage - see the
-            // "brightness" param note in register_tool() above.
-            ss << "[" << id << "] " << state.name << " (Power: " << (state.on ? "ON" : "OFF")
-                << ", Bri: " << state.brightness << (state.reachable ? "" : " *UNREACHABLE*") << "), ";
-        }
-        std::string result = ss.str();
-        chat.send_tool_result(tc_id, result);
-        chat.integrate_tool_result("", result);
-    }
-    else if (name == "manage_hue_scenes") {
-        std::string action = args.at("action").get<std::string>();
-        std::string scene_name = args.value("name", "");
-
-        if (action == "list") {
-            auto& scenes = hue.get_scenes();
-            if (scenes.empty()) {
-                std::string msg = "No local scenes saved.";
-                chat.send_tool_result(tc_id, msg);
-                chat.integrate_tool_result("", msg);
-            } else {
-                std::stringstream ss;
-                ss << "Saved Scenes: ";
-                for (auto const& [sname, scene] : scenes) ss << scene.name << ", ";
-                std::string result = ss.str();
-                chat.send_tool_result(tc_id, result);
-                chat.integrate_tool_result("", result);
-            }
-        } else {
-            if (scene_name.empty()) {
-                std::string err = "Error: Scene name required for " + action;
-                chat.send_tool_result(tc_id, err);
-                chat.integrate_tool_result("", err);
-                return;
-            }
-            std::string res;
-            if (action == "save") res = hue.save_scene(scene_name);
-            else if (action == "load") res = hue.load_scene(scene_name);
-            else if (action == "remove") res = hue.remove_scene(scene_name);
-
-            chat.send_tool_result(tc_id, res);
-            chat.integrate_tool_result("", "Scene " + action + " operation: " + res);
-        }
-    }
-    else if (name == "set_hue_light") {
-        std::string target = args.at("light_id").get<std::string>();
-        json body;
-
-        if (args.contains("on")) body["on"] = args.at("on").get<bool>();
-        else if (!args.contains("alert") && !args.contains("flash_count")) body["on"] = true;
-
-        // Raw pass-through of whatever scale the model assumed for
-        // "brightness" - see that param's note in register_tool() above.
-        if (args.contains("brightness")) body["bri"] = args.at("brightness");
-
-        std::string alert_mode = args.value("alert", "none");
-        if (args.contains("flash_count")) {
-            int count = args.at("flash_count").get<int>();
-            alert_mode = (count > 1) ? "lselect" : "select";
-        }
-        if (alert_mode != "none") body["alert"] = alert_mode;
-
-        if (args.contains("transition_ms")) body["transitiontime"] = args.at("transition_ms").get<int>() / 100;
-
-        bool color_set = false;
-        if (args.contains("hex")) {
-            std::string hex = args.at("hex").get<std::string>();
-            if (!hex.empty()) {
-                if (hex[0] == '#') hex.erase(0, 1);
-                unsigned int r, g, b;
-                if (sscanf(hex.c_str(), "%02x%02x%02x", &r, &g, &b) == 3) {
-                    auto [x, y] = hue.rgbToXY(static_cast<int>(r), static_cast<int>(g), static_cast<int>(b));
-                    body["xy"] = {x, y};
-                    color_set = true;
-                }
-            }
-        }
-
-        if (!color_set && args.contains("preset")) {
-            static std::map<std::string, std::vector<double>> palette = {
-                {"red", {0.675, 0.322}}, {"green", {0.409, 0.518}}, {"blue", {0.167, 0.04}},
-                {"yellow", {0.432, 0.500}}, {"cyan", {0.157, 0.357}}, {"magenta", {0.41, 0.17}},
-                {"orange", {0.55, 0.41}}, {"purple", {0.27, 0.13}}, {"pink", {0.41, 0.21}},
-                {"white", {0.31, 0.32}}
-            };
-            if (palette.count(args.at("preset"))) {
-                body["xy"] = palette[args.at("preset")];
-            }
-        }
-
-        std::string res = hue.set_light(target, body);
-
-        if (args.contains("flash_count") && args.at("flash_count").get<int>() > 1) {
-            int count = args.at("flash_count").get<int>();
-            std::string resolved_id = hue.resolve_id(target);
-            if(!resolved_id.empty() && resolved_id != "all") {
-                std::thread([this, resolved_id, count]() {
-                    std::this_thread::sleep_for(std::chrono::seconds(count));
-                    this->hue.set_light(resolved_id, {{"alert", "none"}});
-                }).detach();
-            }
-        }
-
-        std::string summary = "Light command for " + target + " processed. Result: " + res;
-        chat.send_tool_result(tc_id, summary);
-        chat.integrate_tool_result("", summary);
-    }
-}
-
-bool TOOL_HUE::check(ollama_system& chat, CLASS_SYSTEM*, const ToolCall& tc) {
-    if (tc.name != "set_hue_light" && tc.name != "list_hue_lights" && tc.name != "manage_hue_scenes")
-        return false;
-
-    chat.log("[System] Tool call received: " + tc.name + "\n");
-
-    if (chat.TOOL_PERMISSIONS.HUE)
-        handle_tool(chat, tc.name, tc.arguments, tc.id);
-    else
-        chat.send_tool_result(tc.id, "Error: Tool '" + tc.name + "' is not enabled.");
-
-    return true;
-}
-
-void TOOL_HUE::monitor_tool(ollama_system& chat, CLASS_SYSTEM*)
-{
-    if (!chat.TOOL_PERMISSIONS.HUE) return;
-
-    static int counter = 0;
-    if (++counter % 10000 == 0) hue.refresh_lights();
-}
+// TOOL_HUE used to live here - moved to tools/hue/hue.cpp as a remote tool
+// (set_hue_light/list_hue_lights/manage_hue_scenes, same names/arguments,
+// same HUE_LIGHT_CLASS bridge logic) so it runs independently of olli's own
+// process/restart lifecycle, same reasoning as TOOL_TIMER's own move above.
+// TOOL_PERMISSIONS.HUE (tools_helper.h) and every place that sets it
+// (main.cpp, olla.cpp's jump-phrase block) deliberately stay - see
+// tools/hue/README.md and tools/PROTOCOL.md for why.
 
 // ----
 
@@ -543,7 +346,12 @@ void TOOL_DELEGATOR::handle_tool(ollama_system& chat, const std::string& name, c
     system_prompt += "\nRequest: " + task + "\n"
                         "Provide your expert response now. Do not include introductory pleasantries.";
 
-    sub_agent->history.push_back({ "system", system_prompt });
+    {
+        Message system_msg;
+        system_msg.role = "system";
+        system_msg.content = system_prompt;
+        sub_agent->history.push_back(system_msg);
+    }
 
     // 3. Send the task
     sub_agent->send("Generate response.", "user");

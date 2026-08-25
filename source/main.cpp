@@ -125,14 +125,15 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         // starts with default signal dispositions again.
         std::signal(SIGPIPE, SIG_IGN);
 
-        // TOOL_WEB_SEARCH/TOOL_HUE (tools.cpp/tools_helper.cpp) call
-        // curl_easy_init() directly without ever calling this first - libcurl
-        // does its own lazy global init on first use in that case, and its own
-        // docs are explicit that path is NOT thread-safe (it can call into
-        // other libraries' similarly-unsafe init routines). A real, if narrow,
-        // crash risk if two threads ever made their first curl call at the same
-        // moment (e.g. Hue's flash-effect logic runs on a detached thread - see
-        // TOOL_HUE::handle_tool). Doing it once here, before any thread that
+        // TOOL_WEB_SEARCH (tools.cpp) calls curl_easy_init() directly
+        // without ever calling this first - libcurl does its own lazy
+        // global init on first use in that case, and its own docs are
+        // explicit that path is NOT thread-safe (it can call into other
+        // libraries' similarly-unsafe init routines). A real, if narrow,
+        // crash risk if two threads ever made their first curl call at the
+        // same moment - this process already has more than one running
+        // tool-dispatch code (chat_thread, olla.h/.cpp; sidetrack.cpp's own
+        // background thread). Doing it once here, before any thread that
         // could touch curl gets spawned, closes that window entirely.
         curl_global_init(CURL_GLOBAL_DEFAULT);
 
@@ -153,9 +154,10 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         // instance ever creates (main chat, sidetrack, task-runner
         // background tasks) - review only, wiped fresh on every startup.
         // See debug_log_message()'s declaration in helper_olli.h for why
-        // this exists: prune_turn_scaffolding() (olla.cpp) now deletes
-        // 'tool'/DIRECTOR_NOTE messages from the live history (and so from
-        // history.json too) shortly after they're created.
+        // this exists: consolidate() (sidetrack.cpp) eventually folds old
+        // 'tool'/DIRECTOR_NOTE messages (and everything else) into an
+        // LLM-written summary in the live history/history.json - this is
+        // the one place the full, original wording survives afterward.
         debug_log_reset(settings_path / "debug_full_history.txt");
 
         // Flat-text, human-readable transcript (speaker labels, "Olli: " for
@@ -173,8 +175,6 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
             system.output.chat_log_user_label = label;
         }
         chat.PROPS.web_search_api_key = system.setings_vars.tool_web_search_apiKey;
-        chat.PROPS.hue_ip = system.setings_vars.tool_hue_lights_bridge_ip;
-        chat.PROPS.hue_key = system.setings_vars.tool_hue_lights_apiKey;
 
         chat.TOOL_PERMISSIONS.HUE = true;
         chat.TOOL_PERMISSIONS.THINKING = true;

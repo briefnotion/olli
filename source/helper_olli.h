@@ -31,12 +31,14 @@ std::string timestamp_prefix();
 // Raw, unfiltered, append-only debug log of every message ever added to any
 // ollama_system's history - main chat, sidetrack (consolidation/second-guess),
 // task-runner background instances, all of it, in the order it happened.
-// Review only: nothing in the program ever reads this back. Exists because
-// ollama_system::prune_turn_scaffolding() (olla.cpp) now deletes 'tool' and
-// DIRECTOR_NOTE 'system' messages from the live history shortly after
-// they're created, which also means they no longer survive into
-// history.json - this is the one place they still do, for whoever's
-// debugging a session afterward.
+// Review only: nothing in the program ever reads this back. 'tool' and
+// DIRECTOR_NOTE 'system' messages now stay in live history too (see
+// send_tool_result()'s comment, olla.cpp, for why the old immediate
+// deletion was removed) rather than only ever existing here - but
+// consolidate() (sidetrack.cpp) still eventually folds old messages into an
+// LLM-written summary in the live history/history.json, so this remains
+// the one place the full, unsummarized original wording survives for
+// whoever's debugging a session afterward.
 //
 // A free function taking plain strings (not a Message&) rather than a
 // method on ollama_system: Message is defined in olla.h, which includes
@@ -75,8 +77,6 @@ class Settings {
         //double volume = 0.75;       // test setting
 
         std::string tool_web_search_apiKey = "Enter_API_key_for_serpapi.com";
-        std::string tool_hue_lights_apiKey = "Enter_API_key_for_HUE_Lights";
-        std::string tool_hue_lights_bridge_ip = "127.0.0.1";
 
         // Set from the command line (e.g. `./olli ron`) so each person gets
         // their own settings/history/scenes under ~/olli_files_<profile_name>

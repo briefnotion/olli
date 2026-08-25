@@ -44,8 +44,8 @@ void add_tool(json& tools, const std::string& name, const std::string& descripti
 //     either way; false, untouched, if the name isn't this tool's - the
 //     dispatcher loop moves on to the next tool.
 //   - monitor_tool(): called every process() tick, for every tool - a tool
-//     that only makes sense when permitted (e.g. TOOL_HUE polling the
-//     bridge) checks chat.TOOL_PERMISSIONS itself, same as register_tool().
+//     that only makes sense when permitted checks chat.TOOL_PERMISSIONS
+//     itself, same as register_tool().
 // A no-op override (not an omitted method) is how a tool opts out of any of
 // these - keep new tools matching this shape rather than adding one-off
 // signatures.
@@ -91,25 +91,6 @@ class TOOL_SET_THINKING_MODE : public TOOL_BASE
         void handle_tool(ollama_system& chat, const std::string& name, const json& args, const std::string& tc_id);
 
     public:
-        void configure(ollama_system& chat) override;
-        void register_tool(ollama_system& chat, json& tools) override;
-        bool check(ollama_system& chat, CLASS_SYSTEM* system, const ToolCall& tc) override;
-        void monitor_tool(ollama_system& chat, CLASS_SYSTEM* system) override;
-};
-
-class TOOL_HUE : public TOOL_BASE
-{
-    private:
-        HUE_LIGHT_CLASS hue;
-
-        void set_credentials(const std::string& ip, const std::string& key, const std::string& path);
-        void handle_tool(ollama_system& chat, const std::string& name, const json& args, const std::string& tc_id);
-
-    public:
-        // Sends a direct system-level nudge forcing a tool call, for when the
-        // model just confirms a lighting request in text instead of acting on it.
-        void refresh_system_prompt(ollama_system& chat);
-
         void configure(ollama_system& chat) override;
         void register_tool(ollama_system& chat, json& tools) override;
         bool check(ollama_system& chat, CLASS_SYSTEM* system, const ToolCall& tc) override;
@@ -179,8 +160,9 @@ class TOOL_TASK_RUNNER : public TOOL_BASE
         void register_tool(ollama_system& chat, json& tools) override;
         bool check(ollama_system& chat, CLASS_SYSTEM* system, const ToolCall& tc) override;
 
-        // No periodic work needed - no automation-loop equivalent of
-        // TOOL_HUE's monitor_tool exists (yet). A no-op, but still called
+        // No periodic work needed - no automation-loop equivalent of a
+        // permission-gated background poll (e.g. TOOL_WEB_SEARCH, if it
+        // ever grew one) exists here (yet). A no-op, but still called
         // every process() tick like every other tool's.
         void monitor_tool(ollama_system& chat, CLASS_SYSTEM* system) override;
 };

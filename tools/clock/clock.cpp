@@ -27,6 +27,7 @@
 #include <sstream>
 #include <iomanip>
 #include <chrono>
+#include <csignal>
 #include <ctime>
 #include <vector>
 #include <map>
@@ -141,7 +142,7 @@ namespace {
     // it fires on the first tick after reconnecting instead of being lost.
     // Updates `status` too, same as handle_call()'s return value, so the
     // display reflects it immediately.
-    void handle_expired_timers(int fd, std::string& status)
+    void handle_expired_timers(int fd, std::string& status, std::chrono::steady_clock::time_point& last_sent)
     {
         auto now = std::chrono::steady_clock::now();
         for (auto& [label, timer] : active_timers) {
@@ -171,6 +172,11 @@ namespace {
             }
 
             send_line(fd, event_msg.dump());
+            // Same last_sent gap as handle_call()'s own comment in main() -
+            // this sends real data over the wire but, unlike that call
+            // site, had no way to update main()'s last_sent at all before
+            // last_sent was added to this function's own parameters.
+            last_sent = std::chrono::steady_clock::now();
             timer.event_sent = true;
             status = "Timer '" + label + "' expired.";
         }
@@ -675,6 +681,15 @@ namespace {
 
 int main(int argc, char* argv[])
 {
+    // Writing to a socket right as olli closes its end raises SIGPIPE,
+    // whose default disposition kills this whole process - ignoring it
+    // makes write() (send_line(), above) just return -1 (EPIPE) instead,
+    // same as olli's own core does for the same reason (see
+    // source/main.cpp's std::signal(SIGPIPE, SIG_IGN) call), and what
+    // tools/template/olli_link.cpp now does too. Set here, as early as
+    // possible, before the first connection attempt.
+    std::signal(SIGPIPE, SIG_IGN);
+
     std::string host = "127.0.0.1";
 
     if (argc > 1) {
@@ -798,6 +813,22 @@ int main(int argc, char* argv[])
                             std::string type = msg.value("type", "");
                             if (type == "call") {
                                 status = handle_call(fd, msg);
+                                // handle_call() sends its result via
+                                // send_line() internally but never touched
+                                // last_sent, so a call answered right after
+                                // an idle stretch could still have the
+                                // heartbeat block below queue a ping right
+                                // behind it - olli's TOOL_REMOTE::check()
+                                // (source/remote_tools.cpp) reads exactly
+                                // one line as "the" answer to its call, so
+                                // it would misread that ping as an
+                                // unexpected response and orphan the real
+                                // result. See ../PROTOCOL.md's ping/pong
+                                // section and
+                                // tools/template/olli_link.cpp's
+                                // OLLI_LINK::send_result() for where this
+                                // bug was first found and fixed.
+                                last_sent = std::chrono::steady_clock::now();
                             } else if (type == "ping") {
                                 send_line(fd, json{{"type", "pong"}}.dump());
                                 last_sent = std::chrono::steady_clock::now();
@@ -838,7 +869,7 @@ int main(int argc, char* argv[])
         // Timer expiry - independent of whatever arrived this tick above,
         // same as the heartbeat block. See handle_expired_timers()'s
         // comment.
-        if (!quit) handle_expired_timers(fd, status);
+        if (!quit) handle_expired_timers(fd, status, last_sent);
 
         if (!quit) redraw_screen(status);
     }

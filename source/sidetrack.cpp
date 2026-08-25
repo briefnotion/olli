@@ -297,7 +297,14 @@ void SIDETRACK_CLASS::thread_main()
 
                         "Format: Start immediately with the additional info or a follow-up thought. If the previous "
                         "response was truly sufficient, respond with ONLY the word DONE. "
-                        "Do not use brackets, do not use periods, do not say anything else.");
+                        "Do not use brackets, do not use periods, do not say anything else.",
+                        // Explicit role, not the default "user" - this is
+                        // scaffolding prompting the model to review itself,
+                        // not something a human typed. Left as the default
+                        // before, it was stored in SIDETRACK_CHAT_INSTANCE's
+                        // own history as role "user", structurally
+                        // indistinguishable from real user input.
+                        "system");
 
                     bool dummy_enable_keyboard_input = false; // This routine does not require keyboard input, but we pass the variable to satisfy the function signature.
 
@@ -447,10 +454,20 @@ void SIDETRACK_CLASS::check(ollama_system& main_instance)
     // Consolidation Routine
     {
         // Snapshot the real history for consolidate() (sidetrack thread,
-        // stage 2) to work on.
+        // stage 2) to work on. Locked: this (main_instance.history) is the
+        // same vector chat_thread's own send() (olla.cpp) pushes into under
+        // history_mutex - check() runs on the main thread, but chat_thread
+        // is a genuinely separate, concurrently-running thread for as long
+        // as a response is still streaming (ollama_system::input()'s poll
+        // loop doesn't join it until completion), so an unlocked read/write
+        // here would race a live send() call. Real, not theoretical - see
+        // git history for how this was found.
         if (CHAT_HISTORY_PROCESSING_STAGE == 1)
         {
-            temp_chat_history =  main_instance.history;
+            {
+                std::lock_guard<std::mutex> lock(history_mutex);
+                temp_chat_history = main_instance.history;
+            }
             CHAT_HISTORY_PROCESSING_STAGE = 2;
         }
 
@@ -466,7 +483,15 @@ void SIDETRACK_CLASS::check(ollama_system& main_instance)
         {
             if (INTERUPT.load() == false)
             {
-                main_instance.history = temp_chat_history;
+                // Lock scoped to just the assignment, not save_history() -
+                // history_write() (olla.cpp) takes history_mutex itself to
+                // read history back out, and it's a plain (non-recursive)
+                // std::mutex, so holding this across that call would
+                // deadlock the main thread against itself.
+                {
+                    std::lock_guard<std::mutex> lock(history_mutex);
+                    main_instance.history = temp_chat_history;
+                }
                 main_instance.save_history();
             }
             CHAT_HISTORY_PROCESSING_STAGE = 4;
@@ -477,9 +502,13 @@ void SIDETRACK_CLASS::check(ollama_system& main_instance)
     {
         // Snapshot the real history as context for the review prompt
         // (sidetrack thread, stage 2, seeds SIDETRACK_CHAT_INSTANCE with it).
+        // Locked - see the consolidation snapshot's comment above.
         if (SECOND_GUESS_PROCESSING_STAGE == 1)
         {
-            temp_chat_history =  main_instance.history;
+            {
+                std::lock_guard<std::mutex> lock(history_mutex);
+                temp_chat_history = main_instance.history;
+            }
             SECOND_GUESS_PROCESSING_STAGE = 2;
         }
 
@@ -502,6 +531,12 @@ void SIDETRACK_CLASS::check(ollama_system& main_instance)
             // (complete or partial/interrupted, either way worth keeping).
             if (!SIDETRACK_CHAT_INSTANCE.last_received.response.empty())
             {
+                // Locked - history_mutex is a single mutex shared by every
+                // ollama_system instance (olla.h), so this also covers the
+                // SIDETRACK_CHAT_INSTANCE.history read right below: the
+                // sidetrack thread's own send() calls push into that vector
+                // under the same lock.
+                std::lock_guard<std::mutex> lock(history_mutex);
                 main_instance.history.push_back(SIDETRACK_CHAT_INSTANCE.history.back());
             }
             SECOND_GUESS_PROCESSING_STAGE = 4;
@@ -519,13 +554,21 @@ void SIDETRACK_CLASS::check(ollama_system& main_instance)
             // became active again.
             if (INTERUPT.load() == false)
             {
-                std::vector<Message> protected_messages;
-                for (const Message& msg : main_instance.history) {
-                    if (msg.consolidation_level < 0) {
-                        protected_messages.push_back(msg);
+                // Locked - see the consolidation snapshot's comment further
+                // up for why (same main_instance.history, same chat_thread
+                // race), scoped to just the read+reassignment, not
+                // save_history() (history_write() takes this same lock
+                // itself).
+                {
+                    std::lock_guard<std::mutex> lock(history_mutex);
+                    std::vector<Message> protected_messages;
+                    for (const Message& msg : main_instance.history) {
+                        if (msg.consolidation_level < 0) {
+                            protected_messages.push_back(msg);
+                        }
                     }
+                    main_instance.history = protected_messages;
                 }
-                main_instance.history = protected_messages;
                 main_instance.save_history();
 
                 // Tell main.cpp to close the chat log too - see

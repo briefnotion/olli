@@ -43,6 +43,7 @@
 #include <sstream>
 #include <string>
 #include <cctype>
+#include <csignal>
 #include <cstdlib>
 #include <chrono>
 #include <algorithm>
@@ -772,6 +773,15 @@ namespace {
 
 int main(int argc, char* argv[])
 {
+    // Writing to a socket right as olli closes its end raises SIGPIPE,
+    // whose default disposition kills this whole process - ignoring it
+    // makes write() (send_line(), above) just return -1 (EPIPE) instead,
+    // same as olli's own core does for the same reason (see
+    // source/main.cpp's std::signal(SIGPIPE, SIG_IGN) call), and what
+    // tools/template/olli_link.cpp now does too. Set here, as early as
+    // possible, before the first connection attempt.
+    std::signal(SIGPIPE, SIG_IGN);
+
     std::string host = "127.0.0.1";
     bool test_mode = false;
 
@@ -892,6 +902,23 @@ int main(int argc, char* argv[])
                         std::string type = msg.value("type", "");
                         if (type == "call") {
                             status = handle_call(fd, msg);
+                            // handle_call() sends its result via send_line()
+                            // internally but never touched last_sent, so a
+                            // call answered right after an idle stretch
+                            // could still have the heartbeat block below
+                            // queue a ping right behind it. Not just
+                            // cosmetic: olli's own TOOL_REMOTE::check()
+                            // (source/remote_tools.cpp) reads exactly one
+                            // line as "the" answer to its call - if a ping
+                            // beat the real result onto the wire, it would
+                            // misread the ping as an unexpected response and
+                            // orphan the real result to desync a later,
+                            // unrelated call. See ../PROTOCOL.md's ping/pong
+                            // section ("either message counts as proof of
+                            // life") and tools/template/olli_link.cpp's
+                            // OLLI_LINK::send_result() for where this same
+                            // bug was first found and fixed.
+                            last_sent = std::chrono::steady_clock::now();
                         } else if (type == "ping") {
                             send_line(fd, json{{"type", "pong"}}.dump());
                             last_sent = std::chrono::steady_clock::now();
@@ -986,6 +1013,11 @@ int main(int argc, char* argv[])
                     status = (going_home ? "Would fire home action (test mode): " : "Would fire away action (test mode): ") + message;
                 } else if (fd >= 0) {
                     fire_transition_event(fd, message, going_home ? settings.on_home_action : settings.on_away_action);
+                    // Same last_sent gap as handle_call()'s own comment
+                    // above - fire_transition_event() sends real data over
+                    // the wire but has no access to main()'s last_sent to
+                    // update it itself.
+                    last_sent = std::chrono::steady_clock::now();
                     status = going_home ? "Fired home action." : "Fired away action.";
                 }
                 last_fired_state = agreed;

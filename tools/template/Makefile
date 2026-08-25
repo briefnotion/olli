@@ -5,14 +5,15 @@
 # "Building the C++ core" section).
 #
 # Copying this directory for a new tool? Rename template_tool.cpp and the
-# two spots below (the .cpp filename and the binary name) to match - see
-# README.md in this directory for the full walkthrough.
+# two spots below (the .cpp filename and the binary name) to match -
+# olli_link.cpp/.hpp stay named as-is, they're generic plumbing, not
+# tool-specific. See README.md in this directory for the full walkthrough.
 
 CXX ?= g++
 CXXFLAGS = -std=c++17 -Wall -Wextra -I../../../json/include
 
-template_tool: template_tool.cpp
-	$(CXX) $(CXXFLAGS) -o template_tool template_tool.cpp
+template_tool: template_tool.cpp olli_link.cpp olli_link.hpp
+	$(CXX) $(CXXFLAGS) -o template_tool template_tool.cpp olli_link.cpp
 
 clean:
 	rm -f template_tool

@@ -11,11 +11,14 @@ registered.
 
 **Writing a new remote tool?** Start from
 [`tools/template/`](template/template_tool.cpp) - copy the directory, fill
-in the two spots marked `CUSTOMIZE #1`, and all the connection/
-registration/heartbeat/reconnect plumbing described below is already
-handled. See [`tools/template/README.md`](template/README.md) for the exact
-steps, and [`tools/clock/clock.cpp`](clock/clock.cpp) for a fuller worked
-example (a real ASCII-art clock built on the same template).
+in the spots marked `CUSTOMIZE`, and all the connection/registration/
+heartbeat/reconnect plumbing described below (now split into
+[`olli_link.hpp`/`olli_link.cpp`](template/olli_link.hpp) alongside it) is
+already handled. See [`tools/template/README.md`](template/README.md) for
+the exact steps, and [`tools/clock/clock.cpp`](clock/clock.cpp) for a
+fuller worked example (a real ASCII-art clock - predates this split, so its
+plumbing is still inline in the one file, but its tool-specific logic like
+timers and identity handling is still the best reference for that part).
 
 Status (2026-08-22): All 7 steps of the original plan are done and confirmed
 working end-to-end against a real olli session - see git history for
@@ -321,12 +324,19 @@ or, on failure:
   same repo for now. Splitting a subdirectory out into its own repo later,
   if one ever needs a genuinely separate release cadence, is a clean move
   from here - not a decision this locks in.
-- No shared protocol-helper library, deliberately - `tools/clock/` and
-  `tools/template/` each hand-roll their own newline-delimited JSON read/
-  write directly, and stay that way even now that there's a second one.
-  Copying `tools/template/` is the actual mechanism for starting a new tool
-  (see its README.md), so every tool being one fully self-contained,
-  readable-end-to-end `.cpp` file is the point, not duplication to clean up
-  later. Revisit only if the copied plumbing becomes a real maintenance
-  burden across enough tools - see `tools/template/README.md`'s own note on
-  this.
+- No shared protocol-helper library *across* tools, deliberately - there's
+  still nothing at `tools/`-level that more than one tool depends on.
+  Within a tool's own directory, though, `tools/template/` (2026-08-25)
+  splits the connect/reconnect/heartbeat/framing plumbing into its own
+  `olli_link.hpp`/`olli_link.cpp` pair, separate from the tool-specific
+  file (what it registers, how it answers a call) - see
+  `tools/template/README.md`'s "Layout" section for the boundary. Copying
+  `tools/template/` (all three files now, not just the one `.cpp`) is still
+  the actual mechanism for starting a new tool, and each tool's build stays
+  fully self-contained - this only changes how one tool's own code is
+  organized, not whether tools share anything with each other.
+  `tools/clock/` and `tools/presence/` haven't been migrated to this shape
+  yet and still hand-roll the same plumbing inline in one file each - see
+  `tools/clock/clock.cpp` for that older, single-file style, which is still
+  the more fully-worked example of the tool-specific logic itself
+  (timers, identity handling) until it's ported.

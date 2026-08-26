@@ -5,7 +5,6 @@
 
 #include "helper_olli.h"
 #include "audio_control.h"
-#include "user_io.h"
 #include "remote_tools.h"
 
 class CLASS_SYSTEM
@@ -14,8 +13,12 @@ class CLASS_SYSTEM
 
     public:
         Settings setings_vars;
-        KEYBOARD_INPUT key_input;
-        OUTPUT_CLASS output;
+
+        // Keyboard input and screen display used to live here (key_input/
+        // output) - both now live on IO_WORKER_CLASS (io_worker.h/.cpp)
+        // instead, which owns them exclusively (they have zero built-in
+        // thread-safety of their own - see IO_WORKER_CLASS's class
+        // comment). main.cpp constructs an IO_WORKER_CLASS alongside this.
 
         AUDIO_CONTROL_CLASS audio_control;
 

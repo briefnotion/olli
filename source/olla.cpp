@@ -18,15 +18,14 @@ ollama_system::ollama_system()
 
 void ollama_system::log(const std::string& text)
 {
-    std::lock_guard<std::mutex> lock(output_buffer_mutex);
-    log_buffer += text;
+    comms.log(text);
 }
 
 void ollama_system::pull_background_output(OUTPUT_CLASS& output)
 {
     for (auto& task : background_tasks)
     {
-        output.get_response(*task);
+        output.get_response(task->comms);
     }
 }
 
@@ -34,6 +33,7 @@ ollama_system& ollama_system::spawn_background_task()
 {
     auto new_instance = std::make_unique<ollama_system>();
     ollama_system& ref = *new_instance;
+    ref.comms.audio = comms.audio; // same speaker as the spawning instance
     background_tasks.push_back(std::move(new_instance));
     return ref;
 }
@@ -334,6 +334,7 @@ void ollama_system::send(const std::string& user_input, const std::string& role)
         {"keep_alive", PROPS.keep_alive_seconds},
         {"options", {
             {"num_ctx", PROPS.num_ctx},
+            {"repeat_penalty", PROPS.repeat_penalty},
             //{"temperature", 0}
         }}
     };
@@ -360,13 +361,13 @@ void ollama_system::send(const std::string& user_input, const std::string& role)
             "application/json",
             [&](const char *data, size_t data_length) {
                 if (status.interrupt_signal.load()) {
-                    return false; 
+                    return false;
                 }
 
                 std::string chunk(data, data_length);
                 try {
                     auto j_chunk = json::parse(chunk);
-                    
+
                     if (j_chunk.value("done", false)) {
                         stream_received_done_flag = true;
                     }
@@ -390,16 +391,16 @@ void ollama_system::send(const std::string& user_input, const std::string& role)
                             accumulated_thinking += t;
                             {
                                 std::lock_guard<std::mutex> lock(output_buffer_mutex);
-                                thinking_buffer += t;
+                                comms.thinking_buffer += t;
                             }
                         }
                         if (msg_chunk.contains("content")) {
                             std::string c = msg_chunk["content"];
                             accumulated_content += c;
-                            tts_buffer += c;
+                            comms.tts_buffer += c;
                             {
                                 std::lock_guard<std::mutex> lock(output_buffer_mutex);
-                                response_buffer += c;
+                                comms.response_buffer += c;
                             }
                         }
 
@@ -474,7 +475,7 @@ void ollama_system::send(const std::string& user_input, const std::string& role)
     // stays the only thing that actually writes chat output to the screen.
     {
         std::lock_guard<std::mutex> lock(output_buffer_mutex);
-        response_buffer += "\n";
+        comms.response_buffer += "\n";
     }
     status.is_active = false;
 }
@@ -686,80 +687,90 @@ void ollama_system::unload_model()
 
 void ollama_system::write_to_tts()
 {
-    if (!tts_buffer.empty())
+    if (!comms.tts_buffer.empty())
     {
-        if ((tts_buffer.find_first_of(".!?,:;") != std::string::npos || tts_buffer.length() > 60) ||
+        if ((comms.tts_buffer.find_first_of(".!?,:;") != std::string::npos || comms.tts_buffer.length() > 60) ||
         status.is_active == false)
         {
-            if (g_audio_control != nullptr)
+            if (comms.audio != nullptr)
             {
-                g_audio_control->speak(tts_filter(tts_buffer));
+                comms.audio->speak(tts_filter(comms.tts_buffer));
             }
-            tts_buffer.clear();
+            comms.tts_buffer.clear();
         }
     }
 }
 
 bool ollama_system::jump_input(CLASS_SYSTEM& System)
 {
-    if (trim(System.key_input.LINE) == "bye" || trim(System.key_input.LINE) == "quit" || trim(System.key_input.LINE) == "Goodbye.")
+    // key_input now lives on IO_WORKER_CLASS, not CLASS_SYSTEM - the
+    // submitted line arrives here via comms instead (see input(), which
+    // calls this). comms is already this instance's own member, no
+    // parameter needed for it.
+    if (trim(comms.submitted_line) == "bye" || trim(comms.submitted_line) == "quit" || trim(comms.submitted_line) == "Goodbye.")
     {
-        //System.key_input.reset();
         request_exit();
         return true;
     }
-    else if (trim(System.key_input.LINE) == "I'm home." || 
-                trim(System.key_input.LINE) == "I'm awake." || 
-                trim(System.key_input.LINE) == "Lights on." || 
-                trim(System.key_input.LINE) == "I'm leaving." || 
-                trim(System.key_input.LINE) == "Lights off." || 
-                trim(System.key_input.LINE) == "I'm sleeping.")
+    else if (trim(comms.submitted_line) == "I'm home." ||
+                trim(comms.submitted_line) == "I'm awake." ||
+                trim(comms.submitted_line) == "Lights on." ||
+                trim(comms.submitted_line) == "I'm leaving." ||
+                trim(comms.submitted_line) == "Lights off." ||
+                trim(comms.submitted_line) == "I'm sleeping.")
     {
         ollama_system jump_instance;
+        jump_instance.comms.audio = &System.audio_control; // reaches process() -> write_to_tts()
 
         jump_instance.OLLAMA_OPENING = "Run any task given without question or hesitation. "
                                         "Responses or input from user will not be capable.";
 
         jump_instance.PROPS.stream_output = false;
 
+        // jump_instance has no run_automation_task tool available (only
+        // HUE is granted below), so dispatch_tool_call() never actually
+        // toggles this - same throwaway-dummy pattern sidetrack.cpp uses
+        // for its own process() calls, and for the same reason: nothing
+        // here needs to reach the real IO_WORKER_CLASS::key_input.
+        std::atomic<bool> dummy_enable_keyboard_input{true};
+
         // ----
-        log("[JUMP] [" + trim(System.key_input.LINE) + "] \n");
+        log("[JUMP] [" + trim(comms.submitted_line) + "] \n");
 
         // ----
         // This needs compartmentalization and definable configuration.
         // ----
 
-        if (trim(System.key_input.LINE) == "I'm home." || 
-            trim(System.key_input.LINE) == "I'm awake." || 
-            trim(System.key_input.LINE) == "Lights on.")
+        if (trim(comms.submitted_line) == "I'm home." ||
+            trim(comms.submitted_line) == "I'm awake." ||
+            trim(comms.submitted_line) == "Lights on.")
         {
             System.audio_control.VOCA_manual_set(DEF_VOCA_SLEEP);
             jump_instance.TOOL_PERMISSIONS.HUE = true;
             jump_instance.open(PROPS);
             jump_instance.send("Load the repose scene.");
-            jump_instance.process(&System, System.key_input.PROPS.ENABLED);
+            jump_instance.process(&System, dummy_enable_keyboard_input);
         }
-        else if (trim(System.key_input.LINE) == "I'm leaving.")
+        else if (trim(comms.submitted_line) == "I'm leaving.")
         {
             System.audio_control.VOCA_manual_set(DEF_VOCA_SLEEP);
             jump_instance.TOOL_PERMISSIONS.HUE = true;
             jump_instance.open(PROPS);
             jump_instance.send("Load the labor scene.");
-            jump_instance.process(&System, System.key_input.PROPS.ENABLED);
+            jump_instance.process(&System, dummy_enable_keyboard_input);
         }
-        else if (trim(System.key_input.LINE) == "I'm sleeping." || 
-                    trim(System.key_input.LINE) == "Lights off." )
+        else if (trim(comms.submitted_line) == "I'm sleeping." ||
+                    trim(comms.submitted_line) == "Lights off." )
         {
             System.audio_control.VOCA_manual_set(DEF_VOCA_SLEEP);
             jump_instance.TOOL_PERMISSIONS.HUE = true;
             jump_instance.open(PROPS);
             jump_instance.send("Load the slumber scene.");
-            jump_instance.process(&System, System.key_input.PROPS.ENABLED);
+            jump_instance.process(&System, dummy_enable_keyboard_input);
         }
 
         integrate_tool_result("Describe what happened.", gather_history());
-        //System.key_input.reset();
-        
+
         return true;
     }
     else
@@ -774,11 +785,15 @@ bool ollama_system::jump_input(CLASS_SYSTEM& System)
  */
 bool ollama_system::input(CLASS_SYSTEM& System)
 {
-    // 1. ORIGINAL INTERRUPT LOGIC
-    if (is_processing && System.key_input.INTERRUPTED) 
+    // 1. INTERRUPT - key_input.INTERRUPTED now lives on IO_WORKER_CLASS;
+    // comms.stop_requested is how it reaches here (relayed by
+    // IO_WORKER_CLASS::exchange() - see io_worker.cpp). Cleared here,
+    // right where it's actually consumed - the "host clears the hosted
+    // side comms when needed" half of that design.
+    if (is_processing && comms.stop_requested)
     {
         log(".");
-        System.key_input.reset();
+        comms.stop_requested = false;
 
         stop();
         if (chat_thread.joinable()) chat_thread.join();
@@ -786,35 +801,49 @@ bool ollama_system::input(CLASS_SYSTEM& System)
         log("\n[Interrupting for new input...]\n");
     }
 
-    // 2. ORIGINAL INPUT LOGIC
-    if (System.key_input.ENTER_PRESSED) 
+    // 2. INPUT - comms.send/submitted_line replace key_input.ENTER_PRESSED/LINE.
+    if (comms.send)
     {
-        if (jump_input(System)) 
+        // A real Enter keypress sets INTERRUPTED alongside ENTER_PRESSED
+        // (see KEYBOARD_INPUT::keyboard_input(), user_io.cpp) - staged and
+        // relayed together as comms.stop_requested/comms.send from the
+        // same event (io_worker.cpp). If branch 1 above didn't consume
+        // stop_requested (is_processing was false - the normal case for a
+        // fresh submission), it would otherwise dangle true and fire
+        // branch 1 spuriously on some LATER tick once is_processing does
+        // become true, right as this very submission starts streaming -
+        // aborting it and logging a bogus "[Interrupting for new
+        // input...]"/"[System: Response Interrupted by User]" the user
+        // never asked for. The original code avoided this for free since
+        // KEYBOARD_INPUT::reset() cleared LINE/ENTER_PRESSED/INTERRUPTED
+        // together, unconditionally, right here - this replicates that.
+        comms.stop_requested = false;
+
+        if (jump_input(System))
         {
-            System.key_input.reset();
+            comms.send = false;
+            comms.submitted_line.clear();
             return false;
         }
-        else 
+        else
         {
             status.interrupt_signal = false;
             is_processing = true;
-            
-            std::string tmp_line = System.key_input.LINE;
-            System.key_input.reset();
 
-            // Record what was actually submitted in the transcript - LINE
-            // already ends in '\n' (see KEYBOARD_INPUT::keyboard_input()),
-            // matching the voice path's own user_input append in main.cpp.
-            // Without this, a typed message vanishes the instant Enter is
-            // pressed (key_input.reset() above just cleared LINE) and never
-            // appears anywhere in OUTPUT_CLASS - only voice input did.
-            System.output.user_input += tmp_line;
+            std::string tmp_line = comms.submitted_line;
+            comms.send = false;
+            comms.submitted_line.clear();
+
+            // No output.user_input echo needed here - IO_WORKER_CLASS
+            // already did it (io_worker.cpp thread_main(), step 5) at the
+            // moment it captured the line, same-thread as output itself.
+            // output isn't reachable from ollama_system anymore anyway.
 
             // Ensure we don't leak a thread if one was somehow left joinable
             if (chat_thread.joinable()) chat_thread.join();
 
             // Launch the background thread exactly as before
-            chat_thread = std::thread([this, tmp_line]() 
+            chat_thread = std::thread([this, tmp_line]()
             {
                 try {
                     send(tmp_line);
@@ -850,7 +879,7 @@ bool ollama_system::input(CLASS_SYSTEM& System)
  * 4. Trigger background consolidation (memory cleanup) every 60 seconds.
  */
 
-void ollama_system::process(CLASS_SYSTEM* system, bool& Keyboard_Input_Enabled)
+void ollama_system::process(CLASS_SYSTEM* system, std::atomic<bool>& Keyboard_Input_Enabled)
 {
     // ---------------------------------------------------------
     // PART 0: WRITE HISTORY TO FILE

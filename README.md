@@ -26,7 +26,9 @@ happen directly in-process, no sockets, files, or second process involved:
 - **Listening** goes through `Voca` (`voca.hpp`/`voca.cpp`), an offline
   wake-word + speech-to-text engine (whisper.cpp) running on its own capture
   and transcription threads. `AUDIO_CONTROL_CLASS` (`audio_control.h`/`.cpp`)
-  owns it and drains transcripts once per main-loop tick in `main.cpp`.
+  owns it; `IO_WORKER_CLASS` (`io_worker.h`/`.cpp` - see [Display](#display))
+  polls it once per its own tick, on its own thread, independent of the
+  chat/model logic in `main.cpp`.
 - **Speaking** goes through `TextToSpeech` (`tts.hpp`/`tts.cpp`), which shells
   out to `espeak-ng` for synthesis and `aplay` for playback on a background
   thread.
@@ -313,14 +315,29 @@ there's no runtime toggle.
 ### How this stays decoupled from the chat engine
 
 `ollama_system` (the chat engine) never talks to `OUTPUT_CLASS` directly - it
-just has three public string members (`response_buffer`, `thinking_buffer`,
-`log_buffer`, in `olla.h`) that tool handlers and the streaming code append
-to, guarded by one shared `output_buffer_mutex`. `OUTPUT_CLASS::get_response()`
-is what reaches *in* and pulls (and clears) those buffers each tick - a pull,
-not a push, so `ollama_system` and its tool handlers never need a pointer
-back to the display layer. The same pull happens for sidetrack's background
-"second guess" review and for task-runner automation instances, so their
-output shows up on screen too, not just the main conversation's.
+just has one `COMMS comms` member (`comms.h`/`.cpp`), bundling the four
+buffers (`response_buffer`, `thinking_buffer`, `tts_buffer`, `log_buffer`)
+that tool handlers and the streaming code append to, guarded by one shared
+`output_buffer_mutex`. `OUTPUT_CLASS::get_response(COMMS&)` is what reaches
+*in* and pulls (and clears) those buffers each tick - a pull, not a push, so
+`ollama_system` and its tool handlers never need a pointer back to the
+display layer. The same pull happens for sidetrack's background "second
+guess" review and for task-runner automation instances, so their output
+shows up on screen too, not just the main conversation's.
+
+Keyboard input, voice-event polling, and both `display()` calls above all
+happen on `IO_WORKER_CLASS`'s own background thread (`io_worker.h`/`.cpp`),
+not `main.cpp`'s - `KEYBOARD_INPUT` and `OUTPUT_CLASS` have no thread-safety
+of their own (raw termios manipulation, unlocked fields, and ncurses itself
+is single-thread-only), so this worker is their sole owner and sole caller
+for its entire lifetime. `comms` is the only thing that crosses the boundary
+back to `main.cpp`'s own loop, via `IO_WORKER_CLASS::exchange(COMMS&)`
+(called once per `main.cpp` tick) - a submitted line, an interrupt, or an
+exit request, relayed under a small two-flag lock. `COMMS::audio`
+(`comms.h`) works the same way for reaching `AUDIO_CONTROL_CLASS` - a
+pointer on `COMMS` itself rather than a process-wide global, so a future
+different `COMMS` (a remote session, say) isn't forced to share the one
+local speaker.
 
 ---
 
@@ -358,9 +375,15 @@ conversation is considered "over."
 source/
 ├── main.cpp / main.h          Entry point and the main event loop.
 ├── olla.{h,cpp}               ollama_system: chat engine, streaming, history, tool dispatch.
+├── comms.{h,cpp}               COMMS: the four output buffers + audio pointer + input-direction
+│                               signals every ollama_system carries - the one thing that crosses
+│                               the IO_WORKER_CLASS thread boundary (see Display below).
 ├── tools.{h,cpp}               TOOL_BASE and every TOOL_* tool implementation (see Tools below).
 ├── helper_olli.{h,cpp}        Settings (profile loading/saving).
-├── user_io.{h,cpp}            KEYBOARD_INPUT (raw-mode input) and OUTPUT_CLASS (all screen output).
+├── user_io.{h,cpp}            KEYBOARD_INPUT (raw-mode input) and OUTPUT_CLASS (all screen output) -
+│                               both owned exclusively by IO_WORKER_CLASS, not CLASS_SYSTEM.
+├── io_worker.{h,cpp}           IO_WORKER_CLASS: owns keyboard input, voice-event polling, and
+│                               screen drawing on its own background thread - see Display below.
 ├── audio_control.{h,cpp}      Owns TTS and Voca in-process, coordinates the two.
 ├── tts.{hpp,cpp}              TextToSpeech: in-process synthesis (espeak-ng) + playback (aplay).
 ├── voca.{hpp,cpp}             Voca: in-process wake-word + speech-to-text (whisper.cpp).
@@ -369,7 +392,8 @@ source/
 ├── stringthings.{h,cpp}       General-purpose string utility library.
 ├── fled_time.{h,cpp}          Timing / frame-pacing helpers used by the background threads.
 ├── threading.{h,cpp}          Thin std::async thread wrapper.
-├── system.h                   Aggregates Settings + keyboard input + output + audio into one object.
+├── system.h                   Aggregates Settings + audio + user identity + remote-tool listener
+│                               into one object (keyboard/display moved to IO_WORKER_CLASS above).
 └── CMakeLists.txt             Build definition.
 ```
 

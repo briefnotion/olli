@@ -11,11 +11,13 @@
 #include <csignal>
 #include <sys/ioctl.h>
 
-// For ollama_system's definition (response_buffer/thinking_buffer) and
-// output_buffer_mutex - user_io.h only forward-declares ollama_system to
-// avoid a circular include (olla.h -> system.h -> user_io.h), so the actual
-// implementation needs the real header.
-#include "olla.h"
+// get_response() takes COMMS& directly (comms.h, included via user_io.h)
+// rather than ollama_system& - no need for olla.h here at all, which
+// sidesteps what would otherwise be a circular include (olla.h -> system.h
+// -> user_io.h). timestamp_prefix() below used to come in transitively
+// through olla.h -> helper_olli.h; needs its own include now that path's
+// gone.
+#include "helper_olli.h"
 
 // Only pulled in here - see the forward-declared WINDOW/PANEL in user_io.h
 // for why.
@@ -154,15 +156,15 @@ void OUTPUT_CLASS::end_ncurses()
     }
 }
 
-void OUTPUT_CLASS::get_response(ollama_system& chat)
+void OUTPUT_CLASS::get_response(COMMS& comms)
 {
     std::lock_guard<std::mutex> lock(output_buffer_mutex);
-    chat_response += chat.response_buffer;
-    chat.response_buffer.clear();
-    chat_thinking += chat.thinking_buffer;
-    chat.thinking_buffer.clear();
-    system_message += chat.log_buffer;
-    chat.log_buffer.clear();
+    chat_response += comms.response_buffer;
+    comms.response_buffer.clear();
+    chat_thinking += comms.thinking_buffer;
+    comms.thinking_buffer.clear();
+    system_message += comms.log_buffer;
+    comms.log_buffer.clear();
 }
 
 void OUTPUT_CLASS::append_to_chat_log(bool is_user, const std::string& text)

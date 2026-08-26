@@ -18,14 +18,15 @@
 #include "helper_olli.h"
 #include "tools_helper.h"
 #include "stringthings.h"
+#include "comms.h"
 
 using json = nlohmann::json;
 
 // --- FORWARD DECLARATION ---
 
 class ollama_system;
-class AUDIO_CONTROL_CLASS; // for the text-to-speech output hook; see g_audio_control below
 class CLASS_SYSTEM; // see the CLASS_SYSTEM* parameter's comment on TOOL_BASE::check() (tools.h)
+class OUTPUT_CLASS; // for pull_background_output() below - see user_io.h (now reached via IO_WORKER_CLASS, not CLASS_SYSTEM)
 
 // Declared before Message - Message::tool_calls (below) holds a vector of
 // these, and needs the type (and its own JSON (de)serialization) already
@@ -152,6 +153,18 @@ class OLLAMA_SYSTEM_PROPERTIES
         bool stream_output = true;
         bool use_thinking = true;
 
+        // Discourages the model from reproducing a recent sequence of
+        // tokens verbatim. Ollama's own default when this option is
+        // omitted entirely (as it was before this field existed) is
+        // ~1.1. Set explicitly higher here to test whether it helps with
+        // a real observed failure mode: the model locking onto a short
+        // phrase and repeating it verbatim across unrelated follow-up
+        // turns, confirmed via a raw wire-level capture of an actual
+        // session - see the wire-log findings, no other fix tried that
+        // day changed this behavior. Untested as of adding this - next
+        // thing to actually verify.
+        double repeat_penalty = 1.3;
+
         // Sent to Ollama as "keep_alive" on every request - how long it
         // keeps the model loaded in memory after a request. -1 means
         // indefinitely (until explicitly unloaded or the Ollama server
@@ -206,7 +219,7 @@ class ollama_system {
         // anything from pending_tool_calls, which never contains that name.
         // 'system' is just forwarded to each tool's check() - see that
         // parameter's own comment on TOOL_BASE::check() (tools.h).
-        void dispatch_tool_call(const ToolCall& tc, CLASS_SYSTEM* system, bool& Keyboard_Input_Enabled);
+        void dispatch_tool_call(const ToolCall& tc, CLASS_SYSTEM* system, std::atomic<bool>& Keyboard_Input_Enabled);
 
         bool saveHistoryToJson(std::filesystem::path filepath);
         bool loadHistoryFromJson(std::filesystem::path filepath);
@@ -221,7 +234,7 @@ class ollama_system {
         // where there isn't one to give (see TOOL_BASE::check()'s comment in
         // tools.h) - just forwarded down to dispatch_tool_call() for each
         // tool's check()/monitor_tool().
-        void handle_instance_tools(CLASS_SYSTEM* system, bool& Keyboard_Input_Enabled);
+        void handle_instance_tools(CLASS_SYSTEM* system, std::atomic<bool>& Keyboard_Input_Enabled);
 
         // Explicit flush to disk, e.g. right after consolidation commits or on shutdown.
         void save_history();
@@ -293,29 +306,15 @@ class ollama_system {
         std::vector<Message> history;
         ChatResult last_received;
 
-        std::string tts_buffer = "";
+        // response_buffer/thinking_buffer/tts_buffer/log_buffer - what used
+        // to be four loose members here - now live bundled in comms (see
+        // comms.h for what each one is and its cross-thread/locking shape).
+        // One COMMS per ollama_system instance, same as before this move.
+        COMMS comms;
 
-        // Live streaming output for the screen - appended to from send()'s
-        // streaming loop (chat_thread), drained by OUTPUT_CLASS::get_response()
-        // (see user_io.h/.cpp), which runs on whichever thread calls it once
-        // per tick. Same cross-thread shape as tts_buffer above, but for the
-        // screen instead of speech. Both guarded by output_buffer_mutex below
-        // - lock it around any access to either.
-        std::string response_buffer = "";
-        std::string thinking_buffer = "";
-
-        // Status/debug text ("[System] Tool call received: ...", "[Delegator]
-        // ...", etc.) that used to go straight to std::cout from tool
-        // handlers and other ollama_system methods. Same cross-thread shape
-        // and same output_buffer_mutex as the two buffers above - appended
-        // to from wherever a tool handler already has `chat`/`this` in
-        // scope (no new parameter needed), drained into
-        // OUTPUT_CLASS::system_message by get_response().
-        std::string log_buffer = "";
-
-        // Appends to log_buffer under output_buffer_mutex - the one place
-        // that lock actually gets taken for it, so call sites (tool
-        // handlers, etc.) don't each need their own lock_guard.
+        // Thin forwarder to comms.log() - kept here so the many existing
+        // `chat.log(...)` call sites (tool handlers, etc.) didn't all need
+        // to become `chat.comms.log(...)`.
         void log(const std::string& text);
 
         // Pulls every background task's response_buffer/thinking_buffer/
@@ -379,7 +378,7 @@ class ollama_system {
         // tools.h for why (main-thread-only call sites pass the real
         // CLASS_SYSTEM&, e.g. main.cpp/jump_input(); sidetrack.cpp's
         // background-thread call passes nullptr instead).
-        void process(CLASS_SYSTEM* system, bool& Keyboard_Input_Enabled);
+        void process(CLASS_SYSTEM* system, std::atomic<bool>& Keyboard_Input_Enabled);
 
 };
 
@@ -394,18 +393,16 @@ class ollama_system {
 // "multiple definition" linker error.
 inline std::mutex history_mutex;
 
-// Same reasoning as history_mutex above (must be 'inline', not 'static'),
-// covering ollama_system::response_buffer and ::thinking_buffer instead of
-// ::history. Kept separate from history_mutex so locking one doesn't block
-// the other - they're touched by different code for different reasons.
-inline std::mutex output_buffer_mutex;
+// output_buffer_mutex (same 'inline' reasoning as history_mutex above,
+// covering every instance's comms.response_buffer/thinking_buffer/
+// log_buffer instead of ::history) now lives in comms.h, included above -
+// kept separate from history_mutex there too, so locking one doesn't block
+// the other.
 
-// The one text-to-speech output for the whole process. There's only ever
-// one physical speaker, so every ollama_system instance (the main chat,
-// sidetrack's second-guess review, task-runner/delegator sub-instances)
-// routes spoken output through the same AUDIO_CONTROL_CLASS rather than
-// each needing to be wired up individually. Set once in main.cpp; null
-// until then, in which case write_to_tts() just no-ops.
-inline AUDIO_CONTROL_CLASS* g_audio_control = nullptr;
+// The text-to-speech output hook used to live here as a single process-wide
+// global (g_audio_control) - it's now COMMS::audio (comms.h) instead, set
+// per-instance (main.cpp, spawn_background_task(), jump_input(),
+// SIDETRACK_CLASS::create()) rather than once for the whole process. See
+// COMMS::audio's own comment for why.
 
 #endif

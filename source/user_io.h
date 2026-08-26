@@ -5,6 +5,7 @@
 #include <termios.h>
 #include <filesystem>
 #include <optional>
+#include <atomic>
 
 #include "fled_time.h"
 
@@ -21,7 +22,12 @@ class KEYBOARD_INPUT_PROPERTIES
 {
     public:
 
-    bool ENABLED = false;
+    // atomic, not plain bool: toggled from ollama_system::dispatch_tool_call()
+    // (main thread, during run_automation_task) to stop IO_WORKER_CLASS's
+    // background thread from also reading stdin while that tool's own
+    // separate blocking keyboard loop (tools.cpp) is - two real threads
+    // touching this, not just two logical call sites.
+    std::atomic<bool> ENABLED{false};
 
     // When OUTPUT_CLASS::display_with_ncurses() is the active display path,
     // this must be false - ncurses owns the screen buffer, and raw cout
@@ -72,7 +78,7 @@ class KEYBOARD_INPUT
 
 // ----
 
-class ollama_system; // for get_response() below - see olla.h
+#include "comms.h" // for get_response() below
 
 // Opaque ncurses window handle, forward-declared so this header (included
 // almost everywhere) never has to pull in <curses.h> - that header #defines
@@ -109,11 +115,12 @@ typedef struct panel PANEL;
  *   - chat_thinking:   the assistant's thinking block, as it streams in
  *
  * chat_response/chat_thinking don't get written to directly - they're
- * populated by get_response(), which pulls (and clears) an ollama_system
- * instance's own response_buffer/thinking_buffer (see olla.h). That's a
- * separate cross-thread hop, since those live on whichever ollama_system's
- * chat_thread is streaming a reply; system_message/user_input are plain
- * public strings any same-thread caller can append to directly.
+ * populated by get_response(), which pulls (and clears) a passed-in
+ * COMMS's own response_buffer/thinking_buffer (see comms.h). That's a
+ * separate cross-thread hop, since that COMMS lives on whichever
+ * ollama_system's chat_thread is streaming a reply; system_message/
+ * user_input are plain public strings any same-thread caller can append
+ * to directly.
  *
  * display() is meant to be called once per main-loop tick (see main.cpp),
  * right before the loop goes back around - it prints whatever's accumulated
@@ -265,11 +272,15 @@ class OUTPUT_CLASS
         // visibility.
         void end_ncurses();
 
-        // Pulls and clears chat's response_buffer/thinking_buffer into this
-        // instance's own chat_response/chat_thinking, under chat's
-        // output_buffer_mutex (olla.h). Safe to call every tick even if
-        // chat hasn't produced anything new since the last call.
-        void get_response(ollama_system& chat);
+        // Pulls and clears comms.response_buffer/comms.thinking_buffer/
+        // comms.log_buffer into this instance's own chat_response/
+        // chat_thinking/system_message, under output_buffer_mutex
+        // (comms.h). Only ever touches the passed-in COMMS, not the rest
+        // of whatever ollama_system instance it belongs to - hence taking
+        // COMMS& directly rather than ollama_system&. Safe to call every
+        // tick even if comms hasn't picked up anything new since the last
+        // call.
+        void get_response(COMMS& comms);
 
         // Prints whatever's in all four buckets to the screen, then clears
         // them.

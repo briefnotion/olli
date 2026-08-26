@@ -3,6 +3,13 @@
 
 #include "sidetrack.h"
 
+// For OUTPUT_CLASS's real definition (chat_thinking/chat_response/
+// system_message below) - sidetrack.h only forward-declares it (via
+// olla.h), which used to reach here as a full definition transitively
+// through system.h -> user_io.h before key_input/output moved off
+// CLASS_SYSTEM onto IO_WORKER_CLASS.
+#include "user_io.h"
+
 // ----
 
 /**
@@ -103,9 +110,10 @@ SIDETRACK_CLASS::SIDETRACK_CLASS()
 {
 }
 
-void SIDETRACK_CLASS::create(OLLAMA_SYSTEM_PROPERTIES Ollama_Properties)
+void SIDETRACK_CLASS::create(OLLAMA_SYSTEM_PROPERTIES Ollama_Properties, AUDIO_CONTROL_CLASS* audio)
 {
     SIDETRACK_CHAT_INSTANCE.PROPS = Ollama_Properties;
+    SIDETRACK_CHAT_INSTANCE.comms.audio = audio;
 }
 
 /**
@@ -306,7 +314,7 @@ void SIDETRACK_CLASS::thread_main()
                         // indistinguishable from real user input.
                         "system");
 
-                    bool dummy_enable_keyboard_input = false; // This routine does not require keyboard input, but we pass the variable to satisfy the function signature.
+                    std::atomic<bool> dummy_enable_keyboard_input{false}; // This routine does not require keyboard input, but we pass the variable to satisfy the function signature.
 
 
                     // send() above already blocked until the response was
@@ -316,9 +324,9 @@ void SIDETRACK_CLASS::thread_main()
                     // this loop - send() only ever sets that flag when it's
                     // launched on its own thread (as the main chat does),
                     // which this call isn't. So this loop is really just
-                    // draining tts_buffer via process() calls (a handful of
+                    // draining comms.tts_buffer via process() calls (a handful of
                     // iterations at most), not "waiting for streaming."
-                    while (SIDETRACK_CHAT_INSTANCE.is_processing || !SIDETRACK_CHAT_INSTANCE.tts_buffer.empty())
+                    while (SIDETRACK_CHAT_INSTANCE.is_processing || !SIDETRACK_CHAT_INSTANCE.comms.tts_buffer.empty())
                     {
                         if (starts_with(SIDETRACK_CHAT_INSTANCE.last_received.response, "DONE"))
                         {
@@ -350,7 +358,7 @@ void SIDETRACK_CLASS::thread_main()
                     //std::cout << "Sidetrack: Post-chat review complete. Wrapping up." << std::endl;
 
                     SIDETRACK_CHAT_INSTANCE.history.clear();
-                    SIDETRACK_CHAT_INSTANCE.tts_buffer.clear();
+                    SIDETRACK_CHAT_INSTANCE.comms.tts_buffer.clear();
 
                     SECOND_GUESS_PROCESSING_STAGE = 0;
                     ROUTINE = 0;
@@ -597,21 +605,21 @@ void SIDETRACK_CLASS::pull_output(OUTPUT_CLASS& output)
     // responses from display").
     std::lock_guard<std::mutex> lock(output_buffer_mutex);
 
-    if (starts_with(SIDETRACK_CHAT_INSTANCE.response_buffer, "DONE"))
+    if (starts_with(SIDETRACK_CHAT_INSTANCE.comms.response_buffer, "DONE"))
     {
-        output.chat_thinking += SIDETRACK_CHAT_INSTANCE.response_buffer;
+        output.chat_thinking += SIDETRACK_CHAT_INSTANCE.comms.response_buffer;
     }
     else
     {
-        output.chat_response += SIDETRACK_CHAT_INSTANCE.response_buffer;
+        output.chat_response += SIDETRACK_CHAT_INSTANCE.comms.response_buffer;
     }
-    SIDETRACK_CHAT_INSTANCE.response_buffer.clear();
+    SIDETRACK_CHAT_INSTANCE.comms.response_buffer.clear();
 
-    output.chat_thinking += SIDETRACK_CHAT_INSTANCE.thinking_buffer;
-    SIDETRACK_CHAT_INSTANCE.thinking_buffer.clear();
+    output.chat_thinking += SIDETRACK_CHAT_INSTANCE.comms.thinking_buffer;
+    SIDETRACK_CHAT_INSTANCE.comms.thinking_buffer.clear();
 
-    output.system_message += SIDETRACK_CHAT_INSTANCE.log_buffer;
-    SIDETRACK_CHAT_INSTANCE.log_buffer.clear();
+    output.system_message += SIDETRACK_CHAT_INSTANCE.comms.log_buffer;
+    SIDETRACK_CHAT_INSTANCE.comms.log_buffer.clear();
 }
 
 

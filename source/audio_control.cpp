@@ -49,17 +49,29 @@ void AUDIO_CONTROL_CLASS::create(const std::filesystem::path& filePath)
         // Interrupt-only: signals the main loop to stop TTS/sidetrack
         // without submitting anything new as a chat message.
         std::lock_guard<std::mutex> lock(voca_events_mutex);
-        voca_events.push_back(VOCA_EVENT{""});
+        voca_events.push_back(VOCA_EVENT{"", ""});
     };
 
-    callbacks.onWake = [](const std::string& trigger)
+    // Same queue/mutex onInterrupt above already uses - not a raw cout,
+    // since this callback runs on Voca's own thread and a direct terminal
+    // write would either get overwritten by the next ncurses redraw or
+    // briefly corrupt the screen. IO_WORKER_CLASS::thread_main() (io_worker
+    // .cpp) is the one place that actually turns this into a displayed
+    // system message, via COMMS::log() - same as any other status text.
+    callbacks.onWake = [this](const std::string& trigger)
     {
-        std::cout << "\n[VOCA] awake (\"" << trigger << "\")" << std::endl;
+        std::lock_guard<std::mutex> lock(voca_events_mutex);
+        VOCA_EVENT event;
+        event.status_message = "[VOCA] awake (\"" + trigger + "\")\n";
+        voca_events.push_back(event);
     };
 
-    callbacks.onSleep = []()
+    callbacks.onSleep = [this]()
     {
-        std::cout << "\n[VOCA] asleep" << std::endl;
+        std::lock_guard<std::mutex> lock(voca_events_mutex);
+        VOCA_EVENT event;
+        event.status_message = "[VOCA] asleep\n";
+        voca_events.push_back(event);
     };
 
     voca = std::make_unique<Voca>((settings_path / "models" / "ggml-small.en.bin").string(),
@@ -119,7 +131,7 @@ bool AUDIO_CONTROL_CLASS::popVocaEvent(VOCA_EVENT& out)
 
     if (voca != nullptr && voca->textAvailable())
     {
-        out = VOCA_EVENT{voca->getNextLine()};
+        out = VOCA_EVENT{voca->getNextLine(), ""};
         return true;
     }
 

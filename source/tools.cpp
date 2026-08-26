@@ -577,7 +577,7 @@ void TOOL_TASK_RUNNER::monitor_tool(ollama_system&, CLASS_SYSTEM*) {}
 // then routes to whichever tool's check() claims tc.name (see the
 // TOOL_BASE comment in tools.h) - an unrecognized name gets an error
 // result back instead of ever reaching a tool.
-void ollama_system::dispatch_tool_call(const ToolCall& tc, CLASS_SYSTEM* system, bool& Keyboard_Input_Enabled)
+void ollama_system::dispatch_tool_call(const ToolCall& tc, CLASS_SYSTEM* system, std::atomic<bool>& Keyboard_Input_Enabled)
 {
     // TODO: special-cased until ollama_system can reach CLASS_SYSTEM
     // directly (see TODO.md) - only run_automation_task needs the main
@@ -612,7 +612,7 @@ void ollama_system::dispatch_tool_call(const ToolCall& tc, CLASS_SYSTEM* system,
     if (disable_keyboard) Keyboard_Input_Enabled = true;
 }
 
-void ollama_system::handle_instance_tools(CLASS_SYSTEM* system, bool& Keyboard_Input_Enabled)
+void ollama_system::handle_instance_tools(CLASS_SYSTEM* system, std::atomic<bool>& Keyboard_Input_Enabled)
 {
     // System-injected calls (e.g. a timer's on_expire action - see
     // TOOL_REMOTE::monitor_tool()) - drained independently of the model's

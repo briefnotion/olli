@@ -83,20 +83,26 @@ namespace {
  * own freshly exec()'d process every time; has no idea it's being
  * supervised at all.
  *
- * Three moving pieces, two of which run on their own background thread:
+ * Four moving pieces, three of which run on their own background thread:
  *   - chat (ollama_system)       the conversation itself; a chat_thread is
  *                                 spawned per turn (see ollama_system::input)
  *   - sidetrack (SIDETRACK_CLASS) history consolidation + the post-turn
  *                                 "second guess" review - see sidetrack.h
  *                                 for the two-thread design
+ *   - io_worker (IO_WORKER_CLASS) keyboard input, voice input (polled from
+ *                                 system.audio_control), and screen drawing
+ *                                 - see io_worker.h. The main loop below
+ *                                 only ever talks to it via exchange
+ *                                 (chat.comms) once per tick.
  *   - system.audio_control        owns text-to-speech (audio_control.h);
- *                                 speech is driven by g_audio_control
- *                                 (declared in olla.h), a single shared
- *                                 pointer any ollama_system instance can
- *                                 speak through, not just the main one
+ *                                 speech is driven by each ollama_system
+ *                                 instance's own comms.audio (comms.h),
+ *                                 pointed at this same instance below so
+ *                                 chat, sidetrack, etc. can all speak
+ *                                 through it
  * VOCA (speech-to-text) runs in-process via system.audio_control (see
- * audio_control.h/voca.hpp) - its transcripts are drained each loop tick
- * below and fed into system.key_input the same way a typed line would be.
+ * audio_control.h/voca.hpp) - its transcripts are polled and merged into a
+ * submission by io_worker's own thread, same as a typed line.
  *
  * crash_restart: true if this run followed a crash (see main()'s
  * --crash-restart marker) - logged once startup completes, so a crash is a
@@ -141,6 +147,7 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
 
         ollama_system chat;
         SIDETRACK_CLASS sidetrack;
+        IO_WORKER_CLASS io_worker; // keyboard input + screen display - see io_worker.h
 
         system.setings_vars.profile_name = profile_name;
         system.user.name = profile_name;
@@ -164,7 +171,7 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         // the assistant) kept independent of history.json's own structured,
         // periodically-rewritten persistence - see
         // OUTPUT_CLASS::append_to_chat_log() in user_io.cpp.
-        system.output.chat_log_path = settings_path / "chat_log.txt";
+        io_worker.output.chat_log_path = settings_path / "chat_log.txt";
         if (!profile_name.empty())
         {
             // profile_name is already lower_case()'d above (for the
@@ -172,7 +179,7 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
             // for the log label, matching "Olli: "'s own capitalization.
             std::string label = profile_name;
             label[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(label[0])));
-            system.output.chat_log_user_label = label;
+            io_worker.output.chat_log_user_label = label;
         }
         chat.PROPS.web_search_api_key = system.setings_vars.tool_web_search_apiKey;
 
@@ -191,43 +198,34 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
             chat.log("[System] Recovered from a previous crash - starting fresh.\n");
         }
 
-        // Wires up TTS output (see g_audio_control's declaration in olla.h).
-        // Every ollama_system instance shares this one pointer - including
-        // sidetrack's SIDETRACK_CHAT_INSTANCE - so its own generated text
-        // (the "second guess" review) can be spoken too, not just chat's.
-        g_audio_control = &system.audio_control;
+        // Wires up TTS output (see COMMS::audio's comment in comms.h).
+        // sidetrack.create() below points SIDETRACK_CHAT_INSTANCE's own
+        // comms.audio at the same instance, so its generated text (the
+        // "second guess" review) can be spoken too, not just chat's.
+        chat.comms.audio = &system.audio_control;
 
         // Voca's whisper model lives in the shared ~/olli_files/models, not the
         // per-profile directory (see Settings::get_shared_path()).
         system.audio_control.create(system.setings_vars.get_shared_path());
         system.audio_control.thread_start();
 
-        sidetrack.create(chat.PROPS);
+        sidetrack.create(chat.PROPS, &system.audio_control);
         sidetrack.thread_start();
 
-        //
-        system.key_input.PROPS.ENABLED = true;
+        io_worker.create(chat, sidetrack, system.audio_control);
+        io_worker.key_input.PROPS.ENABLED = true;
         // Under ncurses, keyboard_input()'s own raw per-character echo would
         // corrupt the ncurses-controlled screen - the input window renders the
         // typed line itself instead (see display_with_ncurses()).
-        system.key_input.PROPS.RAW_ECHO = !USE_NCURSES;
+        io_worker.key_input.PROPS.RAW_ECHO = !USE_NCURSES;
+        io_worker.thread_start();
 
-        // Flush anything chat.open() already logged (e.g. "[System] Connecting
-        // to...") before the prompt appears - otherwise it sits in log_buffer
-        // until the loop's first tick and prints after "You: " instead of
-        // before it. Under ncurses this is also what triggers its lazy init,
-        // so the very first thing on screen is already the real windowed
-        // layout instead of a plain-terminal banner that ncurses would
-        // immediately paper over anyway.
-        system.output.get_response(chat);
-        if (USE_NCURSES)
+        // No separate priming call needed here (there used to be one - a
+        // one-off get_response()+display() to flush chat.open()'s startup
+        // log before the loop's first tick) - IO_WORKER_CLASS::thread_main()
+        // does exactly that, every tick, starting with its very first one.
+        if (!USE_NCURSES)
         {
-            system.output.display_with_ncurses(system.key_input);
-        }
-        else
-        {
-            system.output.display();
-
             std::cout << "\n--- Chat Started (Type 'bye' or 'quit' or 'Goodbye.' to stop) ---\n" << std::endl;
             std::cout << "You: " << std::flush;
         }
@@ -244,18 +242,13 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         // which stops an in-flight response before returning (see olla.cpp).
         while (chat.running)
         {
-            // 1. Non-blocking check for user input
-
-            // process text from the keyboard. Sets INTERRUPTED (below) and/or
-            // ENTER_PRESSED (read by chat.input()).
-            system.key_input.keyboard_input();
-
             // Non-blocking check for a remote tool completing its registration
             // handshake (see system.remote_tools' declaration in system.h and
             // tools/PROTOCOL.md) - if one just did, hand it to chat as a real
             // tool. Scoped to the main chat instance only for now, not
             // background task-runner/jump instances - see PROTOCOL.md's Scope
-            // section.
+            // section. Unrelated to IO - stays here rather than moving onto
+            // io_worker.
             auto remote_registration = system.remote_tools.poll();
             if (remote_registration.has_value())
             {
@@ -275,73 +268,35 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
                 chat.register_remote_tool(std::move(remote_tool));
             }
 
-            // Ctrl+C - see EXIT_REQUESTED's comment in user_io.h for why this
-            // needs its own handling instead of a real SIGINT. Checked before
-            // anything else this tick since it should win over any in-progress
-            // work, same as it would as a real signal.
-            if (system.key_input.EXIT_REQUESTED)
+            // Keyboard, voice, and screen drawing all happen entirely on
+            // io_worker's own background thread now (see io_worker.h's
+            // class comment). This relays whatever it staged this tick
+            // (a submitted line, a stop-request, an exit-request) into
+            // chat.comms.
+            io_worker.exchange(chat.comms);
+
+            // Ctrl+C - see COMMS::exit_requested's comment (comms.h) for
+            // why this needs its own handling instead of a real SIGINT.
+            // Checked before anything else this tick since it should win
+            // over any in-progress work, same as it would as a real signal.
+            if (chat.comms.exit_requested)
             {
-                system.key_input.EXIT_REQUESTED = false;
+                chat.comms.exit_requested = false;
                 chat.request_exit();
                 continue;
             }
 
-            // Pop at most one pending voice event this tick (see
-            // AUDIO_CONTROL_CLASS::popVocaEvent) and feed it into key_input the
-            // same way a typed line would arrive. Deliberately not a "drain
-            // everything" loop: chat.input() below only acts on this single
-            // LINE/ENTER_PRESSED snapshot, and it starts an async chat turn -
-            // if two voice events were said back-to-back, draining both here
-            // would silently lose the first one (overwritten before
-            // chat.input() ever sees it) instead of giving each its own turn.
-            // One per tick means any backlog drains naturally over the next
-            // few ~20ms iterations instead.
-            //
-            // An empty event's text means "interrupt only" (e.g. "stop talking"
-            // heard while TTS is speaking) - INTERRUPTED still fires below, but
-            // nothing gets submitted as a new chat message.
-            VOCA_EVENT voca_event;
-            if (system.audio_control.popVocaEvent(voca_event))
-            {
-                if (!voca_event.text.empty())
-                {
-                    system.key_input.LINE = voca_event.text;
-                    system.output.user_input += voca_event.text + "\n";
-                    system.key_input.ENTER_PRESSED = true;
-                }
-                system.key_input.INTERRUPTED = true;
-            }
-
-            if (system.key_input.INTERRUPTED)
-            {
-                // Same trigger, two independent things to stop: the sidetrack
-                // signal aborts an in-flight second-guess review (see
-                // SIDETRACK_CLASS::check in sidetrack.cpp - it's the one that
-                // actually calls .stop() on that instance, since this thread
-                // isn't the one blocked inside its LLM call). stop_speaking()
-                // separately kills whatever's currently playing/queued in TTS.
-                // Neither of these submits the input the user just gave -
-                // that's chat.input()'s job, right below.
-                sidetrack.SIGNALS.INTERUPT_SIGNAL = true;
-                system.audio_control.stop_speaking();
-            }
-
-            // Stops an in-flight response if INTERRUPTED, and/or submits
-            // whatever's in LINE as a new message if ENTER_PRESSED. Returns
-            // true once a full response cycle has completed (see olla.cpp for
-            // the exact conditions), at which point we're ready for new input.
-            // chat_thread is already joined by the time this returns true, so
-            // response_buffer holds everything send() ever wrote, including its
-            // final trailing newline - the get_response()/display() call below
-            // must run before "You: " prints, or that last newline (and any
-            // last few streamed characters) would print after the prompt
-            // instead of before it.
+            // Stops an in-flight response if comms.stop_requested, and/or
+            // submits comms.submitted_line as a new message if comms.send.
+            // Returns true once a full response cycle has completed (see
+            // olla.cpp for the exact conditions), at which point we're
+            // ready for new input.
             bool response_complete = chat.input(system);
 
             // Dispatches any pending tool calls, flushes new text to TTS
             // (write_to_tts), periodically writes history to disk if it
             // changed. See ollama_system::process in olla.cpp.
-            chat.process(&system, system.key_input.PROPS.ENABLED);
+            chat.process(&system, io_worker.key_input.PROPS.ENABLED);
 
             // Runs sidetrack's main-thread half of both routines' state
             // machines - see SIDETRACK_CLASS::check's doc comment.
@@ -353,24 +308,16 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
                 // A cleared context is a conversation sidetrack considers
                 // "over" - close the chat log the same way real program exit
                 // does (see the other close_chat_log() call site below).
-                system.output.close_chat_log();
+                // Relayed through comms rather than called directly - the
+                // worker thread is still running here, and it's the only
+                // safe caller of output's methods (see COMMS::
+                // close_chat_log_requested's comment, comms.h).
+                chat.comms.close_chat_log_requested.store(true);
             }
 
-            // Pull whatever chat, its background tasks (task-runner automations),
-            // and sidetrack's second-guess review each streamed since the last
-            // tick, then show everything accumulated this tick - see
-            // OUTPUT_CLASS in user_io.h/.cpp.
-            system.output.get_response(chat);
-            chat.pull_background_output(system.output);
-            sidetrack.pull_output(system.output);
-            if (USE_NCURSES)
-            {
-                system.output.display_with_ncurses(system.key_input);
-            }
-            else
-            {
-                system.output.display();
-            }
+            // Drawing (and pulling chat/background-tasks/sidetrack output
+            // into it) now happens every io_worker tick, not here - see
+            // IO_WORKER_CLASS::thread_main().
 
             if (response_complete)
             {
@@ -395,10 +342,16 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
 
+        // io_worker owns key_input/output exclusively - its thread must be
+        // fully stopped (joined) before anything else touches them again,
+        // including the end_ncurses()/close_chat_log() calls right below.
+        // See IO_WORKER_CLASS's class comment (io_worker.h).
+        io_worker.thread_stop();
+
         // Hand the real terminal screen back before printing any of the
         // shutdown messages below - otherwise they'd print while ncurses'
         // alternate screen is still up and never actually be seen.
-        system.output.end_ncurses();
+        io_worker.output.end_ncurses();
 
         std::cout << "\n--- Chat Ended ---" << std::endl;
 
@@ -410,8 +363,10 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         // Archives this run's chat_log.txt into chat_logs/<timestamp>.chat_log.txt
         // - see OUTPUT_CLASS::close_chat_log() in user_io.cpp. The other call
         // site is inside the loop above, when sidetrack's context-clear routine
-        // signals it just cleared history.
-        system.output.close_chat_log();
+        // signals it just cleared history. Safe to call directly here (unlike
+        // that other site) since io_worker.thread_stop() above already
+        // guarantees the worker thread isn't running anymore.
+        io_worker.output.close_chat_log();
 
         // PROPS.keep_alive_seconds (-1 by default) keeps the model loaded in
         // Ollama indefinitely across requests - that's independent of this

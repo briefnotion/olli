@@ -151,7 +151,7 @@ class SIDETRACK_CLASS
         //     (only if this cycle actually produced one - see check()) and
         //     advance this to 4.
         // 4 = thread_main() clears SIDETRACK_CHAT_INSTANCE's history/
-        //     tts_buffer and resets this to 0 and ROUTINE to 0.
+        //     comms.tts_buffer and resets this to 0 and ROUTINE to 0.
 
         // Routine 3: Clear-Context Routine
         int CLEAR_CONTEXT_STAGE = 0;
@@ -191,9 +191,11 @@ class SIDETRACK_CLASS
         SIDETRACK_CLASS();
 
         // Copies the given properties (model, host, port, thinking, etc)
-        // into SIDETRACK_CHAT_INSTANCE.PROPS. Called once from main.cpp
-        // after the main chat instance is configured.
-        void create(OLLAMA_SYSTEM_PROPERTIES Ollama_Properties);
+        // into SIDETRACK_CHAT_INSTANCE.PROPS, and points its comms.audio at
+        // the given AUDIO_CONTROL_CLASS (nullptr is fine - same no-op
+        // write_to_tts() behavior as any other instance). Called once from
+        // main.cpp after the main chat instance is configured.
+        void create(OLLAMA_SYSTEM_PROPERTIES Ollama_Properties, AUDIO_CONTROL_CLASS* audio);
 
         // Runs on its own background thread (started by thread_start).
         // Drives both routines' state machines; see the class-level comment.

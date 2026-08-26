@@ -130,6 +130,8 @@ FetchContent_MakeAvailable(whisper_cpp)
 add_executable(olli
     ../source/main.cpp
     ../source/olla.cpp
+    ../source/comms.cpp
+    ../source/io_worker.cpp
     ../source/tools.cpp
     ../source/remote_tools.cpp
     ../source/helper_olli.cpp

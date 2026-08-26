@@ -41,6 +41,32 @@ not needed elsewhere.
 
 ## Session & model behavior
 
+- **`repeat_penalty` added 2026-08-26, untested** - `OLLAMA_SYSTEM_PROPERTIES
+  ::repeat_penalty` (olla.h, default `1.3` vs. Ollama's own bare default of
+  ~1.1 when the option is omitted, which is what every request sent before
+  this) is now sent as `options.repeat_penalty` on every request
+  (`ollama_system::send()`, olla.cpp). Added to test a real finding: a raw
+  wire-level capture (request/response exactly as sent/received, not the
+  app's parsed view - see the reverted debug-log design in [[olli-time-
+  repeat-bug]] memory if rebuilding it) showed the model's *primary*
+  response locking onto a short phrase and repeating it verbatim across
+  several unrelated follow-up turns in the same conversation, independent
+  of sidetrack's second-guess review or any prompt wording tried. Six
+  different code/prompt fixes targeting other hypotheses were tried and
+  found to change nothing, then reverted - see the memory entry for the
+  full list (not duplicated here, this is the one thing kept). Test this
+  before trying anything else on that memory entry.
+- **Presence tool bug found, NOT fixed (reverted 2026-08-26)** -
+  `tools/presence/presence.cpp`'s `handle_identity()` resets
+  `last_fired_state = PresenceState::UNKNOWN` on *every* reconnect to
+  olli, not just when the tracked profile changes - so a plain olli
+  restart while already home re-fires a fresh "just got home" event for
+  no real reason. Confirmed via the wire log above. A fix (guard the
+  reset on the profile actually changing) was implemented and verified
+  logically sound, then reverted along with everything else that session
+  per an explicit "undo everything since the checkpoint" request - it was
+  never the wrong fix, just swept up in the revert. Reapply on its own
+  merits next time this file is touched.
 - **Pre-load the model at startup** - right now the model only loads on the
   first message; see if Ollama's keep-alive/preload mechanism (an empty
   `/api/chat` request, or similar) can warm it up during olli's own startup
@@ -134,24 +160,26 @@ not needed elsewhere.
   `<tools>{"name": "get_current_time", ...}</tools>` line in the log.
   The log should probably strip that kind of artifact even where the
   on-screen display doesn't bother.
-- **Revisit bringing Voca and Lira into input/output, using today's buffer
-  pattern** - see "What we built today: the buffer-pull pattern" below for
-  the mechanism this would reuse. When this first came up (before the
-  ncurses work), the conclusion was "don't move `voca` into `KEYBOARD_INPUT`"
-  - see `AUDIO_CONTROL_CLASS::adjust_audio_files()` (audio_control.cpp),
-  which polls `tts.isSpeaking()` every ~500ms on its own thread and calls
-  `voca->pause()`/`resume()` accordingly. That coupling was the real
-  blocker, not the callbacks. Worth another look now that the buffer-pull
-  pattern exists: it might not remove the AUDIO_CONTROL_CLASS-owns-both
-  coupling (Voca and TTS still need to poll each other's state regardless of
-  which class holds the pointer), but it could still be the right shape for
-  getting Voca's transcript events and TTS's spoken/speaking status
-  *visible* through `OUTPUT_CLASS`/`KEYBOARD_INPUT` the same clean way
-  `ollama_system`'s response/thinking/log now are, without necessarily
-  relocating `voca`/`tts` themselves. Needs real design thought, not a
-  quick change - re-read the earlier discussion in full before starting.
+- **Done (2026-08-26)**: keyboard input and screen drawing moved off the
+  main thread onto their own `IO_WORKER_CLASS` (`io_worker.h`/`.cpp`) -
+  see "What we built today: IO_WORKER_CLASS + COMMS" below.
+  `AUDIO_CONTROL_CLASS`'s own coupling (it still owns both Voca and TTS,
+  still polls `tts.isSpeaking()` to pause/resume Voca) was deliberately
+  left as-is per the note this replaces - the worker just became the sole
+  poller of `popVocaEvent()` instead of `main.cpp`, not a relocation of
+  `voca`/`tts` themselves.
 
-### What we built today: the buffer-pull pattern
+### What we built earlier: the buffer-pull pattern (superseded 2026-08-26)
+
+**Update 2026-08-26**: the three loose members this section describes
+(`response_buffer`/`thinking_buffer`/`log_buffer` directly on
+`ollama_system`) got bundled into one `COMMS comms` member instead
+(`comms.h`/`.cpp`, gained a fourth buffer `tts_buffer` and an `audio`
+pointer along the way) - `OUTPUT_CLASS::get_response()` now takes
+`COMMS&`, not `ollama_system&`. The *shape* described below (pull, not
+push; producer never knows a consumer exists) is unchanged and still the
+reason this works - see "What we built today: IO_WORKER_CLASS + COMMS"
+below for what actually changed and why.
 
 The problem this solved: `ollama_system::send()` streams a response on its
 own background thread (`chat_thread`), but the code that displays things to
@@ -194,16 +222,67 @@ currently pulls sidetrack and background tasks but nothing pulls the
 delegator's `sub_agent`, which can't be reached this way at all - it's a
 local variable, synchronous, gone before any tick could reach it).
 
+### What we built today (2026-08-26): IO_WORKER_CLASS + COMMS
+
+The problem this solved: keyboard reading, voice-event polling, and screen
+drawing all lived inline in `main.cpp`'s own loop, interleaved with
+chat/model logic (`chat.process()`, `sidetrack.check()`) on the same
+thread. `KEYBOARD_INPUT`/`OUTPUT_CLASS` (`user_io.h`/`.cpp`) turned out to
+have zero built-in thread-safety of their own once we looked closely - raw
+termios manipulation on `STDIN_FILENO`, unlocked plain fields, and ncurses
+itself is single-thread-only - so moving them off the main thread meant
+picking one thread as their sole, permanent owner rather than sharing
+access.
+
+1. **`COMMS` (`comms.h`/`.cpp`)** - bundled `ollama_system`'s four output
+   buffers (see the superseded section above) plus a new `audio` pointer
+   (replacing a process-wide `g_audio_control` global - each instance's
+   `COMMS` points at whichever `AUDIO_CONTROL_CLASS` it should speak
+   through, so a future different `COMMS`, e.g. a remote session, doesn't
+   have to share the one local speaker) and three input-direction signals:
+   `send`/`submitted_line` (a line ready to submit), `stop_requested`
+   (abort in-flight generation/speech), `exit_requested` (Ctrl+C).
+2. **`IO_WORKER_CLASS` (`io_worker.h`/`.cpp`)** - owns `KEYBOARD_INPUT`/
+   `OUTPUT_CLASS` directly as members (moved off `CLASS_SYSTEM`, which no
+   longer has them), runs its own background thread. Grew out of a
+   generic `WORKER_THREAD_CLASS` skeleton (`templates/worker_thread.h`/
+   `.cpp` - copy-and-rename template, not meant to be included directly)
+   built earlier the same day as a reusable background-thread-plus-
+   main-thread-check-in shape modeled on `SIDETRACK_CLASS`'s own two-
+   thread design.
+   - `thread_main()` (its own thread): reads the keyboard, polls/merges
+     voice events, interrupts `sidetrack`/`audio` directly (it already
+     holds references to both), drains `chat`/background-tasks/
+     sidetrack's comms into the screen, draws. Stages anything the main
+     thread needs to know (a submission, an interrupt, an exit request)
+     into a locally-held `COMMS` first.
+   - `exchange(COMMS& comms)` (called once per `main.cpp`'s own tick,
+     passed `chat.comms`): the *only* thing that crosses the thread
+     boundary is `comms` - relays whatever got staged, under a small
+     two-flag lock (`INTERUPTED`/`PROCESSING`, adapted from
+     `WORKER_THREAD_CLASS`) so a submission never gets read half-written.
+   - `main.cpp`'s loop shrank accordingly - `chat.input()`/`jump_input()`
+     (olla.cpp) now read `comms.send`/`stop_requested` instead of
+     `key_input` directly, since they can't reach `IO_WORKER_CLASS`'s
+     members at all anymore.
+3. Two correctness bugs found and fixed along the way, worth remembering
+   if this area gets touched again: (a) `Keyboard_Input_Enabled`
+   (toggled by `TOOL_TASK_RUNNER` automations, threaded through
+   `process()`/`handle_instance_tools()`/`dispatch_tool_call()`) was a
+   plain `bool&` read/written on two different threads once keyboard
+   reading moved to the worker - now `std::atomic<bool>&`. (b)
+   `ollama_system::input()`'s submission branch has to clear
+   `comms.stop_requested` too, not just `comms.send` - a real Enter
+   keypress sets both `INTERRUPTED` and `ENTER_PRESSED` together
+   (`KEYBOARD_INPUT::keyboard_input()`, user_io.cpp), and if only `send`
+   gets cleared, a stale `stop_requested` from that same keypress can
+   fire on a *later* tick once `is_processing` becomes true - aborting
+   the response that keypress itself just started.
+
 ## Voice (Voca)
 
-- **Change the wake word from "voca" to "olli"** - `findWakeWord()`
-  (voca.cpp) matches "hey" followed by a "vo"-prefixed word
-  (`startsWithVo()`/`kVoPrefixMinLen`, loose - see its comment for why),
-  or a bare "voca"/"voka" anywhere. Needs the prefix/bare-word list
-  swapped to match "olli" instead (and probably the sleep-trigger side,
-  `findSleepTrigger()`, which also keys off a "vo"-prefixed word next to
-  a control word - see its own comment for the "hey voca, stop talking"
-  disambiguation it does).
+- Wake word is "olli" (`findWakeWord()`/`findSleepTrigger()`, voca.cpp) -
+  done, no longer "voca".
 
 ## Remote access
 

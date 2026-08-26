@@ -38,6 +38,12 @@ struct VOCA_EVENT {
     // "stop talking" heard while TTS is speaking) - the caller should still
     // treat the event as an interrupt, just not submit anything new.
     std::string text;
+
+    // Set (instead of text) for a wake/sleep status notification (see
+    // onWake/onSleep in create(), audio_control.cpp) - a log line for the
+    // caller to display, not a transcript and not an interrupt. Mutually
+    // exclusive with text; the caller checks this first.
+    std::string status_message;
 };
 
 /**

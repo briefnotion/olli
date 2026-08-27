@@ -378,20 +378,21 @@ namespace {
     // outright, ignoring the other (which still runs and displays/logs
     // normally - see the file-level comment - just doesn't gate anything).
     //
-    // mode == BOTH (the default): only HOME if both backends have
-    // independently debounced to HOME, only AWAY if both have independently
-    // debounced to AWAY. Anything else (either still UNKNOWN, or the two
-    // disagreeing) is "not settled yet" - not an error, just not something
-    // to act on. See the design discussion this came out of for why
-    // disagreement doesn't get resolved any other way (e.g. majority/
-    // tiebreak) - two backends can't outvote each other, they either agree
-    // or nothing happens.
+    // mode == BOTH (the default): asymmetric on purpose. HOME fires as soon
+    // as EITHER backend independently debounces to HOME - quick to notice
+    // someone's back, since either signal alone is good evidence. AWAY only
+    // fires once BOTH backends have independently debounced to AWAY -
+    // conservative about declaring the house empty, since either device
+    // still checking in is enough to say otherwise (a phone that dropped
+    // Wi-Fi but still answers Bluetooth shouldn't read as "left"). Anything
+    // else (both still UNKNOWN with neither backend settled yet) is "not
+    // settled yet" - not an error, just not something to act on.
     PresenceState combine_states(const BackendTracker& bt, const BackendTracker& wifi, DetectionMode mode)
     {
         if (mode == DetectionMode::BLUETOOTH) return bt.state;
         if (mode == DetectionMode::WIFI) return wifi.state;
 
-        if (bt.state == PresenceState::HOME && wifi.state == PresenceState::HOME) return PresenceState::HOME;
+        if (bt.state == PresenceState::HOME || wifi.state == PresenceState::HOME) return PresenceState::HOME;
         if (bt.state == PresenceState::AWAY && wifi.state == PresenceState::AWAY) return PresenceState::AWAY;
         return PresenceState::UNKNOWN;
     }
@@ -414,11 +415,25 @@ namespace {
 
     std::string handle_identity(const json& msg)
     {
-        current_profile_name = msg.value("name", "");
+        std::string new_profile_name = msg.value("name", "");
+        bool profile_changed = (new_profile_name != current_profile_name);
+
+        current_profile_name = new_profile_name;
         settings = load_settings(current_profile_name);
         bt_tracker.reset();
         wifi_tracker.reset();
-        last_fired_state = PresenceState::UNKNOWN;
+
+        // Only clear last_fired_state on an actual profile switch. Every
+        // olli reconnect (e.g. a restart while already home) sends a fresh
+        // identity message for the SAME profile - resetting this here
+        // unconditionally meant last_fired_state forgot what it had already
+        // reported, so the next debounce re-firing the same real state
+        // (still HOME, nothing changed) looked like a fresh transition and
+        // re-sent a "just got home" DIRECTOR_NOTE for no reason.
+        if (profile_changed) {
+            last_fired_state = PresenceState::UNKNOWN;
+        }
+
         // Force an immediate check on the next loop tick rather than
         // waiting out a full poll_interval_seconds after every reconnect.
         last_poll = std::chrono::steady_clock::time_point{};

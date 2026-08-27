@@ -82,11 +82,8 @@ class REMOTE_TOOL_LISTENER
  * have passed with nothing received - catches a hung (not crashed) peer
  * during an otherwise idle stretch, which a clean-close event never would.
  *
- * Not permission-gated the way hardcoded tools are (TOOL_PERMISSIONS_CLASS,
- * tools_helper.h, has no generic "remote" slot, and a fixed bool per
- * possible remote tool doesn't scale) - anything that completes the
- * handshake on the loopback-only socket is trusted and registered. Revisit
- * once the permissions system itself gets reworked (see TODO.md).
+ * Not permission-gated - anything that completes the handshake on the
+ * loopback-only socket is trusted and registered.
  */
 class TOOL_REMOTE : public TOOL_BASE
 {
@@ -143,8 +140,8 @@ class TOOL_REMOTE : public TOOL_BASE
 
         void configure(ollama_system& chat) override;
         void register_tool(ollama_system& chat, json& tools) override;
-        bool check(ollama_system& chat, CLASS_SYSTEM* system, const ToolCall& tc) override;
-        void monitor_tool(ollama_system& chat, CLASS_SYSTEM* system) override;
+        bool check(ollama_system& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, const ToolCall& tc) override;
+        void monitor_tool(ollama_system& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list) override;
 
         // False once the connection's closed (monitor_tool() or check()
         // noticing a dead fd resets it to -1) - ollama_system::process()

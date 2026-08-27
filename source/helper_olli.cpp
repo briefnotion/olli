@@ -46,10 +46,16 @@ void debug_log_reset(const std::filesystem::path& filepath) {
     g_debug_log_file.open(filepath, std::ios::out | std::ios::trunc);
 }
 
-void debug_log_message(const std::string& role, const std::string& content) {
+void debug_log_message(const std::string& instance_label, const std::string& role, const std::string& content) {
     std::lock_guard<std::mutex> lock(g_debug_log_mutex);
     if (!g_debug_log_file.is_open()) return;
-    g_debug_log_file << "[" << role << "] " << content << "\n" << std::flush;
+    g_debug_log_file << "[" << instance_label << "][" << role << "] " << content << "\n" << std::flush;
+}
+
+void debug_log_instance_event(const std::string& instance_label, const std::string& event) {
+    std::lock_guard<std::mutex> lock(g_debug_log_mutex);
+    if (!g_debug_log_file.is_open()) return;
+    g_debug_log_file << "=== " << event << ": " << instance_label << " ===\n" << std::flush;
 }
 
 // ----

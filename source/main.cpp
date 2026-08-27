@@ -149,6 +149,14 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         SIDETRACK_CLASS sidetrack;
         IO_WORKER_CLASS io_worker; // keyboard input + screen display - see io_worker.h
 
+        // The main chat's real tools_list - the 3 built-ins plus every
+        // remote tool that registers over its lifetime (see the remote-tool
+        // handshake below). Declared here, not owned by 'chat' itself - see
+        // process()'s comment in olla.h for why tools_list moved to a
+        // reference parameter rather than living on ollama_system.
+        std::vector<std::unique_ptr<TOOL_BASE>> tools_list;
+        populate_default_tools(tools_list);
+
         system.setings_vars.profile_name = profile_name;
         system.user.name = profile_name;
 
@@ -183,15 +191,11 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         }
         chat.PROPS.web_search_api_key = system.setings_vars.tool_web_search_apiKey;
 
-        chat.TOOL_PERMISSIONS.HUE = true;
-        chat.TOOL_PERMISSIONS.THINKING = true;
-        chat.TOOL_PERMISSIONS.WEB = true;
-        chat.TOOL_PERMISSIONS.DELEGATOR = true;
-        chat.TOOL_PERMISSIONS.TASK_RUNNER = true;
-
         chat.PROPS.use_thinking = false;
         chat.PROPS.model = "qwen3:8b";
-        chat.open();
+        chat.debug_label = "chat";
+        chat.open(tools_list);
+        debug_log_instance_event("chat", "instance created");
 
         if (crash_restart)
         {
@@ -265,7 +269,7 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
                 // naturally rather than needing its own separate trigger.
                 remote_tool->send_identity(system.user.name, system.user.full_name, system.user.about);
 
-                chat.register_remote_tool(std::move(remote_tool));
+                tools_list.push_back(std::move(remote_tool));
             }
 
             // Keyboard, voice, and screen drawing all happen entirely on
@@ -273,7 +277,7 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
             // class comment). This relays whatever it staged this tick
             // (a submitted line, a stop-request, an exit-request) into
             // chat.comms.
-            io_worker.exchange(chat.comms);
+            io_worker.exchange(chat.comms, tools_list);
 
             // Ctrl+C - see COMMS::exit_requested's comment (comms.h) for
             // why this needs its own handling instead of a real SIGINT.
@@ -291,12 +295,12 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
             // Returns true once a full response cycle has completed (see
             // olla.cpp for the exact conditions), at which point we're
             // ready for new input.
-            bool response_complete = chat.input(system);
+            bool response_complete = chat.input(tools_list);
 
             // Dispatches any pending tool calls, flushes new text to TTS
             // (write_to_tts), periodically writes history to disk if it
             // changed. See ollama_system::process in olla.cpp.
-            chat.process(&system, io_worker.key_input.PROPS.ENABLED);
+            chat.process(&system, tools_list, io_worker.key_input.PROPS.ENABLED);
 
             // Runs sidetrack's main-thread half of both routines' state
             // machines - see SIDETRACK_CLASS::check's doc comment.
@@ -359,6 +363,7 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         // history size change) only runs from inside the loop above, which has
         // already exited by this point.
         chat.save_history();
+        debug_log_instance_event("chat", "instance closed");
 
         // Archives this run's chat_log.txt into chat_logs/<timestamp>.chat_log.txt
         // - see OUTPUT_CLASS::close_chat_log() in user_io.cpp. The other call

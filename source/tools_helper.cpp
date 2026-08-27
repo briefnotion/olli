@@ -29,9 +29,6 @@ void TASK_SIMPLE_MANAGER::load_all_task()
     tmp_task.clear();
     tmp_task.TASK_PHRASE = "run system test";
     tmp_task.TASK_PURPOSE = "This is a series of a few simple questions to check responses.";
-    tmp_task.TOOL_PERMISSIONS.HUE = true;
-    tmp_task.TOOL_PERMISSIONS.THINKING = true;
-    tmp_task.TOOL_PERMISSIONS.WEB = true;
     tmp_task.TASK_DIRECTORY = "system_test";
     tmp_task.COMMANDS.push_back("Set a timer for 30 seconds and when the timer goes off, blink any light.");
     tmp_task.COMMANDS.push_back("turn off all the lights.");
@@ -61,7 +58,6 @@ void TASK_SIMPLE_MANAGER::load_all_task()
                             "typical AI. Use natural phrasing and varied sentence structures "
                             "to ensure the output feels written by a person, not a machine.";
     
-    tmp_task.TOOL_PERMISSIONS.THINKING = true;
     tmp_task.TASK_DIRECTORY = "resume_process";
 
     tmp_task.COMMANDS.push_back("Go into thinking mode.");

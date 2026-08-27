@@ -202,12 +202,6 @@ class ollama_system {
         json tools = json::array();
         std::chrono::steady_clock::time_point last_consolidation = std::chrono::steady_clock::now();
 
-        // One instance of every TOOL_* class, populated once in the
-        // constructor. Driven uniformly (configure/register_tool/check/
-        // monitor_tool - see the TOOL_BASE comment in tools.h) instead of as
-        // fixed named members, so adding a tool never touches this class.
-        std::vector<std::unique_ptr<TOOL_BASE>> tools_list;
-
         size_t PREVIOUS_HISTORY_SIZE = 0;
 
         // Shared by both call sources handle_instance_tools() drains (the
@@ -218,8 +212,10 @@ class ollama_system {
         // call (see its own TODO comment in tools.cpp) - always true for
         // anything from pending_tool_calls, which never contains that name.
         // 'system' is just forwarded to each tool's check() - see that
-        // parameter's own comment on TOOL_BASE::check() (tools.h).
-        void dispatch_tool_call(const ToolCall& tc, CLASS_SYSTEM* system, std::atomic<bool>& Keyboard_Input_Enabled);
+        // parameter's own comment on TOOL_BASE::check() (tools.h). 'tools_list'
+        // is the caller's own - see its comment on process() below for why
+        // this is a reference parameter now, not a member.
+        void dispatch_tool_call(const ToolCall& tc, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, std::atomic<bool>& Keyboard_Input_Enabled);
 
         bool saveHistoryToJson(std::filesystem::path filepath);
         bool loadHistoryFromJson(std::filesystem::path filepath);
@@ -230,11 +226,25 @@ class ollama_system {
 
         ollama_system();
 
+        // Short human-readable tag identifying this instance in
+        // debug_full_history.txt (debug_log_message()/debug_log_instance_event(),
+        // helper_olli.h) - main chat, sidetrack's review, a task-runner
+        // automation instance, etc. all funnel through the same send()/
+        // completion code and share one log file, so without this every
+        // line would be indistinguishable. Set once by whoever constructs
+        // the instance (main.cpp, sidetrack.cpp, tools.cpp) - defaults to
+        // "unlabeled" rather than something plausible-sounding like "chat",
+        // so a creation site that forgets to set this is obvious in the log
+        // instead of silently mislabeled.
+        std::string debug_label = "unlabeled";
+
         // 'system' is the one real CLASS_SYSTEM for the process, or nullptr
         // where there isn't one to give (see TOOL_BASE::check()'s comment in
         // tools.h) - just forwarded down to dispatch_tool_call() for each
-        // tool's check()/monitor_tool().
-        void handle_instance_tools(CLASS_SYSTEM* system, std::atomic<bool>& Keyboard_Input_Enabled);
+        // tool's check()/monitor_tool(). 'tools_list' is the caller's own -
+        // see process()'s comment below for why this moved to a reference
+        // parameter instead of living on ollama_system.
+        void handle_instance_tools(CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, std::atomic<bool>& Keyboard_Input_Enabled);
 
         // Explicit flush to disk, e.g. right after consolidation commits or on shutdown.
         void save_history();
@@ -264,7 +274,6 @@ class ollama_system {
 
 
         OLLAMA_SYSTEM_PROPERTIES PROPS;
-        TOOL_PERMISSIONS_CLASS TOOL_PERMISSIONS;
 
         // Use Atomics for thread safety to avoid data races
         std::thread chat_thread;
@@ -334,20 +343,20 @@ class ollama_system {
         // does this, to run an automation sequence without blocking chat.
         ollama_system& spawn_background_task();
 
-        // Adds a tool to tools_list after construction - lets a remote tool
-        // (source/remote_tools.h) join mid-session once its registration
-        // handshake completes, without exposing tools_list itself. Takes
-        // effect on the next send() call, which rebuilds the tools array
-        // sent to Ollama from tools_list fresh every time (see the comment
-        // there) rather than once at open().
-        void register_remote_tool(std::unique_ptr<TOOL_BASE> tool);
+        // 'tools_list' is now owned by the caller, not this instance (see
+        // process()'s comment below for why) - each of these three tools_list-
+        // touching entry points takes it as a reference. A remote tool joins
+        // simply by tools_list.push_back()-ing directly into the caller's own
+        // vector (source/remote_tools.h's registration handshake, main.cpp);
+        // that takes effect on the next send() call, which rebuilds the
+        // tools array sent to Ollama from tools_list fresh every time (see
+        // the comment there) rather than once at open().
+        void open(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list);
+        void open(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, OLLAMA_SYSTEM_PROPERTIES Properties);
 
-        void open();
-        void open(OLLAMA_SYSTEM_PROPERTIES Properties);
-        
         string gather_history();
-        void integrate_tool_result(std::string Special_Instruction, const std::string& raw_result);
-        void send(const std::string& user_input, const std::string& role = "user");
+        void integrate_tool_result(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, std::string Special_Instruction, const std::string& raw_result);
+        void send(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, const std::string& user_input, const std::string& role = "user");
         void send_tool_result(const std::string& tool_call_id, const std::string& result);
 
         // Helper to reset the signal
@@ -370,17 +379,40 @@ class ollama_system {
 
         void write_to_tts();
 
-        bool jump_input(CLASS_SYSTEM& System);
-        bool input(CLASS_SYSTEM& System);
+        bool jump_input();
+        bool input(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list);
 
         // 'system' is nullable and just threaded down to handle_instance_tools()
         // and each tool's monitor_tool() - see TOOL_BASE::check()'s comment in
         // tools.h for why (main-thread-only call sites pass the real
-        // CLASS_SYSTEM&, e.g. main.cpp/jump_input(); sidetrack.cpp's
-        // background-thread call passes nullptr instead).
-        void process(CLASS_SYSTEM* system, std::atomic<bool>& Keyboard_Input_Enabled);
+        // CLASS_SYSTEM&, e.g. main.cpp; sidetrack.cpp's background-thread
+        // call passes nullptr instead).
+        //
+        // 'tools_list' used to live on this class (one instance of every
+        // TOOL_* class, populated in the constructor - see git history if
+        // curious). Moved to a reference parameter instead: 'system' being
+        // nullable for sidetrack.cpp's background thread and the task-runner
+        // automation instance (tools.cpp) was fine when it only gated a
+        // tool's *optional* access to real audio/keyboard/identity - but
+        // once tools_list itself lived on CLASS_SYSTEM, that same nullptr
+        // would mean "no tools at all" for those two instances, which
+        // actually need real tools to function. Decoupling tools_list from
+        // CLASS_SYSTEM keeps 'system' nullable for what it's always been for,
+        // while every caller (main.cpp's real one, SIDETRACK_CLASS's own
+        // private one, the automation instance's own local one) supplies a
+        // real, always-valid tools_list of its own - never null, because a
+        // reference can't be.
+        void process(CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, std::atomic<bool>& Keyboard_Input_Enabled);
 
 };
+
+// Pushes one instance of every built-in TOOL_* class onto tools_list - the
+// same 3 tools every ollama_system instance used to get for free from its
+// own constructor before tools_list moved off this class (see process()'s
+// comment above). Call once per real tools_list that needs them: main.cpp's
+// real one, SIDETRACK_CLASS's own, each task-runner automation instance's
+// own local one.
+void populate_default_tools(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list);
 
 // A single shared mutex protecting every ollama_system::history vector.
 //
@@ -401,8 +433,8 @@ inline std::mutex history_mutex;
 
 // The text-to-speech output hook used to live here as a single process-wide
 // global (g_audio_control) - it's now COMMS::audio (comms.h) instead, set
-// per-instance (main.cpp, spawn_background_task(), jump_input(),
-// SIDETRACK_CLASS::create()) rather than once for the whole process. See
+// per-instance (main.cpp, spawn_background_task(), SIDETRACK_CLASS::create())
+// rather than once for the whole process. See
 // COMMS::audio's own comment for why.
 
 #endif

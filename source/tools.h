@@ -4,6 +4,7 @@
 #include <string>
 #include <map>
 #include <vector>
+#include <memory>
 #include <filesystem>
 
 #include <nlohmann/json.hpp>
@@ -15,9 +16,9 @@ using json = nlohmann::json;
 // Forward declarations only - TOOL_BASE and every TOOL_* method below just
 // takes/returns a reference (or, for CLASS_SYSTEM, a pointer), never needs
 // the complete type. ollama_system/ToolCall's complete types live in olla.h,
-// which includes this header (ollama_system holds tools_list, a vector of
-// these); CLASS_SYSTEM's lives in system.h, deliberately not included here -
-// see the CLASS_SYSTEM* parameter's own comment on TOOL_BASE::check() below.
+// which includes this header; CLASS_SYSTEM's lives in system.h, deliberately
+// not included here - see the CLASS_SYSTEM* parameter's own comment on
+// TOOL_BASE::check() below.
 class ollama_system;
 class CLASS_SYSTEM;
 struct ToolCall;
@@ -28,24 +29,19 @@ struct ToolCall;
 // itself.
 void add_tool(json& tools, const std::string& name, const std::string& description, json parameters);
 
-// Common interface every TOOL_* class implements, so ollama_system can store
-// them uniformly as tools_list (std::vector<std::unique_ptr<TOOL_BASE>>,
-// see olla.h) instead of as fixed named members, and drive all of them the
-// same way regardless of concrete type:
+// Common interface every TOOL_* class implements, so a tools_list
+// (std::vector<std::unique_ptr<TOOL_BASE>> - owned by whichever caller needs
+// one, e.g. main.cpp's real one or SIDETRACK_CLASS's own; see process()'s
+// comment in olla.h) can store them uniformly instead of as fixed named
+// members, and drive all of them the same way regardless of concrete type:
 //   - configure(): once per instance, during open(), before register_tool().
 //     Pulls whatever setup a tool needs from chat.PROPS (API keys,
 //     credentials, directories).
-//   - register_tool(): adds this tool's JSON definition(s) to `tools`, but
-//     only if chat.TOOL_PERMISSIONS grants it - each override does its own
-//     permission check internally, since the uniform loop calling this has
-//     no per-tool knowledge itself.
+//   - register_tool(): adds this tool's JSON definition(s) to `tools`.
 //   - check(): true if tc.name belongs to this tool. If so, handles the call
-//     (permission-gated, same pattern as register_tool) and returns true
-//     either way; false, untouched, if the name isn't this tool's - the
-//     dispatcher loop moves on to the next tool.
-//   - monitor_tool(): called every process() tick, for every tool - a tool
-//     that only makes sense when permitted checks chat.TOOL_PERMISSIONS
-//     itself, same as register_tool().
+//     and returns true either way; false, untouched, if the name isn't this
+//     tool's - the dispatcher loop moves on to the next tool.
+//   - monitor_tool(): called every process() tick, for every tool.
 // A no-op override (not an omitted method) is how a tool opts out of any of
 // these - keep new tools matching this shape rather than adding one-off
 // signatures.
@@ -71,8 +67,14 @@ class TOOL_BASE
         // reference. A tool that needs 'system' must null-check it; every
         // tool below still ignores it entirely for now (leaves the parameter
         // unnamed), since nothing in tools_list has a use for it yet.
-        virtual bool check(ollama_system& chat, CLASS_SYSTEM* system, const ToolCall& tc) = 0;
-        virtual void monitor_tool(ollama_system& chat, CLASS_SYSTEM* system) = 0;
+        //
+        // 'tools_list' is the caller's own (see process()'s comment in
+        // olla.h for why it's a reference parameter, not owned by
+        // ollama_system) - passed down here so a tool whose handle_tool()
+        // calls chat.send()/chat.integrate_tool_result() (which now both
+        // need it too) has something to forward. Always valid, never null.
+        virtual bool check(ollama_system& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, const ToolCall& tc) = 0;
+        virtual void monitor_tool(ollama_system& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list) = 0;
 
         // Unlike the four above, not something each tool author has to
         // consciously decide - it's a connection-lifecycle question that's
@@ -93,8 +95,8 @@ class TOOL_SET_THINKING_MODE : public TOOL_BASE
     public:
         void configure(ollama_system& chat) override;
         void register_tool(ollama_system& chat, json& tools) override;
-        bool check(ollama_system& chat, CLASS_SYSTEM* system, const ToolCall& tc) override;
-        void monitor_tool(ollama_system& chat, CLASS_SYSTEM* system) override;
+        bool check(ollama_system& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, const ToolCall& tc) override;
+        void monitor_tool(ollama_system& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list) override;
 };
 
 class TOOL_WEB_SEARCH : public TOOL_BASE
@@ -107,7 +109,7 @@ class TOOL_WEB_SEARCH : public TOOL_BASE
         std::string perform_actual_search(const std::string& query);
         std::string fetch_url_content(const std::string& url);
 
-        void handle_tool(ollama_system& chat, const std::string& name, const json& args, const std::string& tc_id);
+        void handle_tool(ollama_system& chat, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, const std::string& name, const json& args, const std::string& tc_id);
 
         static size_t WriteCallback(void* contents, size_t size, size_t nmemb, void* userp) {
             static_cast<std::string*>(userp)->append(static_cast<const char*>(contents), size * nmemb);
@@ -119,8 +121,8 @@ class TOOL_WEB_SEARCH : public TOOL_BASE
 
         void configure(ollama_system& chat) override;
         void register_tool(ollama_system& chat, json& tools) override;
-        bool check(ollama_system& chat, CLASS_SYSTEM* system, const ToolCall& tc) override;
-        void monitor_tool(ollama_system& chat, CLASS_SYSTEM* system) override;
+        bool check(ollama_system& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, const ToolCall& tc) override;
+        void monitor_tool(ollama_system& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list) override;
 };
 
 // Disabled: recursive sub-agent delegation (a chat instance spawning a
@@ -151,20 +153,20 @@ class TOOL_TASK_RUNNER : public TOOL_BASE
         // a background ollama_system (chat.spawn_background_task()) and drives
         // it through the matched task's whole command sequence synchronously -
         // not a single instruction handed back to the model.
-        void handle_tool(ollama_system& chat, const std::string& name, const json& args, const std::string& tc_id);
+        void handle_tool(ollama_system& chat, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, const std::string& name, const json& args, const std::string& tc_id);
 
     public:
         std::filesystem::path OLLI_DIRECTORY;
 
         void configure(ollama_system& chat) override;
         void register_tool(ollama_system& chat, json& tools) override;
-        bool check(ollama_system& chat, CLASS_SYSTEM* system, const ToolCall& tc) override;
+        bool check(ollama_system& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, const ToolCall& tc) override;
 
         // No periodic work needed - no automation-loop equivalent of a
         // permission-gated background poll (e.g. TOOL_WEB_SEARCH, if it
         // ever grew one) exists here (yet). A no-op, but still called
         // every process() tick like every other tool's.
-        void monitor_tool(ollama_system& chat, CLASS_SYSTEM* system) override;
+        void monitor_tool(ollama_system& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list) override;
 };
 
 #endif

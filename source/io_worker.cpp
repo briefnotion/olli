@@ -161,7 +161,7 @@ void IO_WORKER_CLASS::thread_main()
             // 7. Draw.
             if (USE_NCURSES)
             {
-                output.display_with_ncurses(key_input);
+                output.display_with_ncurses(key_input, tool_names);
             }
             else
             {
@@ -175,7 +175,7 @@ void IO_WORKER_CLASS::thread_main()
     }
 }
 
-void IO_WORKER_CLASS::exchange(COMMS& comms)
+void IO_WORKER_CLASS::exchange(COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list)
 {
     if (!PROPS.BLOCKING) return;
 
@@ -187,6 +187,26 @@ void IO_WORKER_CLASS::exchange(COMMS& comms)
     while (PROCESSING.load())
     {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    // Safe to touch tool_names here - thread_main() is confirmed not
+    // running (the wait above), so this doesn't race its own read of
+    // tool_names down in the display step. Names come from actually calling
+    // each tool's own register_tool() into a throwaway json array, rather
+    // than adding a separate name-only accessor to TOOL_BASE - this reuses
+    // the exact same logic send() itself relies on (see olla.cpp) instead of
+    // a second place to keep in sync.
+    if (chat != nullptr)
+    {
+        tool_names.clear();
+        json tmp_tools = json::array();
+        for (auto& tool : tools_list)
+            tool->register_tool(*chat, tmp_tools);
+        for (auto& entry : tmp_tools)
+        {
+            std::string name = entry.value("function", json::object()).value("name", "");
+            if (!name.empty()) tool_names.push_back(name);
+        }
     }
 
     if (staged.stop_requested)

@@ -250,7 +250,7 @@ bool TOOL_REMOTE::read_line_blocking(std::string& out, int timeout_ms)
     }
 }
 
-bool TOOL_REMOTE::check(ollama_system& chat, CLASS_SYSTEM*, const ToolCall& tc)
+bool TOOL_REMOTE::check(ollama_system& chat, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, const ToolCall& tc)
 {
     bool is_mine = false;
     for (auto& def : tool_defs) {
@@ -321,7 +321,7 @@ bool TOOL_REMOTE::check(ollama_system& chat, CLASS_SYSTEM*, const ToolCall& tc)
     }
 
     chat.send_tool_result(tc.id, response_str);
-    chat.integrate_tool_result("", response_str);
+    chat.integrate_tool_result(tools_list, "", response_str);
 
     return true;
 }
@@ -339,7 +339,7 @@ bool TOOL_REMOTE::check(ollama_system& chat, CLASS_SYSTEM*, const ToolCall& tc)
 // cleanly closed connection, same as before the heartbeat existed - either
 // way, is_alive() flips to false, which ollama_system::process() (olla.cpp)
 // checks every tick to actually drop this instance from tools_list.
-void TOOL_REMOTE::monitor_tool(ollama_system& chat, CLASS_SYSTEM*)
+void TOOL_REMOTE::monitor_tool(ollama_system& chat, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list)
 {
     if (fd < 0) return;
 
@@ -387,7 +387,7 @@ void TOOL_REMOTE::monitor_tool(ollama_system& chat, CLASS_SYSTEM*)
                 std::string message = msg.value("message", "");
                 if (!message.empty()) {
                     chat.log("[RemoteTools] Event from remote tool: " + message + "\n");
-                    chat.integrate_tool_result("", message);
+                    chat.integrate_tool_result(tools_list, "", message);
                 }
 
                 // Optional structured follow-up action, separate from

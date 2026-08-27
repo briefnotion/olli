@@ -91,6 +91,16 @@ class SIDETRACK_CLASS
         // the review prompt.
         ollama_system SIDETRACK_CHAT_INSTANCE;
 
+        // SIDETRACK_CHAT_INSTANCE's own private tools_list - never the real
+        // CLASS_SYSTEM's, and not shared with anything else. Populated once
+        // in create() (see olla.h's process() comment for why tools_list
+        // moved to a reference parameter rather than living on ollama_system
+        // itself) - real, always-valid, so send()/process() here never need
+        // a nullable/missing tools_list, only a nullable/missing CLASS_SYSTEM*
+        // (which this thread genuinely has none of - see thread_main()'s
+        // nullptr call sites below).
+        std::vector<std::unique_ptr<TOOL_BASE>> tools_list;
+
         // How long the system must be idle (no interrupts) before
         // consolidation is allowed to run. Armed once at thread start in
         // thread_main() and re-armed on every interrupt (see INTERUPT below)

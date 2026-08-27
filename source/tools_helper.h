@@ -10,23 +10,12 @@
 
 using json = nlohmann::json;
 
-class TOOL_PERMISSIONS_CLASS
-{
-    public:
-    bool HUE = false;
-    bool THINKING = false;
-    bool WEB = false;
-    bool DELEGATOR = false;
-    bool TASK_RUNNER = false;
-};
-
 struct TASK_SIMPLE
 {
     public:
         std::string TASK_PHRASE = "";
         std::string TASK_PURPOSE = "";
         std::string TASK_DIRECTORY = "";
-        TOOL_PERMISSIONS_CLASS TOOL_PERMISSIONS;
         std::vector<std::string> COMMANDS;
         void clear();
 };

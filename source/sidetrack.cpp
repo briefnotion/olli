@@ -3,6 +3,8 @@
 
 #include "sidetrack.h"
 
+#include <set>
+
 // For OUTPUT_CLASS's real definition (chat_thinking/chat_response/
 // system_message below) - sidetrack.h only forward-declares it (via
 // olla.h), which used to reach here as a full definition transitively
@@ -54,12 +56,21 @@ bool consolidate(std::vector<Message>& chat_history, OLLAMA_SYSTEM_PROPERTIES& c
     bool any_consolidation_occurred = false;
 
     ollama_system consolidate_client;
+    consolidate_client.debug_label = "sidetrack-consolidate";
+    debug_log_instance_event("sidetrack-consolidate", "instance created");
     consolidate_client.PROPS.host = config.host;
     consolidate_client.PROPS.port = config.port;
     consolidate_client.PROPS.model = config.model;
     consolidate_client.PROPS.num_ctx = config.num_ctx;
     consolidate_client.PROPS.use_thinking = false;
     consolidate_client.PROPS.stream_output = false;
+
+    // consolidate_client's own private tools_list - same pattern as every
+    // other isolated/throwaway ollama_system instance (see process()'s
+    // comment in olla.h). Not that summarization has any real use for
+    // tools, but send() needs a valid one regardless.
+    std::vector<std::unique_ptr<TOOL_BASE>> consolidate_tools_list;
+    populate_default_tools(consolidate_tools_list);
 
     bool llm_failed = false;
     for (size_t level = 0; !llm_failed && level + 1 < levels.size(); ++level) {
@@ -71,7 +82,7 @@ bool consolidate(std::vector<Message>& chat_history, OLLAMA_SYSTEM_PROPERTIES& c
             }
 
             consolidate_client.history.clear();
-            consolidate_client.send(prompt, "system");
+            consolidate_client.send(consolidate_tools_list, prompt, "system");
 
             std::string summary_text = consolidate_client.last_received.response;
             if (summary_text.empty()) summary_text = consolidate_client.last_received.thinking;
@@ -101,6 +112,7 @@ bool consolidate(std::vector<Message>& chat_history, OLLAMA_SYSTEM_PROPERTIES& c
         }
     }
 
+    debug_log_instance_event("sidetrack-consolidate", "instance closed");
     return any_consolidation_occurred;
 }
 
@@ -112,8 +124,30 @@ SIDETRACK_CLASS::SIDETRACK_CLASS()
 
 void SIDETRACK_CLASS::create(OLLAMA_SYSTEM_PROPERTIES Ollama_Properties, AUDIO_CONTROL_CLASS* audio)
 {
+    SIDETRACK_CHAT_INSTANCE.debug_label = "sidetrack-review";
+    debug_log_instance_event("sidetrack-review", "instance created");
+
     SIDETRACK_CHAT_INSTANCE.PROPS = Ollama_Properties;
+
+    // This copy inherits LOAD_SAVE_HISTORY_ON_DISK=true and the real
+    // OLLI_DIRECTORY straight from chat.PROPS (main.cpp's sidetrack.create()
+    // call) - but SIDETRACK_CHAT_INSTANCE.open() is never called (unlike
+    // every other secondary ollama_system instance, which goes through the
+    // open(Properties) overload specifically to force this off), so it was
+    // silently keeping real disk-saving behavior. ollama_system::process()
+    // auto-saves history.json whenever an instance's history.size() changes
+    // (olla.cpp) - so every second-guess review tick was overwriting the
+    // SAME shared history.json with SIDETRACK_CHAT_INSTANCE's own private,
+    // in-progress scratch history (temp snapshot + review prompt + review
+    // reply), completely bypassing check()'s stage-3 fold decision. Found
+    // chasing the repeat bug: a fold correctly skipped in memory still
+    // showed up duplicated in history.json, because this had already
+    // written the unfiltered version straight to disk first.
+    SIDETRACK_CHAT_INSTANCE.PROPS.LOAD_SAVE_HISTORY_ON_DISK = false;
+
     SIDETRACK_CHAT_INSTANCE.comms.audio = audio;
+
+    populate_default_tools(tools_list);
 }
 
 /**
@@ -288,7 +322,7 @@ void SIDETRACK_CLASS::thread_main()
                     // the model's response (can be several seconds), unable
                     // to do anything else, including notice a fresh
                     // interrupt (see the check above).
-                    SIDETRACK_CHAT_INSTANCE.send("You are the 'Internal Monologue' of the assistant. Review the turn "
+                    SIDETRACK_CHAT_INSTANCE.send(tools_list, "You are the 'Internal Monologue' of the assistant. Review the turn "
                         "that just ended. If there are technical details, edge cases, or deeper insights that were "
                         "missed for the sake of brevity, provide them now. "
 
@@ -339,7 +373,7 @@ void SIDETRACK_CLASS::thread_main()
                         // thread - see TOOL_BASE::check()'s comment in
                         // tools.h for why every other call site can pass the
                         // real one and this one specifically can't.
-                        SIDETRACK_CHAT_INSTANCE.process(nullptr, dummy_enable_keyboard_input);
+                        SIDETRACK_CHAT_INSTANCE.process(nullptr, tools_list, dummy_enable_keyboard_input);
                     }
 
                     // Reaching here without hitting the DONE break above
@@ -427,6 +461,44 @@ void SIDETRACK_CLASS::thread_stop()
     // caused a heap-corruption crash on shutdown.
     RUN = false;
     THREAD_CONTROL.wait_for_thread_to_finish();
+    debug_log_instance_event("sidetrack-review", "instance closed");
+}
+
+// Rough word-overlap similarity between two strings, used by check()'s
+// second-guess fold (SECOND_GUESS_PROCESSING_STAGE == 3) to skip folding in
+// a review reply that's just restating the last real assistant turn instead
+// of adding something new. qwen3:8b has a real tendency to lock onto and
+// reproduce a short answer near-verbatim here, even when its own "thinking"
+// explicitly acknowledges the point was already made. Case-insensitive,
+// whitespace/punctuation-split; returns the fraction of b's words that also
+// appear in a (0.0-1.0). Deliberately simple (no stemming, no word order) -
+// this only needs to catch near-verbatim restatement, not paraphrase.
+double word_overlap_ratio(const std::string& a, const std::string& b)
+{
+    auto words_of = [](const std::string& s) {
+        std::vector<std::string> out;
+        std::string cur;
+        for (char c : lower_case(s))
+        {
+            if (isAlphaNumeric(c)) cur += c;
+            else if (!cur.empty()) { out.push_back(cur); cur.clear(); }
+        }
+        if (!cur.empty()) out.push_back(cur);
+        return out;
+    };
+
+    std::vector<std::string> words_b = words_of(b);
+    if (words_b.empty()) return 0.0;
+
+    std::vector<std::string> words_a = words_of(a);
+    std::set<std::string> set_a(words_a.begin(), words_a.end());
+
+    size_t matched = 0;
+    for (const auto& w : words_b)
+    {
+        if (set_a.count(w)) matched++;
+    }
+    return static_cast<double>(matched) / static_cast<double>(words_b.size());
 }
 
 /**
@@ -545,7 +617,29 @@ void SIDETRACK_CLASS::check(ollama_system& main_instance)
                 // sidetrack thread's own send() calls push into that vector
                 // under the same lock.
                 std::lock_guard<std::mutex> lock(history_mutex);
-                main_instance.history.push_back(SIDETRACK_CHAT_INSTANCE.history.back());
+
+                // Skip the fold if this review reply is just restating the
+                // last real assistant turn rather than adding anything new
+                // - see word_overlap_ratio()'s comment above. Compared
+                // against main_instance.history (the real conversation),
+                // not SIDETRACK_CHAT_INSTANCE.history (just this review's
+                // own private prompt/reply pair, which has nothing to
+                // compare against).
+                const Message& review_reply = SIDETRACK_CHAT_INSTANCE.history.back();
+                bool is_restatement = false;
+                for (auto it = main_instance.history.rbegin(); it != main_instance.history.rend(); ++it)
+                {
+                    if (it->role == "assistant")
+                    {
+                        is_restatement = word_overlap_ratio(it->content, review_reply.content) >= 0.5;
+                        break;
+                    }
+                }
+
+                if (!is_restatement)
+                {
+                    main_instance.history.push_back(review_reply);
+                }
             }
             SECOND_GUESS_PROCESSING_STAGE = 4;
         }

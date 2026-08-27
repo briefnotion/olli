@@ -2,6 +2,7 @@
 #define user_io_h
 
 #include <string>
+#include <vector>
 #include <termios.h>
 #include <filesystem>
 #include <optional>
@@ -211,6 +212,12 @@ class OUTPUT_CLASS
         WINDOW* win_chat = nullptr;
         WINDOW* win_input = nullptr;
 
+        // Right-side panel listing available tool names (see
+        // display_with_ncurses()'s tool_names parameter) - full height,
+        // never overlaps anything else, so it stays a plain window like
+        // win_system/win_input rather than needing a panel.
+        WINDOW* win_tools = nullptr;
+
         // win_chat and win_thinking are the only two windows that ever
         // spatially overlap, so those two - and only those two - are
         // wrapped in panels (win_system/win_input never overlap anything
@@ -294,7 +301,10 @@ class OUTPUT_CLASS
         // being typed, live. Only one of display()/display_with_ncurses()
         // should be used for a given run (see main.cpp) - see RAW_ECHO on
         // KEYBOARD_INPUT_PROPERTIES for the other half of that switch.
-        void display_with_ncurses(const KEYBOARD_INPUT& key_input);
+        // tool_names: current list of available tool names (see
+        // IO_WORKER_CLASS::exchange(), io_worker.cpp), rendered one per
+        // line in a right-side panel spanning the full screen height.
+        void display_with_ncurses(const KEYBOARD_INPUT& key_input, const std::vector<std::string>& tool_names);
 };
 
 #endif

@@ -304,6 +304,25 @@ void OUTPUT_CLASS::ncurses_layout()
     const int sys_h = 3;
     const int input_h = 1;
 
+    // Right-side tools panel: fixed width, full height, never overlaps
+    // anything (see win_tools' comment in user_io.h) - reserving its width
+    // here shrinks every other window's width to make room. Skipped
+    // entirely on a too-narrow terminal rather than squeezing everything
+    // else unreadably thin.
+    //
+    // 'gap' is its own dedicated column for the vline separator, distinct
+    // from main_w - win_system/win_chat/win_input span exactly [0, main_w),
+    // so the vline at column main_w never falls inside any of their own
+    // window areas. Sharing that last column with them (an earlier version
+    // of this did) meant their own wrefresh() would silently paint over the
+    // vline with blank content on every row except the separator rows drawn
+    // directly on stdscr - the line only appeared to "flicker in and out."
+    const int tools_w = 22;
+    const int gap = 1;
+    bool show_tools_panel = (screen_w - tools_w - gap) >= 20;
+    int main_w = show_tools_panel ? (screen_w - tools_w - gap) : screen_w;
+    int tools_col = main_w + gap;
+
     erase();   // stdscr - just the separator lines live directly on it
     refresh();
 
@@ -311,17 +330,17 @@ void OUTPUT_CLASS::ncurses_layout()
 
     if (win_system == nullptr)
     {
-        win_system = newwin(sys_h, screen_w, row, 0);
+        win_system = newwin(sys_h, main_w, row, 0);
         scrollok(win_system, TRUE);
     }
     else
     {
-        wresize(win_system, sys_h, screen_w);
+        wresize(win_system, sys_h, main_w);
         mvwin(win_system, row, 0);
     }
     row += sys_h;
 
-    mvhline(row, 0, ACS_HLINE, screen_w);
+    mvhline(row, 0, ACS_HLINE, main_w);
     row += 1;
 
     int chat_row = row;
@@ -330,13 +349,13 @@ void OUTPUT_CLASS::ncurses_layout()
 
     if (win_chat == nullptr)
     {
-        win_chat = newwin(chat_h, screen_w, chat_row, 0);
+        win_chat = newwin(chat_h, main_w, chat_row, 0);
         scrollok(win_chat, TRUE);
         pan_chat = new_panel(win_chat);
     }
     else
     {
-        wresize(win_chat, chat_h, screen_w);
+        wresize(win_chat, chat_h, main_w);
         // move_panel(), not mvwin() directly - win_chat is paneled (see
         // user_io.h), and moving its window without going through the
         // panel library would leave the panel's own position bookkeeping
@@ -345,20 +364,40 @@ void OUTPUT_CLASS::ncurses_layout()
     }
     row += chat_h;
 
-    mvhline(row, 0, ACS_HLINE, screen_w);
+    mvhline(row, 0, ACS_HLINE, main_w);
     row += 1;
 
     if (win_input == nullptr)
     {
-        win_input = newwin(input_h, screen_w, row, 0);
+        win_input = newwin(input_h, main_w, row, 0);
     }
     else
     {
-        wresize(win_input, input_h, screen_w);
+        wresize(win_input, input_h, main_w);
         mvwin(win_input, row, 0);
     }
 
-    refresh(); // pushes the separator hlines drawn on stdscr above
+    if (show_tools_panel)
+    {
+        mvvline(0, tools_col - 1, ACS_VLINE, screen_h);
+
+        if (win_tools == nullptr)
+        {
+            win_tools = newwin(screen_h, tools_w, 0, tools_col);
+        }
+        else
+        {
+            wresize(win_tools, screen_h, tools_w);
+            mvwin(win_tools, 0, tools_col);
+        }
+    }
+    else if (win_tools != nullptr)
+    {
+        delwin(win_tools);
+        win_tools = nullptr;
+    }
+
+    refresh(); // pushes the separator hlines/vline drawn on stdscr above
 
     // Redraw every currently-visible window's existing content in its
     // (possibly new) position/size immediately, rather than waiting for the
@@ -367,6 +406,9 @@ void OUTPUT_CLASS::ncurses_layout()
     // win_chat isn't included here - it's paneled (see user_io.h), so its
     // repaint happens through ncurses_update_thinking_box()'s panel commit
     // below instead, correctly composited with win_thinking if visible.
+    // win_tools isn't included either - display_with_ncurses() redraws its
+    // full content unconditionally every tick anyway (see its comment), so
+    // there's no separate "existing content" to lose here.
     wrefresh(win_system);
     wrefresh(win_input);
 
@@ -506,7 +548,7 @@ void OUTPUT_CLASS::ncurses_commit_panels()
     doupdate();
 }
 
-void OUTPUT_CLASS::display_with_ncurses(const KEYBOARD_INPUT& key_input)
+void OUTPUT_CLASS::display_with_ncurses(const KEYBOARD_INPUT& key_input, const std::vector<std::string>& tool_names)
 {
     if (!ncurses_started)
     {
@@ -679,6 +721,28 @@ void OUTPUT_CLASS::display_with_ncurses(const KEYBOARD_INPUT& key_input)
     waddch(win_input, ' ');
     wattroff(win_input, A_REVERSE);
     wrefresh(win_input);
+
+    // Tools panel - redrawn fresh every tick rather than diffed against
+    // last tick's content. Cheap (at most a couple dozen short lines) and
+    // simpler than tracking whether tool_names actually changed; ncurses'
+    // own virtual-screen diffing means wrefresh() only touches the real
+    // terminal for cells that actually changed, so this doesn't flicker.
+    if (win_tools != nullptr)
+    {
+        werase(win_tools);
+        int win_h = 0, win_w = 0;
+        getmaxyx(win_tools, win_h, win_w);
+        (void)win_w;
+        mvwaddstr(win_tools, 0, 1, "Tools:");
+        int line = 2;
+        for (const auto& name : tool_names)
+        {
+            if (line >= win_h) break; // more tools than the panel has room for - just stop
+            mvwaddstr(win_tools, line, 1, name.c_str());
+            ++line;
+        }
+        wrefresh(win_tools);
+    }
 }
 
 #endif

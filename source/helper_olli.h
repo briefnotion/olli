@@ -57,10 +57,23 @@ inline std::ofstream g_debug_log_file;
 // before any thread that might log has started.
 void debug_log_reset(const std::filesystem::path& filepath);
 
-// Appends one "[role] content" line and flushes immediately, so the log is
-// current even if the process is killed rather than exited cleanly.
-// Thread-safe - any ollama_system instance, from any thread, can call this.
-void debug_log_message(const std::string& role, const std::string& content);
+// Appends one "[instance_label][role] content" line and flushes immediately,
+// so the log is current even if the process is killed rather than exited
+// cleanly. Thread-safe - any ollama_system instance, from any thread, can
+// call this. instance_label is ollama_system::debug_label (olla.h) - a
+// short human-readable tag ("chat", "sidetrack-review", "task-runner:water
+// the plants", ...) set once per instance at creation, distinguishing which
+// instance produced this line, since main chat/sidetrack's review/task-
+// runner automation instances/jump-phrase instances all funnel through the
+// same send()/completion code and write to this one shared file.
+void debug_log_message(const std::string& instance_label, const std::string& role, const std::string& content);
+
+// Appends a standalone "=== <event>: <instance_label> ===" line - call at
+// an instance's creation and again right before it goes out of scope/stops
+// being used, so the log shows exactly when each instance existed alongside
+// its interleaved messages (debug_log_message() above). Same file/mutex as
+// debug_log_message() - always call after debug_log_reset() has run.
+void debug_log_instance_event(const std::string& instance_label, const std::string& event);
 
 // ----
 

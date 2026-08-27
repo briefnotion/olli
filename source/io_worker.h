@@ -2,6 +2,9 @@
 #define IO_WORKER_H
 
 #include <atomic>
+#include <vector>
+#include <memory>
+#include <string>
 
 #include "threading.h"
 #include "user_io.h" // KEYBOARD_INPUT, OUTPUT_CLASS, COMMS (via comms.h)
@@ -9,6 +12,7 @@
 class ollama_system;
 class SIDETRACK_CLASS;
 class AUDIO_CONTROL_CLASS;
+class TOOL_BASE;
 
 struct IO_WORKER_CLASS_PROPERTIES
 {
@@ -92,6 +96,16 @@ class IO_WORKER_CLASS
         SIDETRACK_CLASS* sidetrack = nullptr;
         AUDIO_CONTROL_CLASS* audio = nullptr;
 
+        // Just the names of whatever's in the caller's tools_list (see
+        // exchange()'s comment in the .cpp), for the right-side tools panel
+        // (OUTPUT_CLASS::display_with_ncurses()). Copied fresh every
+        // exchange() call, on the main thread, while
+        // thread_main() is confirmed not running (same PROCESSING-wait
+        // synchronization exchange() already does for `staged`) - this
+        // worker's own thread only ever reads it, never writes it, so no
+        // separate lock is needed for that side.
+        std::vector<std::string> tool_names;
+
     public:
         IO_WORKER_CLASS_PROPERTIES PROPS;
 
@@ -111,8 +125,11 @@ class IO_WORKER_CLASS
         void thread_main();
 
         // Runs on the MAIN/owner thread - call once per its own loop
-        // tick, passing chat.comms.
-        void exchange(COMMS& comms);
+        // tick, passing chat.comms and the main chat's own tools_list (see
+        // process()'s comment in olla.h for why that's a reference
+        // parameter, not owned by ollama_system) - copies just the tool
+        // names out of it into tool_names for the ncurses tools panel.
+        void exchange(COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list);
 };
 
 #endif

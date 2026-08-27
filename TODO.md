@@ -20,53 +20,129 @@ not needed elsewhere.
 - **RAG support** - retrieval-augmented generation over some corpus (notes?
   history? both?). Probably a big task. `nomic-embed-text` is already pulled
   in Ollama, so the embedding side has a natural starting point.
-- **Tools rework - in progress, not done** (started 2026-08-21). Completed so
-  far: pulled every `TOOL_*` class out of `olla.h`/`olla.cpp` into their own
-  `tools.h`/`tools.cpp`; cleaned out stale/AI-session-artifact comments there;
-  gave every tool the same `configure`/`register_tool`/`check`/`monitor_tool`
-  shape via an abstract `TOOL_BASE`, replacing the six fixed named members on
-  `ollama_system` with `tools_list` (`std::vector<std::unique_ptr<TOOL_BASE>>`)
-  so adding a tool no longer touches `ollama_system` itself. Still open:
-  - Redo (or drop entirely, undecided) the `TOOL_PERMISSIONS_CLASS` system
-    (tools_helper.h) - a bare bool per tool, hand-maintained in parallel with
-    `tools_list` now that tools are stored generically.
-  - `ollama_system` can't reach `CLASS_SYSTEM` (`system.h`) at all right now -
-    `TOOL_TASK_RUNNER`'s dispatcher branch (`handle_instance_tools`,
-    tools.cpp) still special-cases toggling `Keyboard_Input_Enabled` by
-    checking the tool name directly, marked `TODO` inline, because `check()`'s
-    signature has no way to reach `key_input`/`output` otherwise.
+- **Tools rework - mostly done now** (started 2026-08-21). Pulled every
+  `TOOL_*` class out of `olla.h`/`olla.cpp` into their own `tools.h`/
+  `tools.cpp`; gave every tool the same `configure`/`register_tool`/`check`/
+  `monitor_tool` shape via an abstract `TOOL_BASE`. `ollama_system` reaching
+  `CLASS_SYSTEM` was resolved 2026-08-24 (a nullable `CLASS_SYSTEM*` threaded
+  through `process()` -> `handle_instance_tools()` -> `dispatch_tool_call()`
+  -> each tool's `check()`/`monitor_tool()` - null for sidetrack's background
+  thread and task-runner automation instances, which have no business
+  touching the real one).
+  - **Done 2026-08-27: `tools_list` moved off `ollama_system` entirely.**
+    Used to be a member, populated once in the constructor. Now every
+    `open()`/`send()`/`process()`/`dispatch_tool_call()`/
+    `handle_instance_tools()`/`integrate_tool_result()` takes it as a
+    reference parameter instead - cascaded into `TOOL_BASE::check()`/
+    `monitor_tool()` and every concrete override (`tools.cpp`,
+    `remote_tools.cpp`), since several `handle_tool()`s call
+    `chat.send()`/`chat.integrate_tool_result()` internally. Each isolated
+    instance (main chat, `SIDETRACK_CLASS`'s own member, each task-runner
+    automation instance, `consolidate()`'s local client) owns its own real
+    `tools_list`, populated via the new free function
+    `populate_default_tools()` (olla.h/.cpp) - no more nullable-tools_list
+    problem the way a `CLASS_SYSTEM`-owned version would have had (see the
+    design discussion this came from if reviving that idea - the real
+    blocker was sidetrack/task-runner needing real tools but no safe
+    `CLASS_SYSTEM`, not a technical one). Remote tools still only ever
+    register onto main chat's `tools_list` (`main.cpp`) - sidetrack/task-
+    runner still can't see them, deliberately, for now (see the sidetrack
+    rewrite entry below).
+  - **Done 2026-08-27: `TOOL_PERMISSIONS_CLASS` dropped entirely**, not
+    redone - confirmed genuinely dead weight first: every flag was already
+    hardcoded `true` (`main.cpp`), and remote tools (the majority of what's
+    actually used) never checked it at all. Removed the class
+    (`tools_helper.h`), the member on `ollama_system`/`TASK_SIMPLE`, and
+    every gate check in `tools.cpp`.
   - The task-runner display bug above.
   - General polish pass over the existing tool set (Hue lights, timers, web
     search, task runner) beyond the structural rework itself.
 
 ## Session & model behavior
 
-- **`repeat_penalty` added 2026-08-26, untested** - `OLLAMA_SYSTEM_PROPERTIES
-  ::repeat_penalty` (olla.h, default `1.3` vs. Ollama's own bare default of
-  ~1.1 when the option is omitted, which is what every request sent before
-  this) is now sent as `options.repeat_penalty` on every request
+- **Repeat-bug root cause found and fixed 2026-08-27, awaiting real-world
+  confirmation** - full detail in the `olli-time-repeat-bug` memory entry
+  (not duplicated here), short version: `SIDETRACK_CHAT_INSTANCE` was
+  silently inheriting `LOAD_SAVE_HISTORY_ON_DISK=true` and the real profile
+  directory from `chat.PROPS` (`SIDETRACK_CLASS::create()`), and unlike
+  every other secondary `ollama_system` instance, never went through the
+  `open(Properties)` overload that forces that off. Every completed
+  second-guess review tick was auto-saving `SIDETRACK_CHAT_INSTANCE`'s own
+  private, in-progress scratch history straight over the shared
+  `history.json`, bypassing the actual fold-or-discard decision entirely -
+  confirmed directly (a fold correctly skipped in memory still showed up
+  duplicated on disk). Fixed by forcing `LOAD_SAVE_HISTORY_ON_DISK=false` on
+  that instance (`sidetrack.cpp`). The word-overlap fold guard from the
+  2026-08-26 entry (see memory) was also re-implemented - it was never
+  actually committed to git, had to be rewritten from scratch - and now
+  works correctly since it isn't racing the disk-write bug anymore. Tested
+  clean across 3 repro attempts of the original catchphrase-lock pattern.
+  `repeat_penalty` (below) is unchanged/still in place, no isolated evidence
+  either way on its own contribution. **Not yet confirmed against the
+  original real-world symptom** - several past fixes measurably worked for
+  what they targeted without ending the actual complaint, so treat this as
+  strong-but-unconfirmed until it survives normal use.
+- **`repeat_penalty` added 2026-08-26, still in place, still not isolated-
+  tested** - `OLLAMA_SYSTEM_PROPERTIES::repeat_penalty` (olla.h, default
+  `1.3` vs. Ollama's own bare default of ~1.1 when the option is omitted)
+  is sent as `options.repeat_penalty` on every request
   (`ollama_system::send()`, olla.cpp). Added to test a real finding: a raw
-  wire-level capture (request/response exactly as sent/received, not the
-  app's parsed view - see the reverted debug-log design in [[olli-time-
-  repeat-bug]] memory if rebuilding it) showed the model's *primary*
-  response locking onto a short phrase and repeating it verbatim across
-  several unrelated follow-up turns in the same conversation, independent
-  of sidetrack's second-guess review or any prompt wording tried. Six
-  different code/prompt fixes targeting other hypotheses were tried and
-  found to change nothing, then reverted - see the memory entry for the
-  full list (not duplicated here, this is the one thing kept). Test this
-  before trying anything else on that memory entry.
-- **Presence tool bug found, NOT fixed (reverted 2026-08-26)** -
-  `tools/presence/presence.cpp`'s `handle_identity()` resets
-  `last_fired_state = PresenceState::UNKNOWN` on *every* reconnect to
-  olli, not just when the tracked profile changes - so a plain olli
-  restart while already home re-fires a fresh "just got home" event for
-  no real reason. Confirmed via the wire log above. A fix (guard the
-  reset on the profile actually changing) was implemented and verified
-  logically sound, then reverted along with everything else that session
-  per an explicit "undo everything since the checkpoint" request - it was
-  never the wrong fix, just swept up in the revert. Reapply on its own
-  merits next time this file is touched.
+  wire-level capture showed the model's *primary* response locking onto a
+  short phrase and repeating it verbatim across several unrelated follow-up
+  turns, independent of sidetrack's review. Untouched during the 2026-08-27
+  fix above, so no data yet on whether it's pulling its own weight
+  independent of the disk-write bug fix.
+- **Presence tool: fixed 2026-08-27** - both known issues resolved and
+  live-tested. (1) `handle_identity()`'s `last_fired_state` reset (found
+  2026-08-26, reverted that session, reapplied now) is now guarded on the
+  profile actually changing, not fired on every reconnect. (2) Detection
+  logic (`combine_states()`, presence.cpp) changed from AND/AND (both
+  backends must agree for either HOME or AWAY) to OR/AND: HOME fires as
+  soon as *either* Bluetooth or Wi-Fi independently debounces to HOME
+  (quick to notice someone's back), AWAY still requires *both* to agree
+  (conservative about declaring the house empty - one flaky backend miss
+  shouldn't read as "left"). Confirmed live: Bluetooth alone pushed Combined
+  to HOME while Wi-Fi was still debouncing, and a later Bluetooth miss
+  didn't flip Combined off HOME since Wi-Fi still had it.
+- **Sidetrack is planned for a rewrite - context to carry forward.** Decided
+  2026-08-27, during the repeat-bug investigation above. Relevant going in:
+  - The disk-write bug and fold-guard fix above are real, confirmed, and
+    worth keeping regardless of when/how the rewrite happens - don't
+    rediscover them from scratch.
+  - A new debug-logging capability landed the same day, built specifically
+    to make sessions like this legible: `debug_full_history.txt`
+    (`debug_log_message()`/`debug_log_instance_event()`, `helper_olli.h`/
+    `.cpp`) now tags every line with which `ollama_system` instance
+    produced it (`ollama_system::debug_label`, olla.h - "chat",
+    "sidetrack-review", "sidetrack-consolidate", "task-runner:<intent
+    phrase>") and brackets each instance's lifetime with `=== instance
+    created/closed: <label> ===` markers. Previously every instance's
+    output was interleaved and indistinguishable in that file. Use this
+    first when investigating sidetrack behavior for the rewrite - it should
+    make it much easier to see exactly what the review pass sent/received
+    without cross-referencing timestamps or guessing from content alone.
+  - Explored giving sidetrack's review real access to the main `tools_list`
+    (so it could actually execute a tool call it decides is warranted, not
+    just comment) - backed out of before implementing anything. Two real
+    problems, not just one: sharing the same `std::vector` across sidetrack's
+    background thread and the main thread risks a real data race (a
+    `push_back` from a new remote-tool registration could reallocate the
+    buffer mid-iteration on the other thread); and remote tools like `hue`
+    maintain exactly one blocking, non-multiplexed connection - we already
+    saw a single thread issuing two overlapping calls produce a corrupted
+    "unexpected response from remote tool" mismatch, so two threads doing
+    it would only make that worse, not new but more frequent. Whatever the
+    rewrite does here, this needs a real answer, not just wiring the
+    reference through.
+  - The user found a separate, distinct problem in the second-guess routine
+    while testing 2026-08-27 (not detailed here - flagged as needing more
+    thought before the rewrite, not written up yet). Ask before assuming
+    it's the same class of issue as anything above.
+  - Jump instances (`jump_input()`'s "I'm home."/"I'm leaving."/etc.
+    phrase-triggered Hue-scene block, olla.cpp) were removed entirely
+    2026-08-27, along with `TOOL_PERMISSIONS_CLASS` (see the tools rework
+    entry above) - neither was ever actually used. `jump_input()` itself
+    stays, now handling only "bye"/"quit"/"Goodbye." exit phrases.
 - **Pre-load the model at startup** - right now the model only loads on the
   first message; see if Ollama's keep-alive/preload mechanism (an empty
   `/api/chat` request, or similar) can warm it up during olli's own startup
@@ -138,6 +214,16 @@ not needed elsewhere.
 
 ## Display / OUTPUT_CLASS
 
+- **Done 2026-08-27: right-side tools panel.** `display_with_ncurses()`
+  (user_io.cpp) now reserves a fixed-width column on the right (`win_tools`,
+  full screen height, hidden below ~43 total columns rather than squeezing
+  everything else unreadably thin) listing every currently available tool
+  name. `IO_WORKER_CLASS::exchange()` (io_worker.cpp) takes the caller's
+  `tools_list` now and copies just the names into its own `tool_names`
+  member at the same PROCESSING-wait sync point it already uses for
+  `staged` - reuses each tool's own `register_tool()` into a throwaway json
+  array rather than adding a separate name-only accessor to `TOOL_BASE`, so
+  there's one source of truth for what counts as "available."
 - **Task runner (`TOOL_TASK_RUNNER::handle_tool`, tools.cpp) doesn't display
   text correctly during an automation** - running `run system test`
   (2026-08-21) surfaced this. One specific cause is already fixed: its local

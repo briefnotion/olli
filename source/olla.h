@@ -307,7 +307,17 @@ class ollama_system {
         // text anywhere in between). "Turn" here means one real user
         // message (or, for a background task-runner instance, one scripted
         // command - each is fed in via send(..., "user") too, so the same
-        // reset applies there without special-casing it).
+        // reset applies there without special-casing it) - also reset at
+        // the top of TOOL_REMOTE::monitor_tool()'s "event" handling
+        // (remote_tools.cpp), since a pushed event (a presence transition,
+        // a timer expiring) is likewise a fresh, externally-initiated topic
+        // rather than a continuation of an existing chain. Without that
+        // second reset point, an idle session accumulates this count across
+        // every unrelated background event it ever receives (nothing but a
+        // real user message ever zeroed it), eventually tripping the cap
+        // and then silently dropping every future event's action for the
+        // rest of the session - observed for real with a flapping presence
+        // sensor.
         int tool_calls_this_turn = 0;
 
         ollama_system_status status;    

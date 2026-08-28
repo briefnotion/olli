@@ -57,22 +57,35 @@ inline std::ofstream g_debug_log_file;
 // before any thread that might log has started.
 void debug_log_reset(const std::filesystem::path& filepath);
 
-// Appends one "[instance_label][role] content" line and flushes immediately,
-// so the log is current even if the process is killed rather than exited
-// cleanly. Thread-safe - any ollama_system instance, from any thread, can
-// call this. instance_label is ollama_system::debug_label (olla.h) - a
-// short human-readable tag ("chat", "sidetrack-review", "task-runner:water
-// the plants", ...) set once per instance at creation, distinguishing which
-// instance produced this line, since main chat/sidetrack's review/task-
-// runner automation instances/jump-phrase instances all funnel through the
-// same send()/completion code and write to this one shared file.
+// Appends one record and flushes immediately, so the log is current even if
+// the process is killed rather than exited cleanly:
+//
+//   === <instance_label> / <role> ===
+//   Time:    HH:MM:SS.mmm
+//   Content: <content, possibly spanning several more lines>
+//   ------------------------------------
+//
+// Same record shape debug_log_instance_event() below uses (see
+// write_record(), helper_olli.cpp) - every entry in debug_full_history.txt
+// reads the same way no matter which of the two wrote it, and the closing
+// rule line unambiguously bounds a record even when its own content spans
+// many lines or contains bracket-looking text of its own. Thread-safe - any
+// ollama_system instance, from any thread, can call this. instance_label is
+// ollama_system::debug_label (olla.h) - a short human-readable tag ("chat",
+// "sidetrack-review", "task-runner:water the plants", ...) set once per
+// instance at creation, distinguishing which instance produced this record,
+// since main chat/sidetrack's review/task-runner automation instances all
+// funnel through the same send()/completion code and write to this one
+// shared file.
 void debug_log_message(const std::string& instance_label, const std::string& role, const std::string& content);
 
-// Appends a standalone "=== <event>: <instance_label> ===" line - call at
-// an instance's creation and again right before it goes out of scope/stops
+// Appends one record in the same shape as debug_log_message() above, with
+// "EVENT" standing in for role and the event description ("instance
+// created"/"instance closed") standing in for content. Call at an
+// instance's creation and again right before it goes out of scope/stops
 // being used, so the log shows exactly when each instance existed alongside
-// its interleaved messages (debug_log_message() above). Same file/mutex as
-// debug_log_message() - always call after debug_log_reset() has run.
+// its interleaved messages. Same file/mutex as debug_log_message() - always
+// call after debug_log_reset() has run.
 void debug_log_instance_event(const std::string& instance_label, const std::string& event);
 
 // ----

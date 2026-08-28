@@ -384,6 +384,25 @@ void TOOL_REMOTE::monitor_tool(ollama_system& chat, CLASS_SYSTEM*, std::vector<s
                     return;
                 }
             } else if (type == "event") {
+                // A pushed event (presence transition, timer expiry, ...) is
+                // a fresh, externally-initiated topic, not a continuation of
+                // whatever tool-call chain was last in progress - the same
+                // category as a real user message or a task-runner's next
+                // scripted command (see tool_calls_this_turn's comment in
+                // olla.h for why those reset it). Without this, an idle
+                // session accumulates tool_calls_this_turn across every
+                // unrelated background event it ever receives, since only a
+                // "user"-role send() resets it - eventually tripping the cap
+                // and then silently dropping every future event's action for
+                // the rest of the session (observed for real: a flapping
+                // presence sensor firing several transitions jammed this for
+                // good). Resetting here still leaves the original guard
+                // intact for the actual bug it targets - the model chaining
+                // tool call after tool call off ITS OWN DIRECTOR_NOTE
+                // replies to one single event - since that chain runs
+                // through dispatch_tool_call(), not back through here.
+                chat.tool_calls_this_turn = 0;
+
                 std::string message = msg.value("message", "");
                 if (!message.empty()) {
                     chat.log("[RemoteTools] Event from remote tool: " + message + "\n");

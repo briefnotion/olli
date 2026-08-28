@@ -104,6 +104,106 @@ not needed elsewhere.
   shouldn't read as "left"). Confirmed live: Bluetooth alone pushed Combined
   to HOME while Wi-Fi was still debouncing, and a later Bluetooth miss
   didn't flip Combined off HOME since Wi-Fi still had it.
+  - **Two more real bugs found and fixed 2026-08-28, live-tested against
+    the user's own real phone/home setup** (root-caused from `ron`'s
+    `debug_full_history.txt`, which showed rapid home/away flapping
+    followed by a permanently jammed `check_presence` - see the
+    `tool_calls_this_turn` entry below for the second half of that
+    symptom). (1) **Debounce was symmetric, should only ever have applied
+    to the disconnect side** - `BackendTracker::record()` required
+    `home_debounce_hits` consecutive hits before flipping a backend to
+    HOME, same as AWAY's miss-count. A real detection can't be a false
+    positive (nothing responds to an `l2ping`/answers an ARP probe from
+    empty air), so debouncing HOME only delayed genuine arrivals and let
+    the two backends disagree long enough to flap. Bluetooth already had
+    an ad-hoc single-hit-HOME exception (`bt_tracker.record(bt_present, 1,
+    ...)`) with a comment explaining why; Wi-Fi didn't. Fixed by making
+    HOME unconditional-on-one-hit for *both* backends (removed
+    `home_debounce_hits` from `PresenceSettings` entirely - fully dead
+    once both backends work the same way) and leaving AWAY's
+    `away_debounce_misses` debounce as the only debounce that exists now,
+    still per-backend, still required from both backends independently
+    (`combine_states()`, unchanged) before AWAY fires overall. (2)
+    **Startup identity race, not occasional - guaranteed on every single
+    connect.** `last_poll` starts at `time_point{}` (epoch), so the very
+    first poll tick always fires before there's been time for even a
+    localhost round trip to olli and back for the "identity" reply - that
+    first poll ran under the shared/no-profile settings, reported the
+    event as "Someone" (not the real profile name, no configured action)
+    with whatever real signal it found, then fired a SECOND, duplicate
+    event once identity actually arrived and `profile_changed` reset
+    `last_fired_state`. Fixed with a new `identity_received` bool (false
+    until `handle_identity()` sets it, cleared again in
+    `reset_to_default_profile()` on disconnect) gating the transition-fire
+    block in `main()`'s poll loop. Confirmed on a real restart: exactly
+    one correctly-attributed event now, no "Someone" duplicate.
+- **`tool_calls_this_turn` never reset for a background-pushed event, so it
+  eventually jammed every future tool call for the rest of the session -
+  found and fixed 2026-08-28.** The other half of the presence-flapping
+  symptom above: `dispatch_tool_call()` (`tools.cpp`) caps tool calls at
+  `PROPS.max_tool_calls_per_turn` (4) per "turn," where a turn's boundary
+  is defined as "since the last `role=="user"` `send()`" (`olla.cpp`).
+  That definition only accounted for a real user message or a task-runner's
+  next scripted command - it didn't account for a pushed remote-tool
+  `event` (`TOOL_REMOTE::monitor_tool()`, `remote_tools.cpp` - a presence
+  transition, a timer expiring), which is just as much a fresh,
+  externally-initiated topic as either of those, but shared the same
+  never-reset counter. An idle session accumulates this count across every
+  unrelated background event it ever receives, and once four had gone by
+  (trivial for a flapping sensor), every subsequent tool call - including
+  a completely unrelated, legitimate `check_presence` - started getting
+  silently rejected with "Too many tool calls this turn," for the rest of
+  the session, with no recovery short of a real user message. Fixed by
+  resetting `tool_calls_this_turn = 0` at the top of the `event` branch in
+  `TOOL_REMOTE::monitor_tool()`, before `integrate_tool_result()` runs -
+  the original per-event runaway-chain guard (the actual bug it was built
+  for - see `tool_calls_this_turn`'s own comment in `olla.h`) is untouched,
+  since the model chaining tool call after tool call off its own
+  DIRECTOR_NOTE reply to one event still runs through `dispatch_tool_call()`
+  and still hits the cap within that single event's chain. Confirmed live
+  against `ron`'s real airplane-mode test: zero cap errors on either
+  transition.
+- **`debug_full_history.txt`'s per-line format standardized 2026-08-28** -
+  builds on the instance-labeling capability from 2026-08-27 below.
+  `debug_log_message()`/`debug_log_instance_event()` (`helper_olli.cpp`)
+  now both funnel through one shared `write_record()`, so every entry -
+  message or instance created/closed marker, from any instance - gets the
+  identical shape: a `=== <instance_label> / <role-or-EVENT> ===` header, a
+  millisecond timestamp, a `Content:` line, and a closing rule
+  (`------------------------------------`, matching `history_write()`'s
+  own existing rule-line convention in `olla.cpp` rather than inventing a
+  second style). Fixes a real readability problem the old one-line format
+  had: multi-line content (a DIRECTOR_NOTE, or `sidetrack-consolidate`'s
+  own summarization prompt, which quotes older `[role]: content` verbatim)
+  used to be visually indistinguishable from a real per-message header on
+  the line right above or below it - confirmed as a genuine source of
+  confusion while reading a real session's log during the presence-bug
+  investigation above.
+- **Sidetrack rewrite: a first attempt was made and reverted 2026-08-28 -
+  nothing kept, but worth knowing before trying again.** Wrote a
+  `SIDETRACK_CLASS_V2` skeleton (`sidetrack.h`/`.cpp`, currently commented
+  out) dropping the background-thread design entirely, and started moving
+  `COMMS` off `ollama_system` as an owned member toward `main.cpp` owning
+  the one real instance instead (in the spirit of `tools_list`'s existing
+  move to a reference parameter - see the tools rework entry above) -
+  including dropping `COMMS::audio` on the theory that audio should only
+  ever be touched by `IO_WORKER_CLASS::thread_main()`, not carried on
+  `COMMS` at all. Both changes were left half-wired (`ollama_system`'s
+  many internal `comms.*` call sites in `olla.cpp` were never updated to
+  match, so it didn't compile) and were reverted back to the pre-attempt
+  state (`git restore`) rather than pushed further, after finding enough
+  else "messed up" mid-edit to want a clean restart. Whether `COMMS`
+  should move off `ollama_system` the way `tools_list` did is still an
+  open, reasonable-sounding direction - it just wasn't carried through far
+  enough this attempt to know if it's right. Next attempt should decide
+  that up front rather than discovering it mid-rewrite: does every
+  `ollama_system` method that touches `comms` today (`log()`,
+  `write_to_tts()`, `input()`, `send()`'s streaming loop,
+  `spawn_background_task()`) take it as a threaded-through reference
+  parameter (matches `tools_list`'s precedent exactly, but touches a lot of
+  signatures), or does `ollama_system` keep a `COMMS*` pointer member set
+  once (mirrors how `COMMS::audio` itself already worked, far smaller
+  diff)?
 - **Sidetrack is planned for a rewrite - context to carry forward.** Decided
   2026-08-27, during the repeat-bug investigation above. Relevant going in:
   - The disk-write bug and fold-guard fix above are real, confirmed, and
@@ -115,12 +215,15 @@ not needed elsewhere.
     `.cpp`) now tags every line with which `ollama_system` instance
     produced it (`ollama_system::debug_label`, olla.h - "chat",
     "sidetrack-review", "sidetrack-consolidate", "task-runner:<intent
-    phrase>") and brackets each instance's lifetime with `=== instance
-    created/closed: <label> ===` markers. Previously every instance's
-    output was interleaved and indistinguishable in that file. Use this
-    first when investigating sidetrack behavior for the rewrite - it should
-    make it much easier to see exactly what the review pass sent/received
-    without cross-referencing timestamps or guessing from content alone.
+    phrase>") and brackets each instance's lifetime with an instance
+    created/closed marker. Previously every instance's output was
+    interleaved and indistinguishable in that file. Use this first when
+    investigating sidetrack behavior for the rewrite - it should make it
+    much easier to see exactly what the review pass sent/received without
+    cross-referencing timestamps or guessing from content alone. **Format
+    standardized further 2026-08-28** - see its own entry above
+    (`write_record()`, `helper_olli.cpp`) for the ruled-header/timestamp/
+    `Content:` shape every entry now shares.
   - Explored giving sidetrack's review real access to the main `tools_list`
     (so it could actually execute a tool call it decides is warranted, not
     just comment) - backed out of before implementing anything. Two real

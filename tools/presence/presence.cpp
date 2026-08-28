@@ -20,11 +20,12 @@
 // Both run every tick regardless of mode - the only difference --test makes
 // (see main()) is whether a debounced HOME/AWAY *transition* actually fires
 // the configured action, or just gets logged for comparison. Per-backend
-// results are debounced independently (N consecutive hits/misses before
-// that backend's own state flips - see BackendTracker::record()), and the
-// two backends must independently agree before anything is considered
-// settled - see combine_states(). Disagreement isn't an error, it's just
-// "not sure yet" - nothing fires until both sides say the same thing.
+// results are debounced asymmetrically (see BackendTracker::record()): a
+// single hit flips a backend to HOME immediately, but N consecutive misses
+// are required before it flips to AWAY - and the two backends must
+// independently agree on AWAY before anything is considered settled - see
+// combine_states(). Disagreement isn't an error, it's just "not sure yet" -
+// nothing fires until both sides say the same thing.
 //
 // Settings (MAC/IP to watch, poll interval, debounce counts, what to do on
 // arrival/departure) are per-profile, loaded fresh from whichever identity
@@ -147,11 +148,12 @@ namespace {
         int poll_interval_seconds = 30;
         DetectionMode detection_mode = DetectionMode::BOTH;
 
-        // How many consecutive hits/misses one backend needs before ITS OWN
-        // debounced state flips - see BackendTracker::record(). Independent
-        // of the other backend; combine_states() is what requires
-        // agreement between the two.
-        int home_debounce_hits = 2;
+        // How many consecutive misses one backend needs before ITS OWN
+        // debounced state flips to AWAY - see BackendTracker::record().
+        // HOME has no equivalent: a hit flips a backend to HOME immediately,
+        // no debounce - see record()'s own comment for why. Independent of
+        // the other backend; combine_states() is what requires agreement
+        // between the two.
         int away_debounce_misses = 2;
 
         // {"tool": "...", "arguments": {...}} - same shape as olli's own
@@ -188,7 +190,6 @@ namespace {
         j["wifi_ip"] = s.wifi_ip;
         j["poll_interval_seconds"] = s.poll_interval_seconds;
         j["detection_mode"] = detection_mode_name(s.detection_mode);
-        j["home_debounce_hits"] = s.home_debounce_hits;
         j["away_debounce_misses"] = s.away_debounce_misses;
         j["on_home_action"] = s.on_home_action;
         j["on_away_action"] = s.on_away_action;
@@ -218,7 +219,6 @@ namespace {
             s.wifi_ip = j.value("wifi_ip", s.wifi_ip);
             s.poll_interval_seconds = j.value("poll_interval_seconds", s.poll_interval_seconds);
             s.detection_mode = parse_detection_mode(j.value("detection_mode", detection_mode_name(s.detection_mode)));
-            s.home_debounce_hits = j.value("home_debounce_hits", s.home_debounce_hits);
             s.away_debounce_misses = j.value("away_debounce_misses", s.away_debounce_misses);
             s.on_home_action = j.value("on_home_action", s.on_home_action);
             s.on_away_action = j.value("on_away_action", s.on_away_action);
@@ -346,8 +346,16 @@ namespace {
         std::chrono::steady_clock::time_point last_check{};
         std::chrono::milliseconds last_latency{0};
 
-        void record(bool present, int home_debounce_hits, int away_debounce_misses,
-                    std::chrono::milliseconds latency)
+        // HOME flips on a single hit, no debounce - a real response (a
+        // Bluetooth echo, a live ARP entry) can't be a false positive, so
+        // waiting for a second one only delays noticing a genuine arrival
+        // for no benefit (real-world testing showed this stalling arrivals
+        // for a while whenever a backend flapped hit/miss/hit even while
+        // genuinely in range). A miss is the ambiguous case - could be
+        // interference, could be a phone that's actually gone - so AWAY
+        // still waits for away_debounce_misses consecutive misses before
+        // this backend's own state flips.
+        void record(bool present, int away_debounce_misses, std::chrono::milliseconds latency)
         {
             has_checked = true;
             last_result = present;
@@ -357,7 +365,7 @@ namespace {
             if (present) {
                 consecutive_hits++;
                 consecutive_misses = 0;
-                if (consecutive_hits >= home_debounce_hits) state = PresenceState::HOME;
+                state = PresenceState::HOME;
             } else {
                 consecutive_misses++;
                 consecutive_hits = 0;
@@ -413,6 +421,19 @@ namespace {
     PresenceState last_fired_state = PresenceState::UNKNOWN;
     auto last_poll = std::chrono::steady_clock::time_point{};
 
+    // False until the first "identity" message actually arrives. last_poll's
+    // epoch-initialized default (below) makes the very first poll tick fire
+    // immediately, before there's been time for even a localhost round trip
+    // to olli and back - so without this flag, that first poll always ran
+    // under the shared/no-profile settings (whatever real signal it found
+    // got reported as "Someone", not the real profile name) and then fired
+    // AGAIN once identity arrived and profile_changed reset last_fired_state
+    // - a guaranteed duplicate event on every single startup, not just an
+    // occasional race. See main()'s poll block for where this actually gates
+    // firing (still lets both backends' debounce tracking run every tick
+    // regardless - only suppresses acting on it before we know who we are).
+    bool identity_received = false;
+
     std::string handle_identity(const json& msg)
     {
         std::string new_profile_name = msg.value("name", "");
@@ -422,6 +443,7 @@ namespace {
         settings = load_settings(current_profile_name);
         bt_tracker.reset();
         wifi_tracker.reset();
+        identity_received = true;
 
         // Only clear last_fired_state on an actual profile switch. Every
         // olli reconnect (e.g. a restart while already home) sends a fresh
@@ -452,6 +474,7 @@ namespace {
         bt_tracker.reset();
         wifi_tracker.reset();
         last_fired_state = PresenceState::UNKNOWN;
+        identity_received = false;
     }
 
     // =====================================================================
@@ -543,7 +566,7 @@ namespace {
         ss << "Presence setup for " << (current_profile_name.empty() ? "shared default" : current_profile_name)
            << ": detection_mode=" << detection_mode_name(settings.detection_mode)
            << ", poll every " << settings.poll_interval_seconds << "s"
-           << ", debounce " << settings.home_debounce_hits << " hits / " << settings.away_debounce_misses << " misses"
+           << ", away debounce " << settings.away_debounce_misses << " misses (home is immediate)"
            << ". On home: " << describe_action(settings.on_home_action)
            << ". On away: " << describe_action(settings.on_away_action) << ".";
         return ss.str();
@@ -981,25 +1004,13 @@ int main(int argc, char* argv[])
             bool bt_present = check_bluetooth_present(settings.bluetooth_mac);
             auto bt_latency = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - bt_start);
-            // Bluetooth's own HOME debounce is fixed at 1 hit, not
-            // settings.home_debounce_hits - a real l2ping response is a
-            // strong positive signal (nothing responds from empty air), so
-            // there's little to gain from waiting for a second one, and
-            // real-world testing showed Bluetooth flapping hit/miss/hit
-            // even while genuinely in range (likely iOS being lazy about a
-            // fresh connection each poll, or plain interference) - a 2-hit
-            // requirement can otherwise stall a real, already-true arrival
-            // for a long time whenever a miss lands between two hits and
-            // resets the streak. A miss is still ambiguous either way
-            // (same causes), so away_debounce_misses still applies
-            // normally, same as Wi-Fi's own symmetric debounce below.
-            bt_tracker.record(bt_present, 1, settings.away_debounce_misses, bt_latency);
+            bt_tracker.record(bt_present, settings.away_debounce_misses, bt_latency);
 
             auto wifi_start = std::chrono::steady_clock::now();
             bool wifi_present = check_wifi_present(settings.wifi_ip);
             auto wifi_latency = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - wifi_start);
-            wifi_tracker.record(wifi_present, settings.home_debounce_hits, settings.away_debounce_misses, wifi_latency);
+            wifi_tracker.record(wifi_present, settings.away_debounce_misses, wifi_latency);
 
             // Keep the bottom status line current every poll, not just on a
             // transition - it used to sit frozen on the startup
@@ -1018,7 +1029,14 @@ int main(int argc, char* argv[])
             }
 
             PresenceState agreed = combine_states(bt_tracker, wifi_tracker, settings.detection_mode);
-            if (agreed != PresenceState::UNKNOWN && agreed != last_fired_state) {
+            // identity_received guards this even though agreed/last_fired_state
+            // alone would usually suffice - see its own comment above for why
+            // the very first poll tick otherwise always fires once under
+            // whatever settings happened to be loaded before identity ever
+            // arrived (a real signal there isn't a false positive, so this
+            // isn't about debounce - it's purely about not acting, or
+            // labeling who's home, before olli has said which profile this is).
+            if (identity_received && agreed != PresenceState::UNKNOWN && agreed != last_fired_state) {
                 bool going_home = (agreed == PresenceState::HOME);
                 std::string who = current_profile_name.empty() ? "Someone" : current_profile_name;
                 std::string message = who + (going_home ? " just got home." : " just left.");

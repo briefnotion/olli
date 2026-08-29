@@ -83,26 +83,27 @@ namespace {
  * own freshly exec()'d process every time; has no idea it's being
  * supervised at all.
  *
- * Four moving pieces, three of which run on their own background thread:
+ * Three moving pieces, each running on its own background thread:
  *   - chat (ollama_system)       the conversation itself; a chat_thread is
  *                                 spawned per turn (see ollama_system::input)
  *   - sidetrack (SIDETRACK_CLASS) history consolidation + the post-turn
  *                                 "second guess" review - see sidetrack.h
  *                                 for the two-thread design
- *   - io_worker (IO_WORKER_CLASS) keyboard input, voice input (polled from
- *                                 system.audio_control), and screen drawing
- *                                 - see io_worker.h. The main loop below
- *                                 only ever talks to it via exchange
- *                                 (chat.comms) once per tick.
- *   - system.audio_control        owns text-to-speech (audio_control.h);
- *                                 speech is driven by each ollama_system
- *                                 instance's own comms.audio (comms.h),
- *                                 pointed at this same instance below so
- *                                 chat, sidetrack, etc. can all speak
- *                                 through it
- * VOCA (speech-to-text) runs in-process via system.audio_control (see
- * audio_control.h/voca.hpp) - its transcripts are polled and merged into a
- * submission by io_worker's own thread, same as a typed line.
+ *   - io_worker (IO_WORKER_CLASS) keyboard input, voice input/output, and
+ *                                 screen drawing - see io_worker.h. Owns
+ *                                 text-to-speech/speech-to-text privately
+ *                                 (nothing outside io_worker.h/.cpp touches
+ *                                 either); exchange() below fans chat.comms's
+ *                                 own INPUT_FROM_LLM out into io_worker's own
+ *                                 comms_buffer_audio and speaks that
+ *                                 directly - sidetrack has no speech path of
+ *                                 its own right now (see olla.h's note near
+ *                                 output_buffer_mutex). The main loop below
+ *                                 only ever talks to io_worker via exchange
+ *                                 (chat, chat.comms) once per tick.
+ * VOCA (speech-to-text) runs in-process via io_worker (see io_worker.h) -
+ * its transcripts are polled and merged into a submission by io_worker's
+ * own thread, same as a typed line.
  *
  * crash_restart: true if this run followed a crash (see main()'s
  * --crash-restart marker) - logged once startup completes, so a crash is a
@@ -202,27 +203,32 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
             chat.log("[System] Recovered from a previous crash - starting fresh.\n");
         }
 
-        // Wires up TTS output (see COMMS::audio's comment in comms.h).
-        // sidetrack.create() below points SIDETRACK_CHAT_INSTANCE's own
-        // comms.audio at the same instance, so its generated text (the
-        // "second guess" review) can be spoken too, not just chat's.
-        chat.comms.audio = &system.audio_control;
-
-        // Voca's whisper model lives in the shared ~/olli_files/models, not the
+        // TTS output no longer needs wiring up here - COMMS::audio is gone;
+        // IO_WORKER_CLASS::exchange() (io_worker.cpp) fans chat.comms's own
+        // INPUT_FROM_LLM out into its private comms_buffer_audio and speaks
+        // that directly. sidetrack's own generated text has no speech path
+        // at all right now (sidetrack is being reworked) - see olla.h's
+        // note near output_buffer_mutex.
+        //
+        // io_worker owns text-to-speech/speech-to-text privately (see
+        // IO_WORKER_CLASS's class comment, io_worker.h) - create() below
+        // just stashes the shared settings path; tts/voca themselves aren't
+        // constructed/started until io_worker.thread_start() below actually
+        // runs thread_main() (see its own comment for why). Voca's whisper
+        // model lives in the shared ~/olli_files/models, not the
         // per-profile directory (see Settings::get_shared_path()).
-        system.audio_control.create(system.setings_vars.get_shared_path());
-        system.audio_control.thread_start();
+        io_worker.create(system.setings_vars.get_shared_path());
 
-        sidetrack.create(chat.PROPS, &system.audio_control);
-        sidetrack.thread_start();
+        // sidetrack is being reworked - commented out for now.
+        //sidetrack.create(chat.PROPS, &io_worker);
+        //sidetrack.thread_start();
 
-        io_worker.create(chat, sidetrack, system.audio_control);
         io_worker.key_input.PROPS.ENABLED = true;
         // Under ncurses, keyboard_input()'s own raw per-character echo would
         // corrupt the ncurses-controlled screen - the input window renders the
         // typed line itself instead (see display_with_ncurses()).
         io_worker.key_input.PROPS.RAW_ECHO = !USE_NCURSES;
-        io_worker.thread_start();
+        io_worker.thread_start(chat);
 
         // No separate priming call needed here (there used to be one - a
         // one-off get_response()+display() to flush chat.open()'s startup
@@ -277,21 +283,21 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
             // class comment). This relays whatever it staged this tick
             // (a submitted line, a stop-request, an exit-request) into
             // chat.comms.
-            io_worker.exchange(chat.comms, tools_list);
+            io_worker.exchange(chat, chat.comms, tools_list);
 
-            // Ctrl+C - see COMMS::exit_requested's comment (comms.h) for
+            // Ctrl+C - see COMMS::EXIT_REQUESTED's comment (comms.h) for
             // why this needs its own handling instead of a real SIGINT.
             // Checked before anything else this tick since it should win
             // over any in-progress work, same as it would as a real signal.
-            if (chat.comms.exit_requested)
+            if (chat.comms.EXIT_REQUESTED)
             {
-                chat.comms.exit_requested = false;
+                chat.comms.EXIT_REQUESTED = false;
                 chat.request_exit();
                 continue;
             }
 
-            // Stops an in-flight response if comms.stop_requested, and/or
-            // submits comms.submitted_line as a new message if comms.send.
+            // Stops an in-flight response if comms.INTERRUPTED, and/or
+            // submits comms.INPUT_FROM_USER as a new message if comms.ENTER_PRESSED.
             // Returns true once a full response cycle has completed (see
             // olla.cpp for the exact conditions), at which point we're
             // ready for new input.
@@ -304,20 +310,21 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
 
             // Runs sidetrack's main-thread half of both routines' state
             // machines - see SIDETRACK_CLASS::check's doc comment.
-            sidetrack.check(chat);
+            // sidetrack is being reworked - commented out for now.
+            //sidetrack.check(chat);
 
-            if (sidetrack.SIGNALS.CONTEXT_CLEARED_SIGNAL)
-            {
-                sidetrack.SIGNALS.CONTEXT_CLEARED_SIGNAL = false;
-                // A cleared context is a conversation sidetrack considers
-                // "over" - close the chat log the same way real program exit
-                // does (see the other close_chat_log() call site below).
-                // Relayed through comms rather than called directly - the
-                // worker thread is still running here, and it's the only
-                // safe caller of output's methods (see COMMS::
-                // close_chat_log_requested's comment, comms.h).
-                chat.comms.close_chat_log_requested.store(true);
-            }
+            //if (sidetrack.SIGNALS.CONTEXT_CLEARED_SIGNAL)
+            //{
+            //    sidetrack.SIGNALS.CONTEXT_CLEARED_SIGNAL = false;
+            //    // A cleared context is a conversation sidetrack considers
+            //    // "over" - close the chat log the same way real program exit
+            //    // does (see the other close_chat_log() call site below).
+            //    // Relayed through comms rather than called directly - the
+            //    // worker thread is still running here, and it's the only
+            //    // safe caller of output's methods (see COMMS::
+            //    // close_chat_log_requested's comment, comms.h).
+            //    chat.comms.close_chat_log_requested.store(true);
+            //}
 
             // Drawing (and pulling chat/background-tasks/sidetrack output
             // into it) now happens every io_worker tick, not here - see
@@ -325,7 +332,8 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
 
             if (response_complete)
             {
-                sidetrack.SIGNALS.CHAT_FINISHED_SIGNAL = true;
+                // sidetrack is being reworked - commented out for now.
+                //sidetrack.SIGNALS.CHAT_FINISHED_SIGNAL = true;
                 // Under ncurses the input window's "> " prompt is always
                 // visible, so there's no separate "ready for input" line to
                 // print - that's the plain-display()'s equivalent of it.
@@ -346,9 +354,12 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
 
-        // io_worker owns key_input/output exclusively - its thread must be
-        // fully stopped (joined) before anything else touches them again,
-        // including the end_ncurses()/close_chat_log() calls right below.
+        // io_worker owns key_input/output/audio exclusively - its thread
+        // must be fully stopped (joined) before anything else touches them
+        // again, including the end_ncurses()/close_chat_log() calls right
+        // below. This also stops Voca once that join completes (see
+        // IO_WORKER_CLASS::thread_stop()'s own comment for why that order
+        // matters) - no separate audio thread_stop() call needed anymore.
         // See IO_WORKER_CLASS's class comment (io_worker.h).
         io_worker.thread_stop();
 
@@ -378,13 +389,10 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         // process, so without this it would stay loaded after olli exits too.
         chat.unload_model();
 
-        // audio_control's thread_stop must actually join before we start
-        // tearing this process down (see AUDIO_CONTROL_CLASS::thread_stop for
-        // why - the same reasoning as SIDETRACK_CLASS::thread_stop below).
-        system.audio_control.thread_stop();
         system.setings_vars.save_settings();
 
-        sidetrack.thread_stop();
+        // sidetrack is being reworked - commented out for now.
+        //sidetrack.thread_stop();
 
         // Matches curl_global_init() near the top of this function - safe to
         // call now that every thread that could have touched curl

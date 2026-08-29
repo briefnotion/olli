@@ -4,7 +4,6 @@
 #include <string>
 
 #include "helper_olli.h"
-#include "audio_control.h"
 #include "remote_tools.h"
 
 class CLASS_SYSTEM
@@ -14,13 +13,14 @@ class CLASS_SYSTEM
     public:
         Settings setings_vars;
 
-        // Keyboard input and screen display used to live here (key_input/
-        // output) - both now live on IO_WORKER_CLASS (io_worker.h/.cpp)
-        // instead, which owns them exclusively (they have zero built-in
-        // thread-safety of their own - see IO_WORKER_CLASS's class
-        // comment). main.cpp constructs an IO_WORKER_CLASS alongside this.
-
-        AUDIO_CONTROL_CLASS audio_control;
+        // Keyboard input, screen display, and audio (text-to-speech/
+        // speech-to-text) used to live here (key_input/output/
+        // audio_control) - all three now live on IO_WORKER_CLASS
+        // (io_worker.h/.cpp) instead, which owns them exclusively (they
+        // have zero built-in thread-safety of their own, or - for audio -
+        // are meant to be reached only through IO_WORKER_CLASS - see
+        // IO_WORKER_CLASS's class comment). main.cpp constructs an
+        // IO_WORKER_CLASS alongside this.
 
         // Who olli is talking to this session - see USER_IDENTITY's own
         // comment in helper_olli.h. Populated once in main.cpp, right where

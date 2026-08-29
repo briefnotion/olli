@@ -18,7 +18,6 @@
 #include "helper_olli.h"
 //#include "tools.h"
 #include "stringthings.h"
-//#include "audio_control.h"
 #include "sidetrack.h"
 #include "io_worker.h"
 

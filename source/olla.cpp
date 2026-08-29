@@ -2,7 +2,7 @@
 #define olla_cpp
 
 #include "olla.h"
-#include "audio_control.h"
+#include "io_worker.h"
 #include "user_io.h"
 #include <algorithm>
 
@@ -38,7 +38,11 @@ ollama_system& ollama_system::spawn_background_task()
 {
     auto new_instance = std::make_unique<ollama_system>();
     ollama_system& ref = *new_instance;
-    ref.comms.audio = comms.audio; // same speaker as the spawning instance
+    // COMMS::audio (a direct pointer to the speaker) doesn't exist anymore -
+    // TTS output now runs through comms_buffer_audio, which only the main
+    // chat's own COMMS gets fanned into via IO_WORKER_CLASS::exchange()
+    // (io_worker.cpp). Background tasks currently have no speech output at
+    // all as a result - unaddressed, see this session's notes.
     background_tasks.push_back(std::move(new_instance));
     return ref;
 }
@@ -391,16 +395,21 @@ void ollama_system::send(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, co
                             accumulated_thinking += t;
                             {
                                 std::lock_guard<std::mutex> lock(output_buffer_mutex);
-                                comms.thinking_buffer += t;
+                                comms.INPUT_FROM_THINKING += t;
                             }
                         }
                         if (msg_chunk.contains("content")) {
                             std::string c = msg_chunk["content"];
                             accumulated_content += c;
-                            comms.tts_buffer += c;
+                            // TTS used to get its own separate feed here
+                            // (comms.tts_buffer) - IO_WORKER_CLASS::exchange()
+                            // now fans comms.INPUT_FROM_LLM itself out into
+                            // its own comms_buffer_audio copy instead (see
+                            // io_worker.cpp), so no separate append is
+                            // needed at the source anymore.
                             {
                                 std::lock_guard<std::mutex> lock(output_buffer_mutex);
-                                comms.response_buffer += c;
+                                comms.INPUT_FROM_LLM += c;
                             }
                         }
 
@@ -475,7 +484,7 @@ void ollama_system::send(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, co
     // stays the only thing that actually writes chat output to the screen.
     {
         std::lock_guard<std::mutex> lock(output_buffer_mutex);
-        comms.response_buffer += "\n";
+        comms.INPUT_FROM_LLM += "\n";
     }
     status.is_active = false;
 }
@@ -685,21 +694,12 @@ void ollama_system::unload_model()
 // ----
 
 
-void ollama_system::write_to_tts()
-{
-    if (!comms.tts_buffer.empty())
-    {
-        if ((comms.tts_buffer.find_first_of(".!?,:;") != std::string::npos || comms.tts_buffer.length() > 60) ||
-        status.is_active == false)
-        {
-            if (comms.audio != nullptr)
-            {
-                comms.audio->speak(tts_filter(comms.tts_buffer));
-            }
-            comms.tts_buffer.clear();
-        }
-    }
-}
+// write_to_tts() used to chunk comms.tts_buffer (punctuation/length/
+// generation-finished heuristic) and hand it to comms.audio->speak() -
+// both are gone now. That job moved to IO_WORKER_CLASS::thread_main()
+// (io_worker.cpp), which chunks comms_buffer_audio.INPUT_FROM_LLM instead
+// (fed from comms.INPUT_FROM_LLM by exchange()), gated on tts->isSpeaking()
+// rather than a punctuation/length heuristic.
 
 bool ollama_system::jump_input()
 {
@@ -715,7 +715,7 @@ bool ollama_system::jump_input()
     // TOOL_PERMISSIONS system it depended on. See git history if this
     // pattern (a throwaway ollama_system instance short-circuiting straight
     // to a scripted action, bypassing the LLM) is ever wanted again.
-    if (trim(comms.submitted_line) == "bye" || trim(comms.submitted_line) == "quit" || trim(comms.submitted_line) == "Goodbye.")
+    if (trim(comms.INPUT_FROM_USER) == "bye" || trim(comms.INPUT_FROM_USER) == "quit" || trim(comms.INPUT_FROM_USER) == "Goodbye.")
     {
         request_exit();
         return true;
@@ -731,14 +731,14 @@ bool ollama_system::jump_input()
 bool ollama_system::input(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list)
 {
     // 1. INTERRUPT - key_input.INTERRUPTED now lives on IO_WORKER_CLASS;
-    // comms.stop_requested is how it reaches here (relayed by
+    // comms.INTERRUPTED is how it reaches here (relayed by
     // IO_WORKER_CLASS::exchange() - see io_worker.cpp). Cleared here,
     // right where it's actually consumed - the "host clears the hosted
     // side comms when needed" half of that design.
-    if (is_processing && comms.stop_requested)
+    if (is_processing && comms.INTERRUPTED)
     {
         log(".");
-        comms.stop_requested = false;
+        comms.INTERRUPTED = false;
 
         stop();
         if (chat_thread.joinable()) chat_thread.join();
@@ -746,14 +746,15 @@ bool ollama_system::input(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list)
         log("\n[Interrupting for new input...]\n");
     }
 
-    // 2. INPUT - comms.send/submitted_line replace key_input.ENTER_PRESSED/LINE.
-    if (comms.send)
+    // 2. INPUT - comms.ENTER_PRESSED/INPUT_FROM_USER replace
+    // key_input.ENTER_PRESSED/LINE.
+    if (comms.ENTER_PRESSED)
     {
         // A real Enter keypress sets INTERRUPTED alongside ENTER_PRESSED
         // (see KEYBOARD_INPUT::keyboard_input(), user_io.cpp) - staged and
-        // relayed together as comms.stop_requested/comms.send from the
-        // same event (io_worker.cpp). If branch 1 above didn't consume
-        // stop_requested (is_processing was false - the normal case for a
+        // relayed together as comms.INTERRUPTED/comms.ENTER_PRESSED from
+        // the same event (io_worker.cpp). If branch 1 above didn't consume
+        // INTERRUPTED (is_processing was false - the normal case for a
         // fresh submission), it would otherwise dangle true and fire
         // branch 1 spuriously on some LATER tick once is_processing does
         // become true, right as this very submission starts streaming -
@@ -762,12 +763,12 @@ bool ollama_system::input(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list)
         // never asked for. The original code avoided this for free since
         // KEYBOARD_INPUT::reset() cleared LINE/ENTER_PRESSED/INTERRUPTED
         // together, unconditionally, right here - this replicates that.
-        comms.stop_requested = false;
+        comms.INTERRUPTED = false;
 
         if (jump_input())
         {
-            comms.send = false;
-            comms.submitted_line.clear();
+            comms.ENTER_PRESSED = false;
+            comms.INPUT_FROM_USER.clear();
             return false;
         }
         else
@@ -775,12 +776,12 @@ bool ollama_system::input(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list)
             status.interrupt_signal = false;
             is_processing = true;
 
-            std::string tmp_line = comms.submitted_line;
-            comms.send = false;
-            comms.submitted_line.clear();
+            std::string tmp_line = comms.INPUT_FROM_USER;
+            comms.ENTER_PRESSED = false;
+            comms.INPUT_FROM_USER.clear();
 
             // No output.user_input echo needed here - IO_WORKER_CLASS
-            // already did it (io_worker.cpp thread_main(), step 5) at the
+            // already did it (io_worker.cpp thread_main(), step 8) at the
             // moment it captured the line, same-thread as output itself.
             // output isn't reachable from ollama_system anymore anyway.
 
@@ -939,11 +940,10 @@ void ollama_system::process(CLASS_SYSTEM* system, std::vector<std::unique_ptr<TO
         }
     }
 
-    // ---------------------------------------------------------
-    // PART 6: TTS OUTPUT
-    // If there's new text in the TTS buffer, write it to the output file for the TTS engine to read.
-    // ---------------------------------------------------------
-    write_to_tts();        // Pushes new text to Speech engine
+    // PART 6 used to be TTS output (write_to_tts()) - that job now runs
+    // inside IO_WORKER_CLASS::thread_main() instead (io_worker.cpp), fed by
+    // exchange() rather than called from here - see write_to_tts()'s own
+    // former-site comment above for details.
 }
 
 

@@ -12,6 +12,8 @@
 #include "fled_time.h"
 #include "threading.h"
 
+class IO_WORKER_CLASS; // for create()'s audio param below - see its own comment
+
 bool consolidate(std::vector<Message>& chat_history, OLLAMA_SYSTEM_PROPERTIES& config);
 
 // Set by the main thread (main.cpp), read by SIDETRACK_CLASS::check() (also
@@ -160,8 +162,8 @@ class SIDETRACK_CLASS
         //     SIDETRACK_CHAT_INSTANCE's reply into main_instance.history
         //     (only if this cycle actually produced one - see check()) and
         //     advance this to 4.
-        // 4 = thread_main() clears SIDETRACK_CHAT_INSTANCE's history/
-        //     comms.tts_buffer and resets this to 0 and ROUTINE to 0.
+        // 4 = thread_main() clears SIDETRACK_CHAT_INSTANCE's history and
+        //     resets this to 0 and ROUTINE to 0.
 
         // Routine 3: Clear-Context Routine
         int CLEAR_CONTEXT_STAGE = 0;
@@ -201,11 +203,13 @@ class SIDETRACK_CLASS
         SIDETRACK_CLASS();
 
         // Copies the given properties (model, host, port, thinking, etc)
-        // into SIDETRACK_CHAT_INSTANCE.PROPS, and points its comms.audio at
-        // the given AUDIO_CONTROL_CLASS (nullptr is fine - same no-op
-        // write_to_tts() behavior as any other instance). Called once from
-        // main.cpp after the main chat instance is configured.
-        void create(OLLAMA_SYSTEM_PROPERTIES Ollama_Properties, AUDIO_CONTROL_CLASS* audio);
+        // into SIDETRACK_CHAT_INSTANCE.PROPS. audio is currently unused -
+        // COMMS::audio is gone and sidetrack has no speech path of its own
+        // right now (see olla.h's note near output_buffer_mutex); kept as a
+        // parameter for whenever sidetrack's rework adds one back, probably
+        // via IO_WORKER_CLASS::speak() directly. Called once from main.cpp
+        // after the main chat instance is configured.
+        void create(OLLAMA_SYSTEM_PROPERTIES Ollama_Properties, IO_WORKER_CLASS* audio);
 
         // Runs on its own background thread (started by thread_start).
         // Drives both routines' state machines; see the class-level comment.

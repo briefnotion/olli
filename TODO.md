@@ -468,10 +468,109 @@ access.
    fire on a *later* tick once `is_processing` becomes true - aborting
    the response that keypress itself just started.
 
+### What we built today (2026-08-28): AUDIO_CONTROL_CLASS folded into IO_WORKER_CLASS, COMMS renamed, sidetrack disconnected
+
+The trigger: `AUDIO_CONTROL_CLASS`'s own coupling, called out but deliberately
+left alone in the 2026-08-26 entry above ("the worker just became the sole
+poller of `popVocaEvent()`... not a relocation of `voca`/`tts` themselves").
+This time it actually moved.
+
+1. **`AUDIO_CONTROL_CLASS` is gone.** `TextToSpeech`/`Voca` (formerly
+   `tts.hpp`/`.cpp`, `voca.hpp`/`.cpp`) are declared and defined directly in
+   `io_worker.h`/`.cpp` now, as `IO_WORKER_CLASS`'s own private `tts`/`voca`
+   members - nothing outside that one file touches either. Both are
+   constructed right before `thread_main()` sets `RUN = true` and torn down
+   right after its `while(RUN)` loop exits, not for the object's whole
+   lifetime - Voca's whisper-model load/mic-thread startup and TextToSpeech's
+   own worker-thread startup all happen on the worker's background thread as
+   a result, not blocking whoever calls `thread_start()`. The old
+   `AUDIO_CONTROL_CLASS` background thread (polling `tts.isSpeaking()` to
+   pause/resume Voca, `adjust_audio_files()`) is gone too - that check now
+   just rides `thread_main()`'s existing ~20ms tick instead of its own
+   500ms one.
+2. **`COMMS` renamed** (`comms.h`): `response_buffer`/`thinking_buffer`/
+   `log_buffer` → `INPUT_FROM_LLM`/`INPUT_FROM_THINKING`/`INPUT_FROM_SYSTEM`;
+   `send`/`submitted_line`/`stop_requested`/`exit_requested` →
+   `ENTER_PRESSED`/`INPUT_FROM_USER`/`INTERRUPTED`/`EXIT_REQUESTED`, matching
+   `KEYBOARD_INPUT`'s own field names one-for-one since these are relayed
+   straight from it; gained `IS_TYPING` (not yet consumed anywhere). `audio`
+   and `tts_buffer` are gone from `COMMS` entirely - no more per-instance
+   pointer to a speaker.
+3. **`IO_WORKER_CLASS` gained two private `COMMS` copies** - `comms_buffer`
+   (renamed from `staged`) and a new `comms_buffer_audio`. `exchange()` fans
+   one drain of the real `comms` out into both (`+=`, then a single clear on
+   the source) so the screen (`comms_buffer`, drained by `get_response()` on
+   the worker's own thread) and TTS (`comms_buffer_audio`) never race each
+   other for the same `INPUT_FROM_LLM`/`THINKING`/`SYSTEM` text.
+4. **TTS chunking moved out of `ollama_system::write_to_tts()`** (deleted,
+   along with the `comms.tts_buffer` it drained and its punctuation/length/
+   generation-finished heuristic) **into `IO_WORKER_CLASS::thread_main()`**,
+   gated on `tts->isSpeaking()` instead: once idle, flush whatever's
+   accumulated in `comms_buffer_audio.INPUT_FROM_LLM` to `speakAsync()` and
+   clear it. That field doubles as its own accumulator (nothing else reads
+   it), so no separate buffer was needed - a `tts_buffer`/`stt_buffer` pair
+   was tried first and undone once this became clear.
+5. **`display_with_ncurses()` takes `(input_from_user_echo, comms,
+   tool_names)`** now, not `(key_input, tool_names)` - `input_from_user_echo`
+   is a new `IO_WORKER_CLASS` member, a live per-tick mirror of
+   `key_input.LINE` for showing what's currently being typed; `comms` (passed
+   `comms_buffer`) is threaded through but not yet read inside the function.
+6. **Voice transcripts write straight into `comms_buffer.INPUT_FROM_USER`/
+   `ENTER_PRESSED`** now, instead of staging through `key_input.LINE`/
+   `ENTER_PRESSED` first the way typed input still does - STT lives inside
+   this worker's own `thread_main()`, so there's no reason to detour through
+   `key_input` for it.
+7. **Sidetrack disconnected from `IO_WORKER_CLASS` entirely** -
+   `thread_start()`/`thread_main()` no longer take a `SIDETRACK_CLASS&` at
+   all - and every sidetrack call in `main.cpp` is commented out, ahead of
+   the rewrite below. `SIDETRACK_CLASS sidetrack;` itself is still declared
+   there (harmless - non-trivial constructor, no unused-variable warning).
+8. **Known gaps accepted for now, not fixed**:
+   - Background tasks (`spawn_background_task()`) and sidetrack have no TTS
+     path at all - `COMMS::audio` is gone, and `comms_buffer_audio` only
+     exists inside `IO_WORKER_CLASS`, fed only by the main chat's own
+     `exchange()` call.
+   - Sidetrack's own generated text no longer reaches the screen (its
+     `pull_output()`'s only caller, in `thread_main()`, was removed).
+   - `IO_WORKER_CLASS::exchange()` still takes an `ollama_system& chat_ref`
+     parameter as a placeholder, purely because `TOOL_BASE::register_tool
+     (ollama_system&, json&)` (every `TOOL_*` class, `tools.h`/
+     `remote_tools.h`) hard-requires one for building the tools-panel's
+     `tool_names` - untangling that is part of the move below.
+   - Everything above got to a clean `-Wall -Wextra -Werror` build (verified
+     2026-08-28) - but only static analysis, not real usage, beyond a quick
+     smoke-test session that surfaced and fixed an unrelated pre-existing
+     issue (two orphaned `presence` remote-tool client processes, killed;
+     see `olli_presence_flapping_fix.md`-style notes if that recurs).
+
+### Sidetrack rewrite + COMMS ownership move (planned, next)
+
+Two-part plan, in order:
+
+1. **Move `COMMS comms` off `ollama_system` entirely, onto `main_process()`
+   (`main.cpp`) instead.** Every `ollama_system` method that currently
+   touches `this->comms` internally (`send()`, `process()`, `input()`, and
+   others in `olla.cpp`) takes a `COMMS&` parameter instead - e.g. `void
+   send(tools_list, const std::string& user_input, const std::string& role =
+   "user")` becomes `void send(tools_list, COMMS& comms, const std::string&
+   role = "user")`, similarly wherever a plain string currently stands in
+   for what should be a `COMMS` reference. This is also what finally lets
+   `IO_WORKER_CLASS::exchange()` drop its `ollama_system& chat_ref`
+   placeholder - though `register_tool()`'s own `ollama_system&` requirement
+   (previous section) means the tools_list/tool_names path still needs its
+   own resolution, not automatically solved by this move alone.
+2. **Rewrite sidetrack from scratch** against whatever that COMMS-ownership
+   shape ends up being, instead of retrofitting the pre-rework design
+   described in [the background sidetrack thread section of
+   README.md](README.md) - re-wire its own TTS path (likely
+   `IO_WORKER_CLASS::speak()` directly, since `comms_buffer_audio` is
+   main-chat-only) and its screen output at the same time.
+
 ## Voice (Voca)
 
-- Wake word is "olli" (`findWakeWord()`/`findSleepTrigger()`, voca.cpp) -
-  done, no longer "voca".
+- Wake word is "olli" (`findWakeWord()`/`findSleepTrigger()`, now in
+  `io_worker.cpp` - see "What we built today (2026-08-28)" below) - done, no
+  longer "voca".
 
 ## Remote access
 

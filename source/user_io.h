@@ -14,8 +14,8 @@
 
 // All the ways a person can talk to olli funnel through here. Speech-to-text
 // input (Voca) is no longer a separate process talking through files - it's
-// in-process now (see audio_control.h/AUDIO_CONTROL_CLASS and voca.hpp).
-// main.cpp drains its transcripts each loop tick and feeds them into
+// in-process now, owned privately by IO_WORKER_CLASS (see io_worker.h).
+// io_worker.cpp drains its transcripts each tick and feeds them into
 // KEYBOARD_INPUT's LINE/INTERRUPTED/ENTER_PRESSED below, the same fields a
 // typed line sets.
 
@@ -297,14 +297,18 @@ class OUTPUT_CLASS
         // windowed ncurses layout (system message strip, a thinking window
         // that appears/disappears with the thinking block, a scrolling chat
         // transcript, an input line) instead of one flat scrolling stream.
-        // Takes key_input so the input window can show the line as it's
-        // being typed, live. Only one of display()/display_with_ncurses()
-        // should be used for a given run (see main.cpp) - see RAW_ECHO on
-        // KEYBOARD_INPUT_PROPERTIES for the other half of that switch.
-        // tool_names: current list of available tool names (see
-        // IO_WORKER_CLASS::exchange(), io_worker.cpp), rendered one per
-        // line in a right-side panel spanning the full screen height.
-        void display_with_ncurses(const KEYBOARD_INPUT& key_input, const std::vector<std::string>& tool_names);
+        // input_from_user_echo: live mirror of what's currently being
+        // typed (IO_WORKER_CLASS::thread_main() passes its own
+        // input_from_user_echo - see io_worker.cpp), shown in the input
+        // window as-is. comms: IO_WORKER_CLASS's own comms_buffer, passed
+        // through same as input_from_user_echo. Only one of display()/
+        // display_with_ncurses() should be used for a given run (see
+        // main.cpp) - see RAW_ECHO on KEYBOARD_INPUT_PROPERTIES for the
+        // other half of that switch. tool_names: current list of available
+        // tool names (see IO_WORKER_CLASS::exchange(), io_worker.cpp),
+        // rendered one per line in a right-side panel spanning the full
+        // screen height.
+        void display_with_ncurses(const std::string& input_from_user_echo, const COMMS& comms, const std::vector<std::string>& tool_names);
 };
 
 #endif

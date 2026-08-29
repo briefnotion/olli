@@ -118,8 +118,8 @@ void KEYBOARD_INPUT::keyboard_input()
             enter_ready.start_timer(); // Reset the timer on each key press
         }
 
-        // Voca (speech-to-text) input is drained separately in main.cpp's
-        // loop, straight from AUDIO_CONTROL_CLASS - see popVocaEvent().
+        // Voca (speech-to-text) input is drained separately in
+        // IO_WORKER_CLASS::thread_main() - see its popVocaEvent().
 
         IS_TYPING = !LINE.empty();
     }
@@ -159,12 +159,12 @@ void OUTPUT_CLASS::end_ncurses()
 void OUTPUT_CLASS::get_response(COMMS& comms)
 {
     std::lock_guard<std::mutex> lock(output_buffer_mutex);
-    chat_response += comms.response_buffer;
-    comms.response_buffer.clear();
-    chat_thinking += comms.thinking_buffer;
-    comms.thinking_buffer.clear();
-    system_message += comms.log_buffer;
-    comms.log_buffer.clear();
+    chat_response += comms.INPUT_FROM_LLM;
+    comms.INPUT_FROM_LLM.clear();
+    chat_thinking += comms.INPUT_FROM_THINKING;
+    comms.INPUT_FROM_THINKING.clear();
+    system_message += comms.INPUT_FROM_SYSTEM;
+    comms.INPUT_FROM_SYSTEM.clear();
 }
 
 void OUTPUT_CLASS::append_to_chat_log(bool is_user, const std::string& text)
@@ -548,8 +548,10 @@ void OUTPUT_CLASS::ncurses_commit_panels()
     doupdate();
 }
 
-void OUTPUT_CLASS::display_with_ncurses(const KEYBOARD_INPUT& key_input, const std::vector<std::string>& tool_names)
+void OUTPUT_CLASS::display_with_ncurses(const std::string& input_from_user_echo, const COMMS& comms, const std::vector<std::string>& tool_names)
 {
+    (void)comms; // not read yet - passed through for future use, see io_worker.h's own comment
+
     if (!ncurses_started)
     {
         setlocale(LC_ALL, ""); // required before initscr() for wide/UTF-8 output
@@ -708,10 +710,10 @@ void OUTPUT_CLASS::display_with_ncurses(const KEYBOARD_INPUT& key_input, const s
         chat_response.clear();
     }
 
-    // Live-render the line as it's being typed - key_input.LINE isn't a
-    // buffer this class owns/clears, just read fresh each tick.
+    // Live-render the line as it's being typed - input_from_user_echo
+    // isn't a buffer this class owns/clears, just read fresh each tick.
     werase(win_input);
-    waddstr(win_input, ("> " + key_input.LINE).c_str());
+    waddstr(win_input, ("> " + input_from_user_echo).c_str());
     // Cursor: LINE only ever grows/shrinks at its end (see
     // KEYBOARD_INPUT::keyboard_input() - no mid-line editing), so the cursor
     // is always right after the last typed char. A reverse-video space

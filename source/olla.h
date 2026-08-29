@@ -387,8 +387,6 @@ class ollama_system {
          */
         void update_status();
 
-        void write_to_tts();
-
         bool jump_input();
         bool input(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list);
 
@@ -436,15 +434,16 @@ void populate_default_tools(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list)
 inline std::mutex history_mutex;
 
 // output_buffer_mutex (same 'inline' reasoning as history_mutex above,
-// covering every instance's comms.response_buffer/thinking_buffer/
-// log_buffer instead of ::history) now lives in comms.h, included above -
-// kept separate from history_mutex there too, so locking one doesn't block
+// covering every instance's comms.INPUT_FROM_LLM/INPUT_FROM_THINKING/
+// INPUT_FROM_SYSTEM instead of ::history) now lives in comms.h, included
+// above - kept separate from history_mutex there too, so locking one doesn't block
 // the other.
 
 // The text-to-speech output hook used to live here as a single process-wide
-// global (g_audio_control) - it's now COMMS::audio (comms.h) instead, set
-// per-instance (main.cpp, spawn_background_task(), SIDETRACK_CLASS::create())
-// rather than once for the whole process. See
-// COMMS::audio's own comment for why.
+// global (g_audio_control), then later as a per-instance COMMS::audio
+// pointer. Neither exists anymore - IO_WORKER_CLASS::exchange() now fans
+// the main chat's own comms.INPUT_FROM_LLM out into its private
+// comms_buffer_audio (io_worker.cpp) and speaks that directly; other
+// instances (background tasks, sidetrack) currently have no speech path.
 
 #endif

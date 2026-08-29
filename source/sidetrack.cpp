@@ -122,7 +122,7 @@ SIDETRACK_CLASS::SIDETRACK_CLASS()
 {
 }
 
-void SIDETRACK_CLASS::create(OLLAMA_SYSTEM_PROPERTIES Ollama_Properties, AUDIO_CONTROL_CLASS* audio)
+void SIDETRACK_CLASS::create(OLLAMA_SYSTEM_PROPERTIES Ollama_Properties, IO_WORKER_CLASS* audio)
 {
     SIDETRACK_CHAT_INSTANCE.debug_label = "sidetrack-review";
     debug_log_instance_event("sidetrack-review", "instance created");
@@ -145,7 +145,11 @@ void SIDETRACK_CLASS::create(OLLAMA_SYSTEM_PROPERTIES Ollama_Properties, AUDIO_C
     // written the unfiltered version straight to disk first.
     SIDETRACK_CHAT_INSTANCE.PROPS.LOAD_SAVE_HISTORY_ON_DISK = false;
 
-    SIDETRACK_CHAT_INSTANCE.comms.audio = audio;
+    // COMMS::audio no longer exists - sidetrack has no speech path of its
+    // own right now (see olla.h's note near output_buffer_mutex). audio
+    // is kept as a parameter since sidetrack is getting reworked and will
+    // likely want IO_WORKER_CLASS::speak() directly once that lands.
+    (void)audio;
 
     populate_default_tools(tools_list);
 }
@@ -353,21 +357,23 @@ void SIDETRACK_CLASS::thread_main()
 
                     // send() above already blocked until the response was
                     // complete (or aborted), so by the time execution
-                    // reaches here the network call is already done. Note
-                    // SIDETRACK_CHAT_INSTANCE.is_processing is never true in
-                    // this loop - send() only ever sets that flag when it's
-                    // launched on its own thread (as the main chat does),
-                    // which this call isn't. So this loop is really just
-                    // draining comms.tts_buffer via process() calls (a handful of
-                    // iterations at most), not "waiting for streaming."
-                    while (SIDETRACK_CHAT_INSTANCE.is_processing || !SIDETRACK_CHAT_INSTANCE.comms.tts_buffer.empty())
+                    // reaches here the network call is already done. This
+                    // used to loop "a handful of iterations" draining
+                    // comms.tts_buffer via repeated process() calls - that
+                    // field (and the write_to_tts() chunking process() used
+                    // to do with it) is gone now, moved out to
+                    // IO_WORKER_CLASS::thread_main() (io_worker.cpp), which
+                    // only sees the main chat's own comms, not sidetrack's -
+                    // sidetrack has no speech path right now (see olla.h's
+                    // note near output_buffer_mutex). process() still needs
+                    // to run at least once for its other work (tool
+                    // dispatch, history save).
+                    if (starts_with(SIDETRACK_CHAT_INSTANCE.last_received.response, "DONE"))
                     {
-                        if (starts_with(SIDETRACK_CHAT_INSTANCE.last_received.response, "DONE"))
-                        {
-                            SECOND_GUESS_PROCESSING_STAGE = 4;
-                            break;
-                        }
-
+                        SECOND_GUESS_PROCESSING_STAGE = 4;
+                    }
+                    else
+                    {
                         // nullptr, not the real CLASS_SYSTEM: this runs on
                         // the sidetrack background thread, not the main
                         // thread - see TOOL_BASE::check()'s comment in
@@ -392,7 +398,6 @@ void SIDETRACK_CLASS::thread_main()
                     //std::cout << "Sidetrack: Post-chat review complete. Wrapping up." << std::endl;
 
                     SIDETRACK_CHAT_INSTANCE.history.clear();
-                    SIDETRACK_CHAT_INSTANCE.comms.tts_buffer.clear();
 
                     SECOND_GUESS_PROCESSING_STAGE = 0;
                     ROUTINE = 0;
@@ -699,21 +704,21 @@ void SIDETRACK_CLASS::pull_output(OUTPUT_CLASS& output)
     // responses from display").
     std::lock_guard<std::mutex> lock(output_buffer_mutex);
 
-    if (starts_with(SIDETRACK_CHAT_INSTANCE.comms.response_buffer, "DONE"))
+    if (starts_with(SIDETRACK_CHAT_INSTANCE.comms.INPUT_FROM_LLM, "DONE"))
     {
-        output.chat_thinking += SIDETRACK_CHAT_INSTANCE.comms.response_buffer;
+        output.chat_thinking += SIDETRACK_CHAT_INSTANCE.comms.INPUT_FROM_LLM;
     }
     else
     {
-        output.chat_response += SIDETRACK_CHAT_INSTANCE.comms.response_buffer;
+        output.chat_response += SIDETRACK_CHAT_INSTANCE.comms.INPUT_FROM_LLM;
     }
-    SIDETRACK_CHAT_INSTANCE.comms.response_buffer.clear();
+    SIDETRACK_CHAT_INSTANCE.comms.INPUT_FROM_LLM.clear();
 
-    output.chat_thinking += SIDETRACK_CHAT_INSTANCE.comms.thinking_buffer;
-    SIDETRACK_CHAT_INSTANCE.comms.thinking_buffer.clear();
+    output.chat_thinking += SIDETRACK_CHAT_INSTANCE.comms.INPUT_FROM_THINKING;
+    SIDETRACK_CHAT_INSTANCE.comms.INPUT_FROM_THINKING.clear();
 
-    output.system_message += SIDETRACK_CHAT_INSTANCE.comms.log_buffer;
-    SIDETRACK_CHAT_INSTANCE.comms.log_buffer.clear();
+    output.system_message += SIDETRACK_CHAT_INSTANCE.comms.INPUT_FROM_SYSTEM;
+    SIDETRACK_CHAT_INSTANCE.comms.INPUT_FROM_SYSTEM.clear();
 }
 
 

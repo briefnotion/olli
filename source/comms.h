@@ -5,8 +5,6 @@
 #include <mutex>
 #include <atomic>
 
-class AUDIO_CONTROL_CLASS; // for COMMS::audio below - see its own comment
-
 // A single shared mutex guarding every ollama_system instance's COMMS.
 //
 // This MUST be an 'inline' variable (C++17), not 'static' - same reasoning
@@ -26,59 +24,38 @@ inline std::mutex output_buffer_mutex;
 /**
  * COMMS
  * Bundles what an ollama_system instance uses to hand output to whatever's
- * consuming it (the screen, TTS, a log) and reach audio output - moved out
- * of olla.h so it can be included/passed around on its own instead of
- * needing the rest of ollama_system along with it.
+ * consuming it (the screen, a log) - moved out of olla.h so it can be
+ * included/passed around on its own instead of needing the rest of
+ * ollama_system along with it.
  *
  * Each ollama_system instance (the main chat, background tasks,
- * sidetrack's own SIDETRACK_CHAT_INSTANCE) owns its OWN COMMS - the four
- * text buffers are per-instance, same as before this move (audio is a
- * pointer, so multiple instances' COMMS can point at the same physical
- * speaker - see its own comment below). output_buffer_mutex
- * above is the one exception: it's deliberately shared across every
- * instance's COMMS rather than being a member here, for the same reason
- * history_mutex is shared across every instance's history - one coarse
- * lock is simpler to reason about correctly than a private mutex per
- * instance, which would silently fail to exclude anything.
- *
- * response_buffer / thinking_buffer / log_buffer are streamed into
- * incrementally by whoever's producing them, then drained (read + cleared)
- * by whoever's consuming them, under output_buffer_mutex - see
- * OUTPUT_CLASS::get_response() (user_io.cpp) and SIDETRACK_CLASS::
- * pull_output() (sidetrack.cpp) for the two existing consumers.
- * tts_buffer follows the same append/drain shape but is NOT locked at
- * every touch today (see ollama_system::write_to_tts(), olla.cpp) - this
- * is a pure move, so that's preserved exactly as it was, not "fixed" here.
+ * sidetrack's own SIDETRACK_CHAT_INSTANCE) owns its OWN COMMS - the text
+ * buffers are per-instance. output_buffer_mutex above is the one
+ * exception: it's deliberately shared across every instance's COMMS rather
+ * than being a member here, for the same reason history_mutex is shared
+ * across every instance's history - one coarse lock is simpler to reason
+ * about correctly than a private mutex per instance, which would silently
+ * fail to exclude anything.
  */
 class COMMS
 {
     public:
-        std::string response_buffer = "";
-        std::string thinking_buffer = "";
-        std::string tts_buffer = "";
-        std::string log_buffer = "";
+        // --------------------------------------------------------------
+        // Output-direction buffers - streamed into incrementally by
+        // whoever's producing them, drained (read + cleared) by whoever's
+        // consuming them, under output_buffer_mutex above. See
+        // OUTPUT_CLASS::get_response() (user_io.cpp) and SIDETRACK_CLASS::
+        // pull_output() (sidetrack.cpp) for the two existing consumers.
+        // --------------------------------------------------------------
+        std::string INPUT_FROM_LLM = "";
+        std::string INPUT_FROM_THINKING = "";
+        std::string INPUT_FROM_SYSTEM = "";
+        // --------------------------------------------------------------
 
-        // Appends to log_buffer under output_buffer_mutex - the one place
-        // that lock actually gets taken for it, so call sites (tool
+        // Appends to INPUT_FROM_SYSTEM under output_buffer_mutex - the one
+        // place that lock actually gets taken for it, so call sites (tool
         // handlers, etc.) don't each need their own lock_guard.
         void log(const std::string& text);
-
-        // Where this COMMS's spoken output goes, if anywhere - nullptr
-        // until explicitly set (see write_to_tts(), olla.cpp, which
-        // no-ops on nullptr same as before this existed). Used to be a
-        // single process-wide global (g_audio_control) instead of living
-        // here - moved onto COMMS so a subprogram/task that only ever
-        // receives a COMMS (not the rest of ollama_system, not main.cpp's
-        // globals) still has a real, self-contained way to reach audio
-        // output, and so a future different COMMS (e.g. a remote web-page
-        // session with no local speaker) can simply leave this nullptr
-        // instead of being forced to share the one process-wide output.
-        // AUDIO_CONTROL_CLASS is already internally thread-safe (owns its
-        // own mutex-guarded queue and background thread), so pointing
-        // multiple instances' COMMS at the same one - which is still the
-        // normal case, since there's only one physical speaker - needs no
-        // extra locking here.
-        AUDIO_CONTROL_CLASS* audio = nullptr;
 
         // --------------------------------------------------------------
         // Input-direction signals - set by IO_WORKER_CLASS (io_worker.h/
@@ -89,17 +66,14 @@ class COMMS
         // fields instead (see its class comment). Once a field lands
         // here, it's the CONSUMING side's job to clear it when actually
         // acted on - exchange() only ever sets these, never clears them.
-        //
-        // Deliberately not named "interrupt"/"INTERRUPTED" - that name
-        // is already taken by IO_WORKER_CLASS's own lock signal
-        // (WORKER_THREAD_CLASS's INTERUPTED/signal_interrupt()), which
-        // means something entirely different (a threading primitive, not
-        // this domain-level "stop what you're doing" signal).
+        // Named to match KEYBOARD_INPUT's own ENTER_PRESSED/INTERRUPTED/
+        // EXIT_REQUESTED (user_io.h), which these are relayed from.
         // --------------------------------------------------------------
-        bool send = false;             // a line is ready to submit
-        std::string submitted_line;    // valid when send == true
-        bool stop_requested = false;   // abort in-flight generation/speech
-        bool exit_requested = false;   // Ctrl+C - shut olli down
+        bool ENTER_PRESSED = false;    // a line is ready to submit
+        std::string INPUT_FROM_USER;   // valid when ENTER_PRESSED == true
+        bool INTERRUPTED = false;      // abort in-flight generation/speech
+        bool IS_TYPING = false;        // a line is being typed/spoken, not yet submitted
+        bool EXIT_REQUESTED = false;   // Ctrl+C - shut olli down
         // --------------------------------------------------------------
 
         // Opposite direction from the block above: set by main.cpp (main

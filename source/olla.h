@@ -197,7 +197,19 @@ class OLLAMA_SYSTEM_PROPERTIES
 class ollama_system {
     private:
 
-        std::vector<std::unique_ptr<ollama_system>> background_tasks;
+        // Each background task gets its own real, persistent COMMS - paired
+        // right alongside it rather than shared/thrown-away, so its output
+        // is never silently discarded (see spawn_background_task()'s
+        // comment for why this isn't just a plain vector<unique_ptr<...>>
+        // anymore). unique_ptr<COMMS>, not a bare COMMS: COMMS holds a
+        // std::atomic member (close_chat_log_requested), which has no copy
+        // or move constructor - a bare COMMS can't live inside a vector
+        // that needs to move elements around (growth, erase()). unique_ptr
+        // sidesteps that and, just as importantly, keeps every COMMS's
+        // address stable across reallocation - spawn_background_task()
+        // hands out a COMMS& into this vector, which a by-value COMMS
+        // would leave dangling the next time the vector grows.
+        std::vector<std::pair<std::unique_ptr<ollama_system>, std::unique_ptr<COMMS>>> background_tasks;
         
         json tools = json::array();
         std::chrono::steady_clock::time_point last_consolidation = std::chrono::steady_clock::now();
@@ -215,7 +227,7 @@ class ollama_system {
         // parameter's own comment on TOOL_BASE::check() (tools.h). 'tools_list'
         // is the caller's own - see its comment on process() below for why
         // this is a reference parameter now, not a member.
-        void dispatch_tool_call(const ToolCall& tc, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, std::atomic<bool>& Keyboard_Input_Enabled);
+        void dispatch_tool_call(const ToolCall& tc, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms, std::atomic<bool>& Keyboard_Input_Enabled);
 
         bool saveHistoryToJson(std::filesystem::path filepath);
         bool loadHistoryFromJson(std::filesystem::path filepath);
@@ -244,7 +256,7 @@ class ollama_system {
         // tool's check()/monitor_tool(). 'tools_list' is the caller's own -
         // see process()'s comment below for why this moved to a reference
         // parameter instead of living on ollama_system.
-        void handle_instance_tools(CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, std::atomic<bool>& Keyboard_Input_Enabled);
+        void handle_instance_tools(CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms, std::atomic<bool>& Keyboard_Input_Enabled);
 
         // Explicit flush to disk, e.g. right after consolidation commits or on shutdown.
         void save_history();
@@ -325,12 +337,6 @@ class ollama_system {
         std::vector<Message> history;
         ChatResult last_received;
 
-        // response_buffer/thinking_buffer/tts_buffer/log_buffer - what used
-        // to be four loose members here - now live bundled in comms (see
-        // comms.h for what each one is and its cross-thread/locking shape).
-        // One COMMS per ollama_system instance, same as before this move.
-        COMMS comms;
-
         // Thin forwarder to comms.log() - kept here so the many existing
         // `chat.log(...)` call sites (tool handlers, etc.) didn't all need
         // to become `chat.comms.log(...)`.
@@ -347,11 +353,13 @@ class ollama_system {
         // Creates a new background ollama_system instance, owned by this one
         // (added to background_tasks so it's picked up by process()'s own
         // background-task loop and pull_background_output() same as any
-        // other), and returns a reference to it. Lets a tool's handle_tool
-        // spawn a sub-conversation without needing direct access to the
-        // private background_tasks vector - currently only TOOL_TASK_RUNNER
-        // does this, to run an automation sequence without blocking chat.
-        ollama_system& spawn_background_task();
+        // other), and returns a reference to it plus its own newly-created
+        // COMMS (see background_tasks' own comment for why this is a pair
+        // now, not just the instance). Lets a tool's handle_tool spawn a
+        // sub-conversation without needing direct access to the private
+        // background_tasks vector - currently only TOOL_TASK_RUNNER does
+        // this, to run an automation sequence without blocking chat.
+        std::pair<ollama_system&, COMMS&> spawn_background_task();
 
         // 'tools_list' is now owned by the caller, not this instance (see
         // process()'s comment below for why) - each of these three tools_list-
@@ -365,8 +373,8 @@ class ollama_system {
         void open(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, OLLAMA_SYSTEM_PROPERTIES Properties);
 
         string gather_history();
-        void integrate_tool_result(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, std::string Special_Instruction, const std::string& raw_result);
-        void send(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, const std::string& user_input, const std::string& role = "user");
+        void integrate_tool_result(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms, std::string Special_Instruction, const std::string& raw_result);
+        void send(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms, const std::string& role);
         void send_tool_result(const std::string& tool_call_id, const std::string& result);
 
         // Helper to reset the signal
@@ -387,8 +395,8 @@ class ollama_system {
          */
         void update_status();
 
-        bool jump_input();
-        bool input(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list);
+        bool jump_input(COMMS& comms);
+        bool input(COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list);
 
         // 'system' is nullable and just threaded down to handle_instance_tools()
         // and each tool's monitor_tool() - see TOOL_BASE::check()'s comment in
@@ -410,7 +418,7 @@ class ollama_system {
         // private one, the automation instance's own local one) supplies a
         // real, always-valid tools_list of its own - never null, because a
         // reference can't be.
-        void process(CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, std::atomic<bool>& Keyboard_Input_Enabled);
+        void process(CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms, std::atomic<bool>& Keyboard_Input_Enabled);
 
 };
 

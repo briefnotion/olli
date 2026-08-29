@@ -289,10 +289,13 @@ struct IO_WORKER_CLASS_PROPERTIES
  * DEST side is cleared later by whoever actually consumes it, not by
  * exchange() itself.
  *
- * chat is not stored on this object - thread_start() takes a reference and
- * captures it (by reference) into the lambda that runs thread_main() on
- * the background thread, and exchange() takes chat directly as its own
- * parameter - see each one's own comment.
+ * chat is not reachable from this object at all, in any form - not stored,
+ * not passed to thread_start()/thread_main()/exchange(). Only comms
+ * crosses the exchange() boundary; the two things that used to reach chat
+ * directly from here - pulling background-task output, and calling
+ * register_tool() to build tool_names - have been dropped/reworked to go
+ * through comms and TOOL_BASE::tool_functions instead (see each one's own
+ * comment).
  */
 class IO_WORKER_CLASS
 {
@@ -314,7 +317,8 @@ class IO_WORKER_CLASS
     private:
         // This worker's own local COMMS - see this class's own comment
         // (comms_buffer/comms) for what it's for and how exchange() drains
-        // it into the real chat.comms once per main-thread tick. Drained by
+        // it into the real comms (owned by main_process(), not chat) once
+        // per main-thread tick. Drained by
         // thread_main()'s own screen-drawing step (see its own comment) -
         // NOT the same copy TTS reads from (see comms_buffer_audio below);
         // each has its own independent drain pace, so a single shared copy
@@ -360,8 +364,8 @@ class IO_WORKER_CLASS
         void adjust_audio_files();
 
         // Pops the next pending voice event, if any - called from
-        // thread_main() to feed transcripts into chat the same way a
-        // typed line would. Returns false if nothing is pending.
+        // thread_main() to feed transcripts into comms_buffer the same way
+        // a typed line would. Returns false if nothing is pending.
         bool popVocaEvent(VOCA_EVENT& out);
 
     public:
@@ -393,27 +397,26 @@ class IO_WORKER_CLASS
         // (e.g. a manual override from a chat tool - see olla.cpp).
         void VOCA_manual_set(int Command);
 
-        // chat_ref is captured by reference into the background thread's
-        // own lambda and handed straight to thread_main() below - must
-        // outlive this worker's thread (true for main.cpp's chat local,
-        // which lives for the whole program). SIDETRACK_CLASS used to be
-        // threaded through here too - dropped now that sidetrack is being
-        // reworked; nothing here reaches it anymore.
-        void thread_start(ollama_system& chat_ref);
+        // No parameters - thread_main() only ever touches this object's own
+        // comms_buffer/comms_buffer_audio, never chat directly (see this
+        // class's own comment). SIDETRACK_CLASS used to be threaded through
+        // here too - dropped now that sidetrack is being reworked; nothing
+        // here reaches it anymore.
+        void thread_start();
         void thread_stop();
 
         // Runs on the background thread - see thread_start()'s comment for
-        // where chat comes from.
-        void thread_main(ollama_system& chat);
+        // why it takes no parameters.
+        void thread_main();
 
         // Runs on the MAIN/owner thread - call once per its own loop tick,
-        // passing chat itself (chat_ref.comms is what actually crosses the
-        // exchange() boundary - see this class's own comment) and the main
+        // passing the real comms (see this class's own comment for why
+        // that's the only thing that crosses this boundary) and the main
         // chat's own tools_list (see process()'s comment in olla.h for why
         // that's a reference parameter, not owned by ollama_system) -
-        // copies just the tool names out of it into tool_names for the
-        // ncurses tools panel.
-        void exchange(ollama_system& chat_ref, COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list);
+        // copies each tool's own registered names (TOOL_BASE::
+        // tool_functions) into tool_names for the ncurses tools panel.
+        void exchange(COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list);
 };
 
 #endif

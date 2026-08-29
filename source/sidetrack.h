@@ -1,6 +1,9 @@
 #ifndef SIDETRACK_H
 #define SIDETRACK_H
 
+#if 0 // SIDETRACK_CLASS is being rewritten from scratch - kept here for
+      // reference, not compiled. See TODO.md's sidetrack rewrite entry.
+
 #include <iostream>
 #include <fstream>
 #include <filesystem>
@@ -231,6 +234,54 @@ class SIDETRACK_CLASS
         // adding) is routed into chat_thinking instead of chat_response -
         // see the .cpp for why.
         void pull_output(OUTPUT_CLASS& output);
+};
+
+#endif // SIDETRACK_CLASS rewrite - see the #if 0 above
+
+#include "olla.h"
+#include "fled_time.h"
+
+/**
+ * SIDETRACK_CLASS (rewrite in progress)
+ *
+ * No background thread this time - check() is meant to be called once per
+ * main-loop tick (main.cpp) and stay non-blocking. See sidetrack.cpp for
+ * the actual state machines; this header only declares what that skeleton
+ * currently references.
+ */
+class SIDETRACK_CLASS
+{
+    private:
+        int consolidation_stage = 0;
+        int context_clear_stage = 0;
+
+        // history.size() as of the end of the last check() tick - a
+        // real submission, tool result, or anything else that grows
+        // history counts as activity too, not just an in-flight
+        // interrupt (main_instance.status.interrupt_signal only reflects
+        // that, not "did anyone do anything").
+        size_t PREVIOUS_HISTORY_SIZE = 0;
+
+        double IDLE_WAIT_TIME_FOR_CONSOLIDATION = 1.0 * 60.0 * 1000.0; // ms
+        TIMED_IS_READY_SIMPLE IDLE_WAIT_TIMER_FOR_CONSOLIDATION;
+
+        double IDLE_WAIT_TIME_FOR_CONTEXT_CLEAR = 30.0 * 60.0 * 1000.0; // ms
+        TIMED_IS_READY_SIMPLE IDLE_WAIT_TIMER_FOR_CONTEXT_CLEAR;
+
+        // Runs every PERSISTENT_CHECK_INTERVAL regardless of activity -
+        // see persistent_time_checks()'s own comment.
+        double PERSISTENT_CHECK_INTERVAL = 10.0 * 60.0 * 1000.0; // ms (10 minutes)
+        TIMED_IS_READY_SIMPLE PERSISTENT_CHECK_TIMER;
+        size_t MAX_CONTEXT_SIZE = 200; // messages - tune as needed
+
+        void run_second_guess();
+        void persistent_time_checks(ollama_system& main_instance);
+        void run_consolidation(std::vector<Message>& chat_history, OLLAMA_SYSTEM_PROPERTIES& config);
+        void run_clear_context(ollama_system& main_instance);
+
+    public:
+        void create();
+        void check(ollama_system& main_instance, COMMS& comms);
 };
 
 #endif

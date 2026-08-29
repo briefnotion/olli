@@ -145,7 +145,7 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         curl_global_init(CURL_GLOBAL_DEFAULT);
 
         CLASS_SYSTEM system;
-
+        COMMS comms;
         ollama_system chat;
         SIDETRACK_CLASS sidetrack;
         IO_WORKER_CLASS io_worker; // keyboard input + screen display - see io_worker.h
@@ -219,16 +219,14 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         // per-profile directory (see Settings::get_shared_path()).
         io_worker.create(system.setings_vars.get_shared_path());
 
-        // sidetrack is being reworked - commented out for now.
-        //sidetrack.create(chat.PROPS, &io_worker);
-        //sidetrack.thread_start();
+        sidetrack.create();
 
         io_worker.key_input.PROPS.ENABLED = true;
         // Under ncurses, keyboard_input()'s own raw per-character echo would
         // corrupt the ncurses-controlled screen - the input window renders the
         // typed line itself instead (see display_with_ncurses()).
         io_worker.key_input.PROPS.RAW_ECHO = !USE_NCURSES;
-        io_worker.thread_start(chat);
+        io_worker.thread_start();
 
         // No separate priming call needed here (there used to be one - a
         // one-off get_response()+display() to flush chat.open()'s startup
@@ -283,15 +281,15 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
             // class comment). This relays whatever it staged this tick
             // (a submitted line, a stop-request, an exit-request) into
             // chat.comms.
-            io_worker.exchange(chat, chat.comms, tools_list);
+            io_worker.exchange(comms, tools_list);
 
             // Ctrl+C - see COMMS::EXIT_REQUESTED's comment (comms.h) for
             // why this needs its own handling instead of a real SIGINT.
             // Checked before anything else this tick since it should win
             // over any in-progress work, same as it would as a real signal.
-            if (chat.comms.EXIT_REQUESTED)
+            if (comms.EXIT_REQUESTED)
             {
-                chat.comms.EXIT_REQUESTED = false;
+                comms.EXIT_REQUESTED = false;
                 chat.request_exit();
                 continue;
             }
@@ -301,17 +299,16 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
             // Returns true once a full response cycle has completed (see
             // olla.cpp for the exact conditions), at which point we're
             // ready for new input.
-            bool response_complete = chat.input(tools_list);
+            bool response_complete = chat.input(comms, tools_list);
 
             // Dispatches any pending tool calls, flushes new text to TTS
             // (write_to_tts), periodically writes history to disk if it
             // changed. See ollama_system::process in olla.cpp.
-            chat.process(&system, tools_list, io_worker.key_input.PROPS.ENABLED);
+            chat.process(&system, tools_list, comms, io_worker.key_input.PROPS.ENABLED);
 
             // Runs sidetrack's main-thread half of both routines' state
             // machines - see SIDETRACK_CLASS::check's doc comment.
-            // sidetrack is being reworked - commented out for now.
-            //sidetrack.check(chat);
+            sidetrack.check(chat, comms);
 
             //if (sidetrack.SIGNALS.CONTEXT_CLEARED_SIGNAL)
             //{

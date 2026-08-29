@@ -460,6 +460,87 @@ bool TIMED_IS_READY::is_ready_e()
 
 // -------------------------------------------------------------------------------------
 
+TIMED_IS_READY_SIMPLE::TIMED_IS_READY_SIMPLE()
+{
+    TIME_START = std::chrono::steady_clock::now();
+}
+
+double TIMED_IS_READY_SIMPLE::tir_now()
+{
+    auto tmeNow = std::chrono::steady_clock::now();
+    std::chrono::duration<double> dur = tmeNow - TIME_START;
+    double nowtime = dur.count();
+    nowtime *= 1000.0; // seconds -> ms
+    return nowtime;
+}
+
+bool TIMED_IS_READY_SIMPLE::is_set()
+{
+    if (TRIGGERED_TIME == 0)
+    {
+        return false;
+    }
+    else
+    {
+        return true;
+    }
+}
+
+void TIMED_IS_READY_SIMPLE::set(double delay)
+// Prep the TIMED_IS_READY_SIMPLE variable
+// delay is measured in ms.
+{
+    TRIGGERED_TIME = tir_now();
+    INTREVAL       = delay;
+    READY_TIME     = tir_now() + INTREVAL;
+}
+
+double TIMED_IS_READY_SIMPLE::get_ready_time()
+// Return the time value of when the variable will be ready.
+{
+    return READY_TIME;
+}
+
+bool TIMED_IS_READY_SIMPLE::is_ready()
+{
+    // Check to see if enough time has passed.
+    //  Returns true if interval time has passed.
+    //    Resets timer if returned true.
+    //  Returns false if time has not elapsed.
+    //    Stores last asked time.
+    if (tir_now() >= READY_TIME)
+    {
+        TRIGGERED_TIME = tir_now();
+        return true;
+    }
+    else
+    {
+        LAST_ASKED_TIME = tir_now();
+        return false;
+    }
+}
+
+bool TIMED_IS_READY_SIMPLE::is_ready_no_reset()
+{
+    // Check to see if enough time has passed.
+    //  Returns true if interval time has passed.
+    //    Does not reset timer if returned true.
+    //  Returns false if time has not elapsed.
+    //    Stores last asked time.
+    if (tir_now() >= READY_TIME)
+    {
+        LAST_ASKED_TIME = tir_now();
+        return true;
+    }
+    else
+    {
+        LAST_ASKED_TIME = tir_now();
+        return false;
+    }
+}
+
+// -------------------------------------------------------------------------------------
+
 
 EFFICIANTCY_TIMER_EASY::EFFICIANTCY_TIMER_EASY()
 {

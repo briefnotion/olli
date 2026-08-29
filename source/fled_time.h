@@ -186,6 +186,36 @@ class TIMED_IS_READY
 
 // -------------------------------------------------------------------------------------
 
+// Same idea as TIMED_IS_READY, but every method drives its own timing
+// internally off std::chrono::steady_clock (see tir_now()) instead of
+// taking a current_time parameter - no dependency on some other clock
+// (e.g. FLED_TIME::now()) being ticked at a steady interval to stay
+// accurate. set_earliest_ready_time() isn't carried over - nothing here
+// uses it.
+class TIMED_IS_READY_SIMPLE
+{
+    private:
+        double TRIGGERED_TIME  = 0;  //  Most recent time the ready was activated
+        double LAST_ASKED_TIME = 0;  //  Most recent time the variable was asked if was ready.
+        double READY_TIME      = 0;  //  Calculated time of when variable will be ready.
+        double INTREVAL        = 0;  //  Time in miliseconds between ready.
+
+        std::chrono::time_point<std::chrono::steady_clock> TIME_START;
+        double tir_now();
+
+    public:
+        TIMED_IS_READY_SIMPLE();
+
+        bool is_set();
+
+        void set(double delay);
+        double get_ready_time();
+        bool is_ready();
+        bool is_ready_no_reset();
+};
+
+// -------------------------------------------------------------------------------------
+
 class EFFICIANTCY_TIMER_EASY
 // Measures time passed between calls. 
 // TIMES RETURNED ARE IN SECONDS.

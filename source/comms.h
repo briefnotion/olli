@@ -52,11 +52,6 @@ class COMMS
         std::string INPUT_FROM_SYSTEM = "";
         // --------------------------------------------------------------
 
-        // Appends to INPUT_FROM_SYSTEM under output_buffer_mutex - the one
-        // place that lock actually gets taken for it, so call sites (tool
-        // handlers, etc.) don't each need their own lock_guard.
-        void log(const std::string& text);
-
         // --------------------------------------------------------------
         // Input-direction signals - set by IO_WORKER_CLASS (io_worker.h/
         // .cpp), relayed here via its exchange(), consumed by

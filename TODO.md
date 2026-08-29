@@ -543,28 +543,62 @@ This time it actually moved.
      issue (two orphaned `presence` remote-tool client processes, killed;
      see `olli_presence_flapping_fix.md`-style notes if that recurs).
 
-### Sidetrack rewrite + COMMS ownership move (planned, next)
+### Sidetrack rewrite + COMMS ownership move
 
 Two-part plan, in order:
 
-1. **Move `COMMS comms` off `ollama_system` entirely, onto `main_process()`
-   (`main.cpp`) instead.** Every `ollama_system` method that currently
-   touches `this->comms` internally (`send()`, `process()`, `input()`, and
-   others in `olla.cpp`) takes a `COMMS&` parameter instead - e.g. `void
-   send(tools_list, const std::string& user_input, const std::string& role =
-   "user")` becomes `void send(tools_list, COMMS& comms, const std::string&
-   role = "user")`, similarly wherever a plain string currently stands in
-   for what should be a `COMMS` reference. This is also what finally lets
-   `IO_WORKER_CLASS::exchange()` drop its `ollama_system& chat_ref`
-   placeholder - though `register_tool()`'s own `ollama_system&` requirement
-   (previous section) means the tools_list/tool_names path still needs its
-   own resolution, not automatically solved by this move alone.
-2. **Rewrite sidetrack from scratch** against whatever that COMMS-ownership
-   shape ends up being, instead of retrofitting the pre-rework design
-   described in [the background sidetrack thread section of
-   README.md](README.md) - re-wire its own TTS path (likely
-   `IO_WORKER_CLASS::speak()` directly, since `comms_buffer_audio` is
-   main-chat-only) and its screen output at the same time.
+1. **Done 2026-08-29: moved `COMMS comms` off `ollama_system` entirely,
+   onto `main_process()` (`main.cpp`) instead.** Every `ollama_system`
+   method that used to touch `this->comms` internally (`send()`,
+   `process()`, `input()`, `jump_input()`, `integrate_tool_result()`,
+   `handle_instance_tools()`, `dispatch_tool_call()`) now takes a `COMMS&`
+   parameter instead, threaded all the way down through `TOOL_BASE::
+   check()`/`monitor_tool()` and every concrete override (`tools.cpp`,
+   `remote_tools.cpp`) - same pattern `tools_list` already used. `send()`
+   dropped its old `user_input` string parameter entirely; it now reads
+   `comms.INPUT_FROM_USER` instead, so every caller sets that field first
+   (`comms.INPUT_FROM_USER = prompt; send(tools_list, comms, role);`).
+   `background_tasks` changed from `vector<unique_ptr<ollama_system>>` to
+   `vector<pair<unique_ptr<ollama_system>, unique_ptr<COMMS>>>` so each
+   background task-runner automation instance gets its own real,
+   persistent `COMMS` too (not a throwaway) - `unique_ptr<COMMS>`
+   specifically, not a bare `COMMS`, both because `COMMS` holds a
+   `std::atomic` member (no copy/move constructor, can't live by value in
+   a vector) and because `spawn_background_task()` hands out a `COMMS&`
+   that a reallocating vector would otherwise dangle. Found and fixed one
+   new real race along the way: `ollama_system::input()`'s `chat_thread`
+   has to write the submitted text into the shared `comms.INPUT_FROM_USER`
+   right before calling `send()` (since `send()` no longer takes it as a
+   parameter) - now locked under `output_buffer_mutex` on both sides
+   (`olla.cpp` and `IO_WORKER_CLASS::exchange()`'s own relay, io_worker.cpp),
+   since a real second writer (`exchange()`, main thread) touches the same
+   field. `IO_WORKER_CLASS::exchange()` also dropped its `ollama_system&
+   chat_ref` placeholder entirely - `register_tool()`'s `ollama_system&`
+   parameter turned out to be unused by every real implementation, so the
+   tools-panel's name list now reads each tool's own `TOOL_BASE::
+   tool_functions` (populated by `register_tool()` itself) instead of
+   re-deriving names by calling `register_tool()` a second time just for
+   display.
+   - **One deliberately deferred gap: `ollama_system::log()` is currently
+     a no-op stub** (`olla.cpp`) - `comms.log()` no longer exists (COMMS::
+     log() was removed, replaced everywhere else by a direct
+     `comms.INPUT_FROM_SYSTEM +=` append), and threading `COMMS&` through
+     every one of `log()`'s many call sites (`tools.cpp`, `remote_tools.cpp`,
+     `main.cpp`, `olla.cpp` itself) was set aside rather than done as part
+     of this move. Revisit next time system messages are being worked on -
+     same pattern as `integrate_tool_result()`: `void log(COMMS& comms,
+     const std::string& text) { std::lock_guard<std::mutex> lock
+     (output_buffer_mutex); comms.INPUT_FROM_SYSTEM += text; }`, locked
+     since `log()` could in principle be called from `chat_thread` (inside
+     `send()`) as well as the main thread.
+2. **Rewrite sidetrack from scratch** against this now-real COMMS-ownership
+   shape, instead of retrofitting the pre-rework design described in [the
+   background sidetrack thread section of README.md](README.md) - re-wire
+   its own TTS path (likely `IO_WORKER_CLASS::speak()` directly, since
+   `comms_buffer_audio` is main-chat-only) and its screen output at the
+   same time. `sidetrack.h`/`.cpp` are currently wrapped in `#if 0` (kept
+   for reference, not compiled) rather than updated to match the COMMS
+   move, since they're being thrown away anyway.
 
 ## Voice (Voca)
 

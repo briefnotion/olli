@@ -853,10 +853,10 @@ bool IO_WORKER_CLASS::popVocaEvent(VOCA_EVENT& out)
     return false;
 }
 
-void IO_WORKER_CLASS::thread_start(ollama_system& chat_ref)
+void IO_WORKER_CLASS::thread_start()
 {
     THREAD_CONTROL.create(1000);
-    THREAD_CONTROL.start_render_thread([this, &chat_ref]() { thread_main(chat_ref); });
+    THREAD_CONTROL.start_render_thread([this]() { thread_main(); });
 }
 
 void IO_WORKER_CLASS::thread_stop()
@@ -871,7 +871,7 @@ void IO_WORKER_CLASS::thread_stop()
     THREAD_CONTROL.wait_for_thread_to_finish();
 }
 
-void IO_WORKER_CLASS::thread_main(ollama_system& chat)
+void IO_WORKER_CLASS::thread_main()
 {
     // tts/voca are constructed here, right before RUN = true, and torn
     // down right after the while(RUN) loop below exits - not for this
@@ -933,13 +933,12 @@ void IO_WORKER_CLASS::thread_main(ollama_system& chat)
         {
             PROCESSING.store(true);
 
-            // 0. Opposite-direction request from the main thread (see
-            // COMMS::close_chat_log_requested's comment, comms.h) - not
-            // part of the send/stop_requested/exit_requested relay below,
-            // both sides touch this field directly since it's atomic.
-            if (chat.comms.close_chat_log_requested.load())
+            // 0. Opposite-direction request from the main thread, relayed
+            // into comms_buffer by exchange() same as everything else now -
+            // see COMMS::close_chat_log_requested's comment, comms.h.
+            if (comms_buffer.close_chat_log_requested.load())
             {
-                chat.comms.close_chat_log_requested.store(false);
+                comms_buffer.close_chat_log_requested.store(false);
                 output.close_chat_log();
             }
 
@@ -996,7 +995,7 @@ void IO_WORKER_CLASS::thread_main(ollama_system& chat)
             {
                 if (!voca_event.status_message.empty())
                 {
-                    chat.comms.log(voca_event.status_message);
+                    comms_buffer.INPUT_FROM_SYSTEM += voca_event.status_message;
                 }
                 else
                 {
@@ -1050,14 +1049,17 @@ void IO_WORKER_CLASS::thread_main(ollama_system& chat)
                 key_input.ENTER_PRESSED = false;
             }
 
-            // 9. Drain into the screen - comms_buffer now (its own copy of
+            // 9. Drain into the screen - comms_buffer (its own copy of
             // INPUT_FROM_LLM/THINKING/SYSTEM, filled by exchange() - see
-            // comms_buffer's own comment), not chat.comms directly anymore,
+            // comms_buffer's own comment), never the real comms directly,
             // so this doesn't race comms_buffer_audio's own independent
             // drain for TTS over the same source text. Still under
             // output_buffer_mutex (get_response()'s own lock).
             output.get_response(comms_buffer);
-            chat.pull_background_output(output);
+            // chat.pull_background_output(output) used to run here too -
+            // dropped along with chat's removal from this class; task
+            // runner is expected to go through comms instead once it's
+            // reworked, rather than this getting reconnected as-is.
             // sidetrack.pull_output(output) used to run here too - dropped
             // along with the rest of sidetrack's wiring into this class
             // (see thread_main()'s parameter comment); sidetrack's own
@@ -1097,7 +1099,7 @@ void IO_WORKER_CLASS::thread_main(ollama_system& chat)
     tts.reset();
 }
 
-void IO_WORKER_CLASS::exchange(ollama_system& chat_ref, COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list)
+void IO_WORKER_CLASS::exchange(COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list)
 {
     if (!PROPS.BLOCKING) return;
 
@@ -1113,22 +1115,16 @@ void IO_WORKER_CLASS::exchange(ollama_system& chat_ref, COMMS& comms, std::vecto
 
     // Safe to touch tool_names here - thread_main() is confirmed not
     // running (the wait above), so this doesn't race its own read of
-    // tool_names down in the display step. Names come from actually calling
-    // each tool's own register_tool() into a throwaway json array, rather
-    // than adding a separate name-only accessor to TOOL_BASE - this reuses
-    // the exact same logic send() itself relies on (see olla.cpp) instead of
-    // a second place to keep in sync.
+    // tool_names down in the display step. Each tool's own tool_functions
+    // (TOOL_BASE, tools.h) already holds whatever names its last
+    // register_tool() call registered - no need to call register_tool()
+    // again here just to re-derive them into a throwaway json array.
     tool_names.clear();
-    json tmp_tools = json::array();
     for (auto& tool : tools_list)
-        tool->register_tool(chat_ref, tmp_tools);
-    for (auto& entry : tmp_tools)
-    {
-        std::string name = entry.value("function", json::object()).value("name", "");
-        if (!name.empty()) tool_names.push_back(name);
-    }
+        for (auto& name : tool->tool_functions)
+            tool_names.push_back(name);
 
-    // Output direction: comms (real, chat-owned) -> BOTH comms_buffer and
+    // Output direction: comms (real, owned by main_process()) -> BOTH comms_buffer and
     // comms_buffer_audio (this worker's own two independent copies) - one
     // drain of the real comms, fanned out to two destinations, each free
     // to be read/cleared at its own pace afterward (screen drawing vs TTS
@@ -1162,9 +1158,19 @@ void IO_WORKER_CLASS::exchange(ollama_system& chat_ref, COMMS& comms, std::vecto
         }
     }
 
+    // Same direction as the block above (comms -> comms_buffer), just
+    // atomic instead of mutex-guarded - see COMMS::close_chat_log_requested's
+    // comment (comms.h). thread_main() reads/clears its own comms_buffer
+    // copy instead of touching comms directly now.
+    if (comms.close_chat_log_requested.load())
+    {
+        comms_buffer.close_chat_log_requested.store(true);
+        comms.close_chat_log_requested.store(false);
+    }
+
     // Input direction: comms_buffer (this worker's own copy) -> comms
-    // (real, chat-owned) - same fields as before, just one simple
-    // copy-then-clear if per field instead of a combined guard.
+    // (real, owned by main_process()) - same fields as before, just one
+    // simple copy-then-clear if per field instead of a combined guard.
     if (comms_buffer.ENTER_PRESSED)
     {
         comms.ENTER_PRESSED = true;
@@ -1173,6 +1179,10 @@ void IO_WORKER_CLASS::exchange(ollama_system& chat_ref, COMMS& comms, std::vecto
 
     if (!comms_buffer.INPUT_FROM_USER.empty())
     {
+        // Locked - ollama_system::input() (olla.cpp) can write this same
+        // field from chat_thread at the same time, to restore it right
+        // before send() reads it back out.
+        std::lock_guard<std::mutex> lock(output_buffer_mutex);
         comms.INPUT_FROM_USER = comms_buffer.INPUT_FROM_USER;
         comms_buffer.INPUT_FROM_USER.clear();
     }

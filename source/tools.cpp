@@ -25,6 +25,8 @@ void add_tool(json& tools, const std::string& name, const std::string& descripti
 void TOOL_SET_THINKING_MODE::configure(ollama_system&) {}
 
 void TOOL_SET_THINKING_MODE::register_tool(ollama_system&, json& tools) {
+    tool_functions.clear();
+
     json set_thinking_params = {
         {"type", "object"},
         {"properties", {
@@ -36,10 +38,11 @@ void TOOL_SET_THINKING_MODE::register_tool(ollama_system&, json& tools) {
         {"required", {"enabled"}}
     };
 
+    tool_functions.push_back("set_thinking_mode");
     add_tool(tools, "set_thinking_mode", "Enables or disables the internal reasoning/thinking process for the model", set_thinking_params);
 }
 
-void TOOL_SET_THINKING_MODE::handle_tool(ollama_system& chat, const std::string& name, const json& args, const std::string& tc_id) {
+void TOOL_SET_THINKING_MODE::handle_tool(ollama_system& chat, COMMS&, const std::string& name, const json& args, const std::string& tc_id) {
     if (name == "set_thinking_mode") {
         if (args.contains("enabled") && args["enabled"].is_boolean()) {
             chat.PROPS.use_thinking = args["enabled"].get<bool>();
@@ -62,19 +65,19 @@ void TOOL_SET_THINKING_MODE::handle_tool(ollama_system& chat, const std::string&
     }
 }
 
-bool TOOL_SET_THINKING_MODE::check(ollama_system& chat, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>&, const ToolCall& tc) {
+bool TOOL_SET_THINKING_MODE::check(ollama_system& chat, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>&, COMMS& comms, const ToolCall& tc) {
     if (tc.name != "set_thinking_mode")
         return false;
 
     chat.log("[System] Tool call received: " + tc.name + "\n");
 
-    handle_tool(chat, tc.name, tc.arguments, tc.id);
+    handle_tool(chat, comms, tc.name, tc.arguments, tc.id);
 
     return true;
 }
 
 // No periodic work needed - part of the common tool interface (see the note in tools.h).
-void TOOL_SET_THINKING_MODE::monitor_tool(ollama_system&, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>&) {}
+void TOOL_SET_THINKING_MODE::monitor_tool(ollama_system&, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>&, COMMS&) {}
 
 // ---
 
@@ -203,6 +206,8 @@ std::string TOOL_WEB_SEARCH::fetch_url_content(const std::string& url) {
 }
 
 void TOOL_WEB_SEARCH::register_tool(ollama_system&, json& tools) {
+    tool_functions.clear();
+
     // Told to the model via each tool's description so its final answer uses
     // our clickable-link format instead of Markdown, which the terminal can't render.
     std::string link_instruction = " When providing links in your final answer, do NOT use standard Markdown. Instead, use the format: CLICKABLE_LINK(url, text). The system will convert this to a clickable terminal link.";
@@ -214,6 +219,7 @@ void TOOL_WEB_SEARCH::register_tool(ollama_system&, json& tools) {
         }},
         {"required", {"query"}}
     };
+    tool_functions.push_back("web_search");
     add_tool(tools, "web_search", "Searches the internet. Results include titles, snippets, and URLs.", search_params);
 
     json fetch_params = {
@@ -223,54 +229,55 @@ void TOOL_WEB_SEARCH::register_tool(ollama_system&, json& tools) {
         }},
         {"required", {"url"}}
     };
+    tool_functions.push_back("fetch_website_content");
     add_tool(tools, "fetch_website_content", "Reads the text from a specific URL for deep research. Use this to summarize an article.", fetch_params);
 }
 
-void TOOL_WEB_SEARCH::handle_tool(ollama_system& chat, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, const std::string& name, const json& args, const std::string& tc_id) {
+void TOOL_WEB_SEARCH::handle_tool(ollama_system& chat, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms, const std::string& name, const json& args, const std::string& tc_id) {
     if (name == "web_search") {
         if (!args.contains("query")) {
             std::string err = "Error: Missing query.";
             chat.send_tool_result(tc_id, err);
-            chat.integrate_tool_result(tools_list, "", err);
+            chat.integrate_tool_result(tools_list, comms, "", err);
             return;
         }
         std::string query = args.at("query").get<std::string>();
         std::string result = perform_actual_search(query);
 
         chat.send_tool_result(tc_id, result);
-        chat.integrate_tool_result(tools_list, "", "Search results for '" + query + "': " + result);
+        chat.integrate_tool_result(tools_list, comms, "", "Search results for '" + query + "': " + result);
     }
     else if (name == "fetch_website_content") {
         if (!args.contains("url")) {
             std::string err = "Error: Missing URL.";
             chat.send_tool_result(tc_id, err);
-            chat.integrate_tool_result(tools_list, "", err);
+            chat.integrate_tool_result(tools_list, comms, "", err);
             return;
         }
         std::string url = args.at("url").get<std::string>();
         std::string result = fetch_url_content(url);
 
         chat.send_tool_result(tc_id, "Cleaned Page Content from " + url + ":\n" + result);
-        chat.integrate_tool_result(tools_list, "", "I have fetched and processed the content from " + url + ". Here is the information retrieved: " + result);
+        chat.integrate_tool_result(tools_list, comms, "", "I have fetched and processed the content from " + url + ". Here is the information retrieved: " + result);
     }
     else {
         chat.send_tool_result(tc_id, "Error: Unknown tool.");
     }
 }
 
-bool TOOL_WEB_SEARCH::check(ollama_system& chat, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, const ToolCall& tc) {
+bool TOOL_WEB_SEARCH::check(ollama_system& chat, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms, const ToolCall& tc) {
     if (tc.name != "web_search" && tc.name != "fetch_website_content")
         return false;
 
     chat.log("[System] Tool call received: " + tc.name + "\n");
 
-    handle_tool(chat, tools_list, tc.name, tc.arguments, tc.id);
+    handle_tool(chat, tools_list, comms, tc.name, tc.arguments, tc.id);
 
     return true;
 }
 
 // No periodic work needed - part of the common tool interface (see the note in tools.h).
-void TOOL_WEB_SEARCH::monitor_tool(ollama_system&, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>&) {}
+void TOOL_WEB_SEARCH::monitor_tool(ollama_system&, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>&, COMMS&) {}
 
 
 /*
@@ -400,6 +407,8 @@ bool TOOL_TASK_RUNNER::iequals(const std::string& a, const std::string& b) {
 
 void TOOL_TASK_RUNNER::register_tool(ollama_system&, json& tools)
 {
+    tool_functions.clear();
+
     json task_params = {
         {"type", "object"},
         {"properties", {
@@ -411,13 +420,14 @@ void TOOL_TASK_RUNNER::register_tool(ollama_system&, json& tools)
         {"required", {"intent_phrase"}}
     };
 
+    tool_functions.push_back("run_automation_task");
     add_tool(tools, "run_automation_task",
         "Use this tool when the user expresses an intent that matches a home automation macro. "
         "This retrieves a sequence of internal system commands that you must then execute.",
         task_params);
 }
 
-void TOOL_TASK_RUNNER::handle_tool(ollama_system& chat, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, const std::string& name, const json& args, const std::string& tc_id)
+void TOOL_TASK_RUNNER::handle_tool(ollama_system& chat, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms, const std::string& name, const json& args, const std::string& tc_id)
 {
     if (name != "run_automation_task")
     {
@@ -470,7 +480,9 @@ void TOOL_TASK_RUNNER::handle_tool(ollama_system& chat, std::vector<std::unique_
 
         // The automation runs on its own background instance so it doesn't
         // block the main chat loop - see ollama_system::spawn_background_task().
-        ollama_system& instance = chat.spawn_background_task();
+        // instance_comms is that instance's own real, persistent COMMS -
+        // paired with it in chat's own background_tasks, not a throwaway.
+        auto [instance, instance_comms] = chat.spawn_background_task();
         instance.debug_label = "task-runner:" + intent_phrase;
         debug_log_instance_event(instance.debug_label, "instance created");
 
@@ -517,12 +529,14 @@ void TOOL_TASK_RUNNER::handle_tool(ollama_system& chat, std::vector<std::unique_
                 }
                 keyboard_input.ENTER_PRESSED = false;
                 keyboard_input.PROPS.ENABLED = false;
-                instance.send(automation_tools_list, keyboard_input.LINE, "user");
+                instance_comms.INPUT_FROM_USER = keyboard_input.LINE;
+                instance.send(automation_tools_list, instance_comms, "user");
             }
             else
             {
                 std::cout <<"\n-" << i << "--------------------------\nINPUT: " << found_task.COMMANDS[i] << std::endl;
-                instance.send(automation_tools_list, found_task.COMMANDS[i]);
+                instance_comms.INPUT_FROM_USER = found_task.COMMANDS[i];
+                instance.send(automation_tools_list, instance_comms, "user");
             }
 
             // nullptr, not the real CLASS_SYSTEM: this automation instance
@@ -531,14 +545,14 @@ void TOOL_TASK_RUNNER::handle_tool(ollama_system& chat, std::vector<std::unique_
             // isolated from the real system's - it has no business reaching
             // the real one, same reasoning as sidetrack.cpp's own nullptr
             // call site (see TOOL_BASE::check()'s comment in tools.h).
-            instance.process(nullptr, automation_tools_list, keyboard_input.PROPS.ENABLED);
+            instance.process(nullptr, automation_tools_list, instance_comms, keyboard_input.PROPS.ENABLED);
             instance.last_received.complete = false;
         }
 
         {
             success_log = "SUCCESS: Automation Complete";
             chat.send_tool_result(tc_id, success_log);
-            chat.integrate_tool_result(tools_list, "", instance.gather_history());
+            chat.integrate_tool_result(tools_list, comms, "", instance.gather_history());
         }
 
         debug_log_instance_event(instance.debug_label, "instance closed");
@@ -553,30 +567,30 @@ void TOOL_TASK_RUNNER::handle_tool(ollama_system& chat, std::vector<std::unique_
         std::string error_msg = "ERROR: No automation found for '" + intent_phrase + "'.";
 
         chat.send_tool_result(tc_id, error_msg);
-        chat.integrate_tool_result(tools_list, "", error_msg);
+        chat.integrate_tool_result(tools_list, comms, "", error_msg);
     }
 }
 
-bool TOOL_TASK_RUNNER::check(ollama_system& chat, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, const ToolCall& tc) {
+bool TOOL_TASK_RUNNER::check(ollama_system& chat, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms, const ToolCall& tc) {
     if (tc.name != "run_automation_task")
         return false;
 
     chat.log("[System] Tool call received: " + tc.name + "\n");
 
-    handle_tool(chat, tools_list, tc.name, tc.arguments, tc.id);
+    handle_tool(chat, tools_list, comms, tc.name, tc.arguments, tc.id);
 
     return true;
 }
 
 // No periodic work needed - part of the common tool interface (see the note in tools.h).
-void TOOL_TASK_RUNNER::monitor_tool(ollama_system&, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>&) {}
+void TOOL_TASK_RUNNER::monitor_tool(ollama_system&, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>&, COMMS&) {}
 
 // Shared by both call sources handle_instance_tools() drains - see its own
 // comment in olla.h. Applies the tool_calls_this_turn cap (see olla.h),
 // then routes to whichever tool's check() claims tc.name (see the
 // TOOL_BASE comment in tools.h) - an unrecognized name gets an error
 // result back instead of ever reaching a tool.
-void ollama_system::dispatch_tool_call(const ToolCall& tc, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, std::atomic<bool>& Keyboard_Input_Enabled)
+void ollama_system::dispatch_tool_call(const ToolCall& tc, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms, std::atomic<bool>& Keyboard_Input_Enabled)
 {
     // TODO: special-cased until ollama_system can reach CLASS_SYSTEM
     // directly (see TODO.md) - only run_automation_task needs the main
@@ -600,7 +614,7 @@ void ollama_system::dispatch_tool_call(const ToolCall& tc, CLASS_SYSTEM* system,
 
     bool handled = false;
     for (auto& tool : tools_list) {
-        if (tool->check(*this, system, tools_list, tc)) { handled = true; break; }
+        if (tool->check(*this, system, tools_list, comms, tc)) { handled = true; break; }
     }
 
     if (!handled) {
@@ -611,7 +625,7 @@ void ollama_system::dispatch_tool_call(const ToolCall& tc, CLASS_SYSTEM* system,
     if (disable_keyboard) Keyboard_Input_Enabled = true;
 }
 
-void ollama_system::handle_instance_tools(CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, std::atomic<bool>& Keyboard_Input_Enabled)
+void ollama_system::handle_instance_tools(CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms, std::atomic<bool>& Keyboard_Input_Enabled)
 {
     // System-injected calls (e.g. a timer's on_expire action - see
     // TOOL_REMOTE::monitor_tool()) - drained independently of the model's
@@ -623,7 +637,7 @@ void ollama_system::handle_instance_tools(CLASS_SYSTEM* system, std::vector<std:
         while (!pending_tool_calls.empty()) {
             ToolCall tc = pending_tool_calls.front();
             pending_tool_calls.pop();
-            dispatch_tool_call(tc, system, tools_list, Keyboard_Input_Enabled);
+            dispatch_tool_call(tc, system, tools_list, comms, Keyboard_Input_Enabled);
         }
     }
 
@@ -637,7 +651,7 @@ void ollama_system::handle_instance_tools(CLASS_SYSTEM* system, std::vector<std:
         last_received.tool_calls.clear();
 
         for (auto& tc : pending_calls) {
-            dispatch_tool_call(tc, system, tools_list, Keyboard_Input_Enabled);
+            dispatch_tool_call(tc, system, tools_list, comms, Keyboard_Input_Enabled);
         }
     }
 }

@@ -3,6 +3,10 @@
 
 #include "sidetrack.h"
 
+#if 0 // Old SIDETRACK_CLASS implementation - being rewritten from scratch,
+      // kept here for reference, not compiled. See TODO.md's sidetrack
+      // rewrite entry.
+
 #include <set>
 
 // For OUTPUT_CLASS's real definition (chat_thinking/chat_response/
@@ -720,6 +724,158 @@ void SIDETRACK_CLASS::pull_output(OUTPUT_CLASS& output)
     output.system_message += SIDETRACK_CHAT_INSTANCE.comms.INPUT_FROM_SYSTEM;
     SIDETRACK_CHAT_INSTANCE.comms.INPUT_FROM_SYSTEM.clear();
 }
+
+#endif // SIDETRACK_CLASS rewrite - see the #if 0 above
+
+
+void SIDETRACK_CLASS::run_second_guess()
+{
+
+}
+
+
+// Runs every PERSISTENT_CHECK_INTERVAL regardless of activity - no stage
+// machine, just a periodic safety check. If history has grown too large
+// (e.g. because consolidation isn't keeping up), wipe it the same way
+// run_clear_context() does.
+void SIDETRACK_CLASS::persistent_time_checks(ollama_system& main_instance)
+{
+    if (PERSISTENT_CHECK_TIMER.is_ready())
+    {
+        PERSISTENT_CHECK_TIMER.set(PERSISTENT_CHECK_INTERVAL);
+
+        bool too_big = false;
+        {
+            std::lock_guard<std::mutex> lock(history_mutex);
+            too_big = main_instance.history.size() > MAX_CONTEXT_SIZE;
+        }
+
+        if (too_big)
+        {
+            // Same wipe as run_clear_context() - keep only protected
+            // (consolidation_level < 0) messages.
+            {
+                std::lock_guard<std::mutex> lock(history_mutex);
+                std::vector<Message> protected_messages;
+                for (const Message& msg : main_instance.history) {
+                    if (msg.consolidation_level < 0) {
+                        protected_messages.push_back(msg);
+                    }
+                }
+                main_instance.history = protected_messages;
+            }
+            main_instance.save_history();
+        }
+    }
+}
+
+void SIDETRACK_CLASS::run_consolidation(std::vector<Message>&, OLLAMA_SYSTEM_PROPERTIES&)
+{
+    if (consolidation_stage == 0)
+    {
+        IDLE_WAIT_TIMER_FOR_CONSOLIDATION.set(IDLE_WAIT_TIME_FOR_CONSOLIDATION);
+        consolidation_stage = 1;
+    }
+    else if (consolidation_stage == 1)
+    {
+        if (IDLE_WAIT_TIMER_FOR_CONSOLIDATION.is_ready())
+        {
+            consolidation_stage = 2; // ready to consolidate
+        }
+    }
+    else if (consolidation_stage == 2)
+    {
+        // do the consolidation here.
+        
+        consolidation_stage = 100;
+    }
+}
+
+void SIDETRACK_CLASS::run_clear_context(ollama_system& main_instance)
+{
+    if (context_clear_stage == 0)
+    {
+        IDLE_WAIT_TIMER_FOR_CONTEXT_CLEAR.set(IDLE_WAIT_TIME_FOR_CONTEXT_CLEAR);
+        context_clear_stage = 1;
+    }
+    else if (context_clear_stage == 1)
+    {
+        if (IDLE_WAIT_TIMER_FOR_CONTEXT_CLEAR.is_ready())
+        {
+            context_clear_stage = 2; // ready to clear context
+        }
+    }
+    else if (context_clear_stage == 2)
+    {
+        // Wipe everything except protected (consolidation_level < 0)
+        // messages - e.g. the persona/opening prompt. Locked: main_instance.
+        // history is the same vector chat_thread's own send() (olla.cpp)
+        // pushes into under history_mutex while a response is still
+        // streaming.
+        {
+            std::lock_guard<std::mutex> lock(history_mutex);
+            std::vector<Message> protected_messages;
+            for (const Message& msg : main_instance.history) {
+                if (msg.consolidation_level < 0) {
+                    protected_messages.push_back(msg);
+                }
+            }
+            main_instance.history = protected_messages;
+        }
+        main_instance.save_history();
+
+        context_clear_stage = 100;
+    }
+}
+
+
+
+
+
+void SIDETRACK_CLASS::create()
+{
+
+    IDLE_WAIT_TIMER_FOR_CONTEXT_CLEAR.set(IDLE_WAIT_TIME_FOR_CONTEXT_CLEAR);
+    PERSISTENT_CHECK_TIMER.set(PERSISTENT_CHECK_INTERVAL);
+}
+
+void SIDETRACK_CLASS::check(ollama_system& main_instance, COMMS&)
+{
+    // I'm trying to keep this function non blocking.
+
+    // A real submission, tool result, or anything else that grows history
+    // counts as activity - compared against the size as of the end of
+    // last tick (see the update at the bottom of this function), so this
+    // doesn't trip itself on the same tick run_clear_context() below does
+    // its own wipe.
+    if (main_instance.history.size() != PREVIOUS_HISTORY_SIZE)
+    {
+        consolidation_stage = 0;
+        context_clear_stage = 0;
+    }
+
+
+    // Persistent Checks - runs on its own interval, independent of the
+    // stages/activity-reset above.
+    persistent_time_checks(main_instance);
+
+
+    // Consolidation Routine
+    //run_consolidation()
+
+
+
+    // Clear Context Routine
+    run_clear_context(main_instance);
+
+
+
+    // if all stages at 100, do not reset until something happens in main.
+
+    PREVIOUS_HISTORY_SIZE = main_instance.history.size();
+}
+
+
 
 
 #endif

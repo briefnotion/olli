@@ -23,28 +23,34 @@ ollama_system::ollama_system()
 
 void ollama_system::log(const std::string& text)
 {
-    comms.log(text);
+    // Stubbed out - comms.log() no longer exists (comms itself stopped
+    // being a member of ollama_system as part of today's COMMS-ownership
+    // move) and every chat.log(...) call site still expects this old
+    // no-argument signature. Revisit properly when working on system
+    // messages - needs a COMMS& parameter threaded through here and every
+    // caller (tools.cpp, remote_tools.cpp, main.cpp, olla.cpp), same
+    // pattern as integrate_tool_result(). See TODO.md.
+    (void)text;
 }
 
 void ollama_system::pull_background_output(OUTPUT_CLASS& output)
 {
-    for (auto& task : background_tasks)
+    for (auto& task_pair : background_tasks)
     {
-        output.get_response(task->comms);
+        output.get_response(*task_pair.second);
     }
 }
 
-ollama_system& ollama_system::spawn_background_task()
+std::pair<ollama_system&, COMMS&> ollama_system::spawn_background_task()
 {
-    auto new_instance = std::make_unique<ollama_system>();
-    ollama_system& ref = *new_instance;
     // COMMS::audio (a direct pointer to the speaker) doesn't exist anymore -
     // TTS output now runs through comms_buffer_audio, which only the main
     // chat's own COMMS gets fanned into via IO_WORKER_CLASS::exchange()
     // (io_worker.cpp). Background tasks currently have no speech output at
     // all as a result - unaddressed, see this session's notes.
-    background_tasks.push_back(std::move(new_instance));
-    return ref;
+    background_tasks.emplace_back(std::make_unique<ollama_system>(), std::make_unique<COMMS>());
+    auto& [instance, instance_comms] = background_tasks.back();
+    return {*instance, *instance_comms};
 }
 
 void ollama_system::open(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list)
@@ -129,7 +135,7 @@ string ollama_system::gather_history()
  * This function takes raw tool data and asks the model to "speak" it 
  * in the context of the current conversation/persona.
  */
-void ollama_system::integrate_tool_result(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, std::string Special_Instruction, const std::string& raw_result)
+void ollama_system::integrate_tool_result(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms, std::string Special_Instruction, const std::string& raw_result)
 {
     //  Why this is the "Road Less Trodden"
 
@@ -198,7 +204,8 @@ void ollama_system::integrate_tool_result(std::vector<std::unique_ptr<TOOL_BASE>
         // 2. We use "system" here.
         // This prevents the "What was the last thing I said?" confusion
         // because the model treats this as a 'state' rather than 'user input'.
-        this->send(tools_list, prompt, "system");
+        comms.INPUT_FROM_USER = prompt;
+        this->send(tools_list, comms, "system");
 
         // 3. This DIRECTOR_NOTE, and the raw tool result send_tool_result()
         // pushed just before it, both stay in history now rather than being
@@ -264,8 +271,8 @@ static std::string summarize_tool_calls(const std::vector<ToolCall>& calls)
     return ss.str();
 }
 
-void ollama_system::send(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, const std::string& user_input, const std::string& role) {
-    std::string new_user_input = filter_non_printable(user_input);
+void ollama_system::send(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms, const std::string& role) {
+    std::string new_user_input = filter_non_printable(comms.INPUT_FROM_USER);
     
     // 1. Set initial states
     status.is_active = true;
@@ -401,12 +408,10 @@ void ollama_system::send(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, co
                         if (msg_chunk.contains("content")) {
                             std::string c = msg_chunk["content"];
                             accumulated_content += c;
-                            // TTS used to get its own separate feed here
-                            // (comms.tts_buffer) - IO_WORKER_CLASS::exchange()
-                            // now fans comms.INPUT_FROM_LLM itself out into
-                            // its own comms_buffer_audio copy instead (see
-                            // io_worker.cpp), so no separate append is
-                            // needed at the source anymore.
+                            // TTS reads from its own comms_buffer_audio copy
+                            // (io_worker.cpp), fed from comms.INPUT_FROM_LLM
+                            // by IO_WORKER_CLASS::exchange() - no separate
+                            // append needed here.
                             {
                                 std::lock_guard<std::mutex> lock(output_buffer_mutex);
                                 comms.INPUT_FROM_LLM += c;
@@ -421,7 +426,7 @@ void ollama_system::send(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, co
         );
 
         if (status.interrupt_signal.load()) {
-            log("\n[System: Response Interrupted by User]\n");
+            //log("\n[System: Response Interrupted by User]\n");
         } else if (!res || res->status != 200) {
             std::cerr << "\n[Error] Stream failed: " << (res ? std::to_string(res->status) : "Connection error") << std::endl;
         }
@@ -701,7 +706,7 @@ void ollama_system::unload_model()
 // (fed from comms.INPUT_FROM_LLM by exchange()), gated on tts->isSpeaking()
 // rather than a punctuation/length heuristic.
 
-bool ollama_system::jump_input()
+bool ollama_system::jump_input(COMMS& comms)
 {
     // key_input now lives on IO_WORKER_CLASS, not CLASS_SYSTEM - the
     // submitted line arrives here via comms instead (see input(), which
@@ -728,7 +733,7 @@ bool ollama_system::jump_input()
  * Updates the input method to return true when a chat response is complete.
  * This version preserves the original non-blocking logic and thread safety.
  */
-bool ollama_system::input(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list)
+bool ollama_system::input(COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list)
 {
     // 1. INTERRUPT - key_input.INTERRUPTED now lives on IO_WORKER_CLASS;
     // comms.INTERRUPTED is how it reaches here (relayed by
@@ -765,7 +770,7 @@ bool ollama_system::input(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list)
         // together, unconditionally, right here - this replicates that.
         comms.INTERRUPTED = false;
 
-        if (jump_input())
+        if (jump_input(comms))
         {
             comms.ENTER_PRESSED = false;
             comms.INPUT_FROM_USER.clear();
@@ -791,11 +796,20 @@ bool ollama_system::input(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list)
             // Launch the background thread exactly as before. tools_list
             // captured by reference is safe here - it's the caller's own
             // long-lived vector (main.cpp's real one for the main chat),
-            // which outlives this thread by construction.
-            chat_thread = std::thread([this, tmp_line, &tools_list]()
+            // which outlives this thread by construction. comms is also
+            // captured by reference - send() now reads its content from
+            // comms.INPUT_FROM_USER rather than taking it as its own
+            // parameter, so it has to be restored there first; locked
+            // since exchange() (io_worker.cpp) can write that same field
+            // from the main thread at the same time.
+            chat_thread = std::thread([this, tmp_line, &tools_list, &comms]()
             {
                 try {
-                    send(tools_list, tmp_line);
+                    {
+                        std::lock_guard<std::mutex> lock(output_buffer_mutex);
+                        comms.INPUT_FROM_USER = tmp_line;
+                    }
+                    send(tools_list, comms, "user");
                 } catch (...) {
                     // Maintain existing safety
                 }
@@ -828,7 +842,7 @@ bool ollama_system::input(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list)
  * 4. Trigger background consolidation (memory cleanup) every 60 seconds.
  */
 
-void ollama_system::process(CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, std::atomic<bool>& Keyboard_Input_Enabled)
+void ollama_system::process(CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms, std::atomic<bool>& Keyboard_Input_Enabled)
 {
     // ---------------------------------------------------------
     // PART 0: WRITE HISTORY TO FILE
@@ -853,7 +867,7 @@ void ollama_system::process(CLASS_SYSTEM* system, std::vector<std::unique_ptr<TO
     // ---------------------------------------------------------
     // PART 1: PROCESS MAIN CHAT TOOLS
     // ---------------------------------------------------------
-    handle_instance_tools(system, tools_list, Keyboard_Input_Enabled);
+    handle_instance_tools(system, tools_list, comms, Keyboard_Input_Enabled);
 
     // ---------------------------------------------------------
     // PART 2: MANAGE BACKGROUND TASKS
@@ -861,7 +875,8 @@ void ollama_system::process(CLASS_SYSTEM* system, std::vector<std::unique_ptr<TO
     // and remove them if they are finished.
     // ---------------------------------------------------------
     for (auto it = background_tasks.begin(); it != background_tasks.end(); ) {
-        ollama_system& task_instance = **it; // Access the object inside unique_ptr
+        ollama_system& task_instance = *(it->first); // Access the object inside unique_ptr
+        COMMS& task_comms = *(it->second); // This task's own real, persistent COMMS
 
         // A. Handle any tool calls requested by the background task.
         // NOTE: this dispatches on the task instance, not on the main
@@ -879,7 +894,7 @@ void ollama_system::process(CLASS_SYSTEM* system, std::vector<std::unique_ptr<TO
         // tools_list keeps this call always-valid without needing to keep a
         // second tools_list alive across ticks for an instance that's
         // already done.
-        task_instance.handle_instance_tools(system, tools_list, Keyboard_Input_Enabled);
+        task_instance.handle_instance_tools(system, tools_list, task_comms, Keyboard_Input_Enabled);
 
         // B. Thread Management: Join finished network threads
         if (!task_instance.is_processing && task_instance.chat_thread.joinable()) {
@@ -895,7 +910,8 @@ void ollama_system::process(CLASS_SYSTEM* system, std::vector<std::unique_ptr<TO
             // If the task produced a response, relay it to the main chat
             if (!task_instance.last_received.response.empty()) {
                 std::string task_report = "[Task Update]: " + task_instance.last_received.response;
-                send(tools_list, task_report, "system");
+                comms.INPUT_FROM_USER = task_report;
+                send(tools_list, comms, "system");
             }
             
             // Remove from vector (unique_ptr automatically deletes the memory)
@@ -921,7 +937,7 @@ void ollama_system::process(CLASS_SYSTEM* system, std::vector<std::unique_ptr<TO
     // Continuous checks for time-based triggers or hardware state.
     // ---------------------------------------------------------
     for (auto& tool : tools_list)
-        tool->monitor_tool(*this, system, tools_list);
+        tool->monitor_tool(*this, system, tools_list, comms);
 
     // Drop any tool that's no longer alive (currently only ever a
     // TOOL_REMOTE whose connection closed - see is_alive()'s comment in

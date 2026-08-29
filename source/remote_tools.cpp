@@ -204,7 +204,10 @@ void TOOL_REMOTE::configure(ollama_system&) {}
 
 void TOOL_REMOTE::register_tool(ollama_system&, json& tools)
 {
+    tool_functions.clear();
+
     for (auto& def : tool_defs) {
+        tool_functions.push_back(def.value("name", ""));
         add_tool(
             tools,
             def.value("name", ""),
@@ -250,7 +253,7 @@ bool TOOL_REMOTE::read_line_blocking(std::string& out, int timeout_ms)
     }
 }
 
-bool TOOL_REMOTE::check(ollama_system& chat, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, const ToolCall& tc)
+bool TOOL_REMOTE::check(ollama_system& chat, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms, const ToolCall& tc)
 {
     bool is_mine = false;
     for (auto& def : tool_defs) {
@@ -321,7 +324,7 @@ bool TOOL_REMOTE::check(ollama_system& chat, CLASS_SYSTEM*, std::vector<std::uni
     }
 
     chat.send_tool_result(tc.id, response_str);
-    chat.integrate_tool_result(tools_list, "", response_str);
+    chat.integrate_tool_result(tools_list, comms, "", response_str);
 
     return true;
 }
@@ -339,7 +342,7 @@ bool TOOL_REMOTE::check(ollama_system& chat, CLASS_SYSTEM*, std::vector<std::uni
 // cleanly closed connection, same as before the heartbeat existed - either
 // way, is_alive() flips to false, which ollama_system::process() (olla.cpp)
 // checks every tick to actually drop this instance from tools_list.
-void TOOL_REMOTE::monitor_tool(ollama_system& chat, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list)
+void TOOL_REMOTE::monitor_tool(ollama_system& chat, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms)
 {
     if (fd < 0) return;
 
@@ -406,7 +409,7 @@ void TOOL_REMOTE::monitor_tool(ollama_system& chat, CLASS_SYSTEM*, std::vector<s
                 std::string message = msg.value("message", "");
                 if (!message.empty()) {
                     chat.log("[RemoteTools] Event from remote tool: " + message + "\n");
-                    chat.integrate_tool_result(tools_list, "", message);
+                    chat.integrate_tool_result(tools_list, comms, "", message);
                 }
 
                 // Optional structured follow-up action, separate from

@@ -337,10 +337,16 @@ void ollama_system::send(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, CO
     for (auto& tool : tools_list)
         tool->register_tool(*this, tools);
 
+    // Ollama's own streaming API is what makes either channel show up live
+    // at all - needed whenever EITHER comms.INPUT_FROM_LLM (stream_output)
+    // or comms.INPUT_FROM_THINKING (stream_thinking) wants that, not just
+    // stream_output alone (see their shared comment, olla.h).
+    bool use_streaming_request = PROPS.stream_output || PROPS.stream_thinking;
+
     json body = {
         {"model", PROPS.model},
         {"messages", messages_json},
-        {"stream", PROPS.stream_output},
+        {"stream", use_streaming_request},
         {"think", PROPS.use_thinking},
         {"keep_alive", PROPS.keep_alive_seconds},
         {"options", {
@@ -356,7 +362,7 @@ void ollama_system::send(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, CO
 
     httplib::Client cli(PROPS.host, PROPS.port);
     cli.set_read_timeout(120);
-    
+
     std::string accumulated_content = "";
     std::string accumulated_thinking = "";
     bool stream_received_done_flag = false;
@@ -364,7 +370,7 @@ void ollama_system::send(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, CO
     httplib::Headers headers = { {"Content-Type", "application/json"} };
     std::string json_body = body.dump();
 
-    if (PROPS.stream_output) {
+    if (use_streaming_request) {
         auto res = cli.Post(
             "/api/chat",
             headers,
@@ -400,7 +406,10 @@ void ollama_system::send(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, CO
                         if (msg_chunk.contains("thinking")) {
                             std::string t = msg_chunk["thinking"];
                             accumulated_thinking += t;
-                            {
+                            // accumulated_thinking (-> last_received.thinking)
+                            // always gets it regardless - only whether it
+                            // also goes to comms live is gated.
+                            if (PROPS.stream_thinking) {
                                 std::lock_guard<std::mutex> lock(output_buffer_mutex);
                                 comms.INPUT_FROM_THINKING += t;
                             }
@@ -411,8 +420,11 @@ void ollama_system::send(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, CO
                             // TTS reads from its own comms_buffer_audio copy
                             // (io_worker.cpp), fed from comms.INPUT_FROM_LLM
                             // by IO_WORKER_CLASS::exchange() - no separate
-                            // append needed here.
-                            {
+                            // append needed here. accumulated_content (->
+                            // last_received.response) always gets it
+                            // regardless - only whether it also goes to
+                            // comms live is gated.
+                            if (PROPS.stream_output) {
                                 std::lock_guard<std::mutex> lock(output_buffer_mutex);
                                 comms.INPUT_FROM_LLM += c;
                             }
@@ -678,6 +690,30 @@ void ollama_system::save_history()
         history_write(PROPS.path_history);
         PREVIOUS_HISTORY_SIZE = history.size();
     }
+}
+
+void ollama_system::clear_history()
+{
+    std::lock_guard<std::mutex> lock(history_mutex);
+    history.clear();
+}
+
+void ollama_system::clear_history_keep_protected()
+{
+    std::lock_guard<std::mutex> lock(history_mutex);
+    std::vector<Message> protected_messages;
+    for (const Message& msg : history) {
+        if (msg.consolidation_level < 0) {
+            protected_messages.push_back(msg);
+        }
+    }
+    history = protected_messages;
+}
+
+void ollama_system::replace_history(std::vector<Message> new_history)
+{
+    std::lock_guard<std::mutex> lock(history_mutex);
+    history = std::move(new_history);
 }
 
 void ollama_system::unload_model()

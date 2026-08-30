@@ -150,7 +150,19 @@ class OLLAMA_SYSTEM_PROPERTIES
         std::string host = "localhost";
         int port = 11434;
         int num_ctx = 8192; // size
+        // Independent per-channel gates on what a streamed response is
+        // allowed to write into comms (send(), olla.cpp) - stream_output
+        // for comms.INPUT_FROM_LLM (content), stream_thinking for
+        // comms.INPUT_FROM_THINKING. Either one alone is enough to make
+        // send() use Ollama's streaming API (chunks needed for either
+        // channel to show up live at all) - the other channel's chunks
+        // still get accumulated into last_received.response/.thinking
+        // either way, just not forwarded to comms for display while the
+        // call is in flight. Both default true, matching stream_output's
+        // old sole meaning (both channels visible) for every existing
+        // caller.
         bool stream_output = true;
+        bool stream_thinking = true;
         bool use_thinking = true;
 
         // Discourages the model from reproducing a recent sequence of
@@ -174,13 +186,23 @@ class OLLAMA_SYSTEM_PROPERTIES
 
         string web_search_api_key = "Enter_API_key_for_serpapi.com";
 
-        // parameters
-        int consolitation_starts_starts_at = 20;
-        int consolitation_sizes = 10;
-
-        // test
-        //int consolitation_starts_starts_at = 4;
-        //int consolitation_sizes = 2;
+        // Consolidation tuning (SIDETRACK_CLASS::run_consolidation,
+        // sidetrack.cpp): consolitation_starts_starts_at is the minimum
+        // number of messages kept untouched (raw) at a given consolidation
+        // level; consolitation_sizes is the minimum overflow past that
+        // before a squash triggers. Both even - run_consolidation() rounds
+        // the actual squashed count down to the nearest even number anyway
+        // (level 0's raw messages strictly alternate user/assistant, so an
+        // odd slice would end on a lone unanswered turn), so odd values
+        // here would just mean the real trigger point is one lower than it
+        // looks. 30/12 keeps roughly 15 conversational turns at full
+        // fidelity before consolidating - comfortably inside num_ctx above
+        // even with several summary levels and tool schemas also present -
+        // and squashes in six-turn batches once it does, big enough to be
+        // worth an LLM call without asking one summarization pass to cover
+        // too much at once.
+        int consolitation_starts_starts_at = 30;
+        int consolitation_sizes = 12;
 
         bool LOAD_SAVE_HISTORY_ON_DISK = true;
 
@@ -260,6 +282,27 @@ class ollama_system {
 
         // Explicit flush to disk, e.g. right after consolidation commits or on shutdown.
         void save_history();
+
+        // Wipes history entirely, in memory only - caller decides whether/
+        // when to save_history() after. No exceptions - even protected
+        // (consolidation_level < 0) messages, e.g. the persona/opening
+        // prompt, are dropped.
+        void clear_history();
+
+        // Wipes history down to only protected (consolidation_level < 0)
+        // messages, in memory only - caller decides whether/when to
+        // save_history() after. Keeps the persona/opening prompt while
+        // dropping everything since. Same wipe sidetrack.cpp's
+        // run_clear_context()/persistent_time_checks() used to do inline.
+        void clear_history_keep_protected();
+
+        // Installs new_history as history wholesale, in memory only -
+        // caller decides whether/when to save_history() after. For
+        // replacing history with something built elsewhere (e.g.
+        // consolidation's rebuilt vector, sidetrack.cpp) rather than
+        // filtering the existing one in place, which clear_history()/
+        // clear_history_keep_protected() don't support.
+        void replace_history(std::vector<Message> new_history);
 
         // Tells Ollama to unload PROPS.model from memory immediately
         // (sends keep_alive: 0). Ollama tracks loaded models by name, not

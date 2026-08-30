@@ -219,7 +219,7 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         // per-profile directory (see Settings::get_shared_path()).
         io_worker.create(system.setings_vars.get_shared_path());
 
-        sidetrack.create();
+        sidetrack.create(chat.PROPS);
 
         io_worker.key_input.PROPS.ENABLED = true;
         // Under ncurses, keyboard_input()'s own raw per-character echo would
@@ -308,7 +308,7 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
 
             // Runs sidetrack's main-thread half of both routines' state
             // machines - see SIDETRACK_CLASS::check's doc comment.
-            sidetrack.check(chat, comms);
+            sidetrack.check(chat, comms, tools_list, &system);
 
             //if (sidetrack.SIGNALS.CONTEXT_CLEARED_SIGNAL)
             //{

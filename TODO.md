@@ -599,6 +599,140 @@ Two-part plan, in order:
    same time. `sidetrack.h`/`.cpp` are currently wrapped in `#if 0` (kept
    for reference, not compiled) rather than updated to match the COMMS
    move, since they're being thrown away anyway.
+3. **Done 2026-08-30: `run_consolidation()` (sidetrack.cpp) implemented and
+   working**, tested against a real Ollama server via a standalone harness
+   (`../olli_consolidation_test/`, outside the real build - see its own
+   `build.sh`/`test_consolidation.cpp`; deliberately avoids linking
+   whisper/ncurses/portaudio, only needs curl+pthread, since only 4 unused
+   `user_io.cpp` symbols are ever referenced by this code path -
+   `stub_ui.cpp` no-ops them). Bucket-by-`consolidation_level`, then per
+   level: once it holds more than `keep_count`
+   (`PROPS.consolitation_starts_starts_at`, now 30) messages and the
+   overflow is at least `trigger_count` (`PROPS.consolitation_sizes`, now
+   12), the entire overflow gets replayed onto a dedicated throwaway
+   `ollama_system` (`SIDETRACK_CHAT_INSTANCE`, model/host/port only - no
+   thinking/streaming/disk-saving/tools) and squashed into one summary
+   message via a single `system`-role trigger prompt, promoted to the next
+   level up - cascades through multiple levels in one `run_consolidation()`
+   call if a promotion pushes the next level over its own threshold too.
+   `ollama_system::replace_history()` added (same in-memory-only,
+   caller-calls-save_history()-separately pattern as `clear_history()`/
+   `clear_history_keep_protected()`) for installing the rebuilt vector back
+   into `main_instance.history` at the end.
+   - **Real bug found and fixed while testing**: the overflow slice can't
+     just be cut at a raw count - level 0's raw messages aren't a fixed
+     2-message-per-turn shape once a tool call is involved (`user`,
+     `assistant`, `tool`, DIRECTOR_NOTE `system`, `assistant` - 5 messages,
+     not 2), so a slice ending mid-exchange leaves a dangling unanswered
+     `user`/`tool` message right next to the trigger prompt - confirmed
+     this made the model narrate the dangling question instead of
+     summarizing anything, or (worse, more silently) confidently "answer"
+     just that trailing question while dropping every other topic in the
+     batch. An even-count rounding rule was tried first and wasn't enough
+     (parity shifts after any odd-length tool exchange) - fixed for real by
+     shrinking the slice until it ends on a completed `assistant` turn,
+     content-based rather than count-based (level 0 only; levels above 0
+     are always self-contained `system`-role summaries with no such
+     pairing to worry about).
+   - **`tool`/DIRECTOR_NOTE messages get flattened, not filtered, when
+     replayed for summarization** - deliberately not dropped from what
+     gets consolidated (that would repeat the exact "erasing tool-call
+     evidence" bug from 16ab453, just via consolidation exclusion instead
+     of early deletion), but a bare `tool`-role message has no meaning to
+     the API without the preceding `assistant` tool_calls entry that isn't
+     being replayed, so it's relabeled to `user` with a `"[Tool result]:
+     "` text marker instead. DIRECTOR_NOTE (`system`-role, matched by its
+     literal `"[DIRECTOR_NOTE]"` prefix) is dropped entirely rather than
+     also flattened - it's redundant with the `tool` message right before
+     it (`integrate_tool_result()` embeds the exact same raw result
+     verbatim). Any other `system`-role message at level 0+ is our own
+     past promoted summary, not a DIRECTOR_NOTE - replayed unchanged.
+   - **Known quality gap, not yet fixed**: when a squashed batch spans
+     several unrelated topics, the resulting summary tends to only cover
+     the *last* topic in the batch, silently dropping the others, rather
+     than covering the whole thing - seen with both a 14-message and a
+     19-message multi-topic batch in testing. Graceful, not corrupting
+     (only ever affects already-aged-out material, the newest `keep_count`
+     messages always stay at full fidelity regardless) but does undermine
+     consolidation's actual point if it's this lossy - likely needs a
+     stronger trigger prompt (e.g. explicitly asking it to cover every
+     topic present, not just summarize) rather than a code change. Revisit
+     before relying on long-lived consolidated history for anything that
+     matters.
+   - **Done 2026-08-30: wired into `check()`** - `run_consolidation()` is
+     now actually called every tick, no longer just reachable via the
+     test-only `force_consolidation()` hook (sidetrack.h). It still runs
+     synchronously, blocking, directly on the main thread whenever it
+     triggers - the class comment in sidetrack.h says `check()` is meant to
+     stay non-blocking, which this doesn't honor - but deliberately left
+     that way for now: idle-gated, fast in practice (~8-11s for a large
+     stress-test batch), so not worth the added complexity of threading it
+     at this point. Revisit if it ever proves disruptive in real use.
+4. **Done 2026-08-30: `run_second_guess()` (sidetrack.cpp) implemented and
+   wired into `check()`.** After a real assistant reply lands, waits
+   `SECOND_GUESS_WAIT_TIME` (2s), then asks a thinking-mode
+   `SIDETRACK_CHAT_INSTANCE` (real `tools_list`/`CLASS_SYSTEM*` passed in,
+   so it can actually dispatch a tool, not just talk about one) "More
+   needed to be done or said? Respond DONE if not." If not `DONE`, asks a
+   follow-up "Go ahead - say or do what needs to happen." and commits
+   whatever comes back as a new `assistant` message onto `main_instance.
+   history` - marked with `"..."` if interrupted mid-answer rather than
+   discarded. Uses `SIDETRACK_CHAT_INSTANCE`'s own `chat_thread`/
+   `is_processing` (same async mechanism `ollama_system::input()` already
+   uses for the main chat) so `run_second_guess()` can poll tick-by-tick
+   instead of blocking; each "waiting" stage calls `handle_instance_tools()`
+   every tick (same shape `process()`'s own background-task handling uses)
+   so a tool call gets genuinely dispatched and narrated, not just
+   requested.
+   - **Deliberately reuses the main chat's own `comms`, not an isolated
+     one** - initially built with a separate `second_guess_comms` (plus
+     matching plumbing through `check()`, `main.cpp`, `io_worker.cpp`) to
+     dodge a narrow collision risk on `comms.INPUT_FROM_USER`/`INTERRUPTED`
+     between a real user submission and second-guess's own internal
+     prompts, but reverted at the user's explicit direction: "comms is the
+     backbone of the io that gets to and from the user... the only reason
+     to circumvent it is if the user shouldn't be seeing it" - see
+     [[olli-collaboration-style]]. Accepted the collision risk; bonus from
+     reverting: thinking/response text reaches the screen for free via the
+     existing `exchange()`/display path, no extra wiring needed.
+   - **`comms.INTERRUPTED` is read-only everywhere in this function, never
+     cleared** - it's the real, shared main-chat comms now, and the actual
+     owner of clearing it is `ollama_system::input()` (gated on
+     `is_processing`, olla.cpp) - clearing it a second time here could race
+     with that and swallow a real interrupt to the main chat.
+   - **Two independent streaming gates added to make DONE-suppression
+     possible**: `OLLAMA_SYSTEM_PROPERTIES::stream_thinking` (new, alongside
+     `stream_output`, both default `true`) - `send()` (olla.cpp) now uses
+     Ollama's streaming API whenever *either* flag is on, and gates
+     `comms.INPUT_FROM_LLM`/`INPUT_FROM_THINKING` independently inside the
+     streaming callback, so a call can show its thinking live while
+     suppressing its plain-text content (or vice versa) - needed because
+     the DONE-check call's literal `"DONE"` answer was otherwise leaking
+     onto the screen the same as any real content would. Learned along the
+     way: this can only be prevented by never writing it to `comms` in the
+     first place (`stream_output = false` for that one call) - clipping it
+     out afterward doesn't work, since streaming writes happen live, chunk
+     by chunk, during the call itself, well before any post-completion
+     check could intervene.
+   - **Known latent bug found, not yet confirmed as the cause of anything
+     real**: `comms.INTERRUPTED` can get stuck `true` forever in a narrow
+     case - `IO_WORKER_CLASS::thread_main()`'s voice-event handling
+     (io_worker.cpp) sets `key_input.INTERRUPTED = true` unconditionally
+     whenever a non-status voice event is popped, even if
+     `voca_event.text` is empty (no transcript, e.g. some wake/listening
+     event) - `ENTER_PRESSED` only gets set alongside it when there IS
+     text. `comms.INTERRUPTED` only ever gets cleared by
+     `ollama_system::input()`, gated on either `is_processing` or
+     `ENTER_PRESSED` being true - if neither happens to be true at that
+     exact moment, nothing ever clears it again. Always a latent
+     possibility, harmless before since nothing else ever read the flag -
+     now that `run_second_guess()`'s abort-before-starting check does,
+     stuck-true here would permanently block it from ever leaving stage
+     0/1. Suspected during one test session ("it's not going into second
+     guess at all") but the user found it working again on a recheck, so
+     unconfirmed as the actual cause - worth a real fix (e.g. only ever
+     set `key_input.INTERRUPTED` alongside a real `ENTER_PRESSED`,
+     matching how a real keypress already pairs them) if it recurs.
 
 ## Voice (Voca)
 

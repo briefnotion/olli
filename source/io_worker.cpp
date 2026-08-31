@@ -954,6 +954,10 @@ void IO_WORKER_CLASS::thread_main()
             // (see its own comment).
             comms_buffer.IS_TYPING = key_input.IS_TYPING;
             input_from_user_echo = key_input.LINE;
+            scroll_request = key_input.SCROLL_REQUEST;
+            key_input.SCROLL_REQUEST = SCROLL_KEY::NONE;
+            focus_cycle_requested = key_input.FOCUS_CYCLE_REQUESTED;
+            key_input.FOCUS_CYCLE_REQUESTED = false;
 
             // 3. Ctrl+C - checked early, same priority it had in main.cpp's
             // old loop (wins over anything else this tick).
@@ -1068,7 +1072,8 @@ void IO_WORKER_CLASS::thread_main()
             // 10. Draw.
             if (USE_NCURSES)
             {
-                output.display_with_ncurses(input_from_user_echo, comms_buffer, tool_names);
+                output.display_with_ncurses(input_from_user_echo, comms_buffer, tool_names,
+                                             scroll_request, focus_cycle_requested);
             }
             else
             {

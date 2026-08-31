@@ -340,6 +340,14 @@ class IO_WORKER_CLASS
         // once relayed - this one is never cleared, just overwritten.
         std::string input_from_user_echo;
 
+        // Live mirror of key_input.SCROLL_REQUEST/FOCUS_CYCLE_REQUESTED,
+        // read-and-cleared each tick the same way input_from_user_echo's
+        // own comment describes IS_TYPING being relayed - forwarded into
+        // display_with_ncurses() to scroll/cycle-focus whichever ncurses
+        // panel currently has focus (see SCROLL_KEY, user_io.h).
+        SCROLL_KEY scroll_request = SCROLL_KEY::NONE;
+        bool focus_cycle_requested = false;
+
         // Owns text-to-speech (via TextToSpeech) and speech-to-text (via
         // Voca) in-process, and coordinates them: while TTS is speaking,
         // Voca is paused so it doesn't hear olli's own voice; once speech

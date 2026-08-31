@@ -3,12 +3,22 @@
 
 #include <string>
 #include <vector>
+#include <deque>
 #include <termios.h>
 #include <filesystem>
 #include <optional>
 #include <atomic>
 
 #include "fled_time.h"
+
+// ----
+
+// Page Up/Down, as recognized by KEYBOARD_INPUT::keyboard_input()'s escape-
+// sequence parsing - consumed-and-cleared by IO_WORKER_CLASS::thread_main()
+// each tick (see io_worker.h/.cpp) and forwarded into
+// OUTPUT_CLASS::display_with_ncurses() to scroll whichever ncurses panel
+// currently has focus.
+enum class SCROLL_KEY { NONE, PAGE_UP, PAGE_DOWN };
 
 // ----
 
@@ -69,6 +79,19 @@ class KEYBOARD_INPUT
         // to a normal prompt short of killing the process externally.
         bool EXIT_REQUESTED = false;
 
+        // Set by a recognized Page Up/Down escape sequence (ESC [ 5/6 ~) -
+        // like EXIT_REQUESTED above, read-and-cleared explicitly by the
+        // caller each tick (IO_WORKER_CLASS::thread_main()), not touched by
+        // reset(). See keyboard_input()'s own comment for the parsing.
+        SCROLL_KEY SCROLL_REQUEST = SCROLL_KEY::NONE;
+
+        // Set by a Tab keypress (byte 9), repurposed away from literal-tab
+        // insertion the same way Ctrl+C is repurposed away from literal
+        // insertion above - cycles which ncurses panel SCROLL_REQUEST
+        // applies to. Same read-and-cleared-by-caller contract as
+        // SCROLL_REQUEST.
+        bool FOCUS_CYCLE_REQUESTED = false;
+
         KEYBOARD_INPUT();
         ~KEYBOARD_INPUT();
 
@@ -103,6 +126,87 @@ typedef struct _win_st WINDOW;
 // itself and repairs obscured regions correctly on update_panels().
 struct panel;
 typedef struct panel PANEL;
+
+// ----
+// Scrollable/word-wrapped/resize-safe text panel model, shared by
+// win_system, win_chat, and win_tools (see OUTPUT_CLASS below). Each panel
+// keeps its own logical text (entries) separate from the word-wrapped
+// display cache (wrapped_lines) built from it at a given width - this is
+// what makes a terminal resize recoverable: ncurses' own wresize() does NOT
+// re-wrap a window's existing content, it just changes the buffer
+// dimensions, so relying on that (the old design's scrollok(TRUE) approach)
+// corrupts the transcript on resize. Rebuilding wrapped_lines from entries
+// at the new width instead sidesteps that entirely. Method bodies live in
+// user_io.cpp, same split as OUTPUT_CLASS itself.
+
+// One already-wrapped display row, with the ncurses attribute it should be
+// drawn with (e.g. dimmed grey for user_input vs plain for chat_response).
+struct NCURSES_WRAPPED_LINE
+{
+    std::string text;
+    int attr = 0;
+};
+
+// One logical (unwrapped) paragraph pushed into a panel - a chat_response
+// chunk, a user_input line, one tool name. Consecutive appends sharing the
+// same attr get merged into the same entry (see NCURSES_TEXT_PANEL::append()
+// in user_io.cpp) so a streamed reply arriving in many small pieces still
+// wraps as one continuous paragraph instead of re-wrapping at each chunk's
+// boundary. wrapped_line_count tracks how many of the panel's current
+// wrapped_lines this entry contributes, so eviction (once max_wrapped_lines
+// is exceeded) knows how many lines to drop along with it.
+struct NCURSES_TEXT_ENTRY
+{
+    std::string raw_text;
+    int attr = 0;
+    int wrapped_line_count = 0;
+};
+
+struct NCURSES_TEXT_PANEL
+{
+    std::deque<NCURSES_TEXT_ENTRY> entries;         // source of truth
+    std::deque<NCURSES_WRAPPED_LINE> wrapped_lines; // derived cache
+    int wrap_width = 0;            // width wrapped_lines was built for; 0 = never wrapped yet
+    int scroll_top_line = 0;       // absolute index into wrapped_lines
+    bool pinned_to_bottom = true;  // false once the user scrolls away from the tail
+    size_t max_wrapped_lines = 0;  // 0 = unbounded (win_tools - see OUTPUT_CLASS)
+
+    // max_lines: 0 = unbounded. Chosen per-panel where OUTPUT_CLASS declares
+    // its system_panel/chat_panel/tools_panel members below.
+    explicit NCURSES_TEXT_PANEL(size_t max_lines = 0) : max_wrapped_lines(max_lines) {}
+
+    // Splits text on '\n' into paragraphs, word-wraps each at width, and
+    // appends to (or merges into, per the attr rule above) entries/
+    // wrapped_lines, evicting from the front past max_wrapped_lines.
+    void append(const std::string& text, int attr, int width);
+
+    // Tools panel only: tool_names is already a fresh, complete list every
+    // tick (not an accumulating log), so it fully replaces entries/
+    // wrapped_lines rather than appending.
+    void rebuild_from(const std::vector<std::string>& fresh_lines, int width);
+
+    // Rebuilds wrapped_lines from entries at a new width - the single
+    // mechanism behind both word-wrap and resize recovery (see
+    // OUTPUT_CLASS::ncurses_render_panel()'s comment in user_io.cpp).
+    void rewrap(int new_width);
+
+    // Moves scroll_top_line by delta_lines (negative = up/back through
+    // history), clamping into range and re-pinning to the bottom if the
+    // result reaches/passes the true bottom. Named scroll_by(), not
+    // scroll() - ncursesw's <curses.h> #defines scroll(win) as a macro
+    // (wscrl(win,1)), which would otherwise silently mangle this call.
+    void scroll_by(int delta_lines, int viewport_h);
+
+    // Keeps scroll_top_line valid for the given viewport height - follows
+    // the tail when pinned_to_bottom, otherwise clamps the stored value.
+    void clamp_scroll(int viewport_h);
+
+    // Drops lines from the front of wrapped_lines (and their owning
+    // entries) until back under max_wrapped_lines - a no-op when
+    // max_wrapped_lines is 0 (unbounded). Called by append()/rewrap()
+    // after either changes wrapped_lines' size.
+    void evict_to_cap();
+};
 
 /**
  * OUTPUT_CLASS
@@ -212,6 +316,32 @@ class OUTPUT_CLASS
         WINDOW* win_chat = nullptr;
         WINDOW* win_input = nullptr;
 
+        // Logical text buffers backing win_system/win_chat/win_tools (see
+        // NCURSES_TEXT_PANEL above) - the actual source of truth for what's
+        // shown, rendered into each window fresh every tick by
+        // ncurses_render_panel(). Caps: chat gets 5000 wrapped lines
+        // (~500-750KB, generous scrollback for a long session); system gets
+        // 500 (a low-volume status strip); tools stays unbounded since
+        // rebuild_from() always replaces its content wholesale from
+        // tool_names, which is already a small, fresh, non-accumulating
+        // list each tick - there's no history to cap.
+        NCURSES_TEXT_PANEL system_panel{500};
+        NCURSES_TEXT_PANEL chat_panel{5000};
+        NCURSES_TEXT_PANEL tools_panel{0};
+
+        // Which of the three scrollable panels Page Up/Down currently
+        // applies to - cycled by Tab (see KEYBOARD_INPUT::FOCUS_CYCLE_REQUESTED).
+        enum class NCURSES_FOCUS { CHAT, SYSTEM, TOOLS };
+        NCURSES_FOCUS ncurses_focus = NCURSES_FOCUS::CHAT;
+
+        // Current height of win_input in rows (see ncurses_update_input_box())
+        // and the cached width shared by win_system/win_chat/win_input (not
+        // win_tools, which has its own fixed tools_w) - both needed by
+        // ncurses_update_input_box() to resize win_input/win_chat without
+        // duplicating ncurses_layout()'s own row math.
+        int ncurses_input_rows = 1;
+        int ncurses_main_w = 0;
+
         // Right-side panel listing available tool names (see
         // display_with_ncurses()'s tool_names parameter) - full height,
         // never overlaps anything else, so it stays a plain window like
@@ -232,6 +362,34 @@ class OUTPUT_CLASS
         void ncurses_layout(); // full rebuild - all windows, for a resize
         void ncurses_update_thinking_box(); // just the floating thinking box
         void ncurses_commit_panels(); // update_panels()+doupdate() - see .cpp
+
+        // Shared row-geometry math for the system/chat/input stack - used by
+        // both ncurses_layout() (full rebuild) and ncurses_update_input_box()
+        // (input-height-only change), so the two never disagree about where
+        // each window sits. Takes the input box's current row count and
+        // hands back chat's row/height and the input row.
+        void ncurses_compute_rows(int input_rows, int& chat_row, int& chat_h, int& input_row) const;
+
+        // Renders one NCURSES_TEXT_PANEL's current visible slice into win -
+        // rewrapping first if win's width doesn't match what the panel was
+        // last wrapped at (this lazy check is also the resize-recovery
+        // mechanism - see the .cpp comment). start_row/content_col leave room
+        // for a header (used by win_tools' "Tools:" label); paneled selects
+        // ncurses_commit_panels() (win_chat) vs a plain wrefresh().
+        void ncurses_render_panel(WINDOW* win, NCURSES_TEXT_PANEL& panel, int start_row,
+                                   bool paneled, const std::string& header = "", int content_col = 0);
+
+        // Word-wraps the live-typed line, grows/shrinks win_input (and
+        // correspondingly win_chat) only when the needed row count actually
+        // changes, and draws it. Replaces display_with_ncurses()'s old
+        // fixed-one-row input block.
+        void ncurses_update_input_box(const std::string& input_from_user_echo);
+
+        // Bolds whichever separator segment (the hline above win_system/
+        // win_chat, or the vline left of win_tools) matches ncurses_focus,
+        // plain otherwise - the only visible feedback for Tab/Page Up/Down
+        // given the layout itself can't change to show focus.
+        void ncurses_draw_focus_indicators();
 
     public:
         std::string system_message = "";
@@ -307,8 +465,13 @@ class OUTPUT_CLASS
         // other half of that switch. tool_names: current list of available
         // tool names (see IO_WORKER_CLASS::exchange(), io_worker.cpp),
         // rendered one per line in a right-side panel spanning the full
-        // screen height.
-        void display_with_ncurses(const std::string& input_from_user_echo, const COMMS& comms, const std::vector<std::string>& tool_names);
+        // screen height, scrollable like the other panels if it overflows.
+        // scroll_request/focus_cycle_requested: this tick's keyboard scroll
+        // signals (see SCROLL_KEY above and KEYBOARD_INPUT::SCROLL_REQUEST/
+        // FOCUS_CYCLE_REQUESTED), relayed through IO_WORKER_CLASS::thread_main().
+        void display_with_ncurses(const std::string& input_from_user_echo, const COMMS& comms,
+                                   const std::vector<std::string>& tool_names,
+                                   SCROLL_KEY scroll_request, bool focus_cycle_requested);
 };
 
 #endif

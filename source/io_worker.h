@@ -368,11 +368,11 @@ class IO_WORKER_CLASS
         // a typed line would. Returns false if nothing is pending.
         bool popVocaEvent(VOCA_EVENT& out);
 
-    public:
         IO_WORKER_CLASS_PROPERTIES PROPS;
 
         bool RUN = false;
 
+    public:
         KEYBOARD_INPUT key_input;
         OUTPUT_CLASS output;
 

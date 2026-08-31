@@ -127,9 +127,9 @@ class TOOL_WEB_SEARCH : public TOOL_BASE
             return size * nmemb;
         }
 
-    public:
         std::string apiKey = "Enter_API_key_for_serpapi.com";
 
+    public:
         void configure(ollama_system& chat) override;
         void register_tool(ollama_system& chat, json& tools) override;
         bool check(ollama_system& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms, const ToolCall& tc) override;
@@ -166,9 +166,9 @@ class TOOL_TASK_RUNNER : public TOOL_BASE
         // not a single instruction handed back to the model.
         void handle_tool(ollama_system& chat, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms, const std::string& name, const json& args, const std::string& tc_id);
 
-    public:
         std::filesystem::path OLLI_DIRECTORY;
 
+    public:
         void configure(ollama_system& chat) override;
         void register_tool(ollama_system& chat, json& tools) override;
         bool check(ollama_system& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms, const ToolCall& tc) override;

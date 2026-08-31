@@ -135,12 +135,11 @@ class FLED_TIME
         // How long sleep will occure
         double SLEEP_TIME = 1000;
 
-    public:
         STAT_DATA_DOUBLE COMPUTETIME;   // Loop time spent while only proceessing.
         STAT_DATA_DOUBLE CYCLETIME;     // Amount of time to complete an entire cycle.
         STAT_DATA_DOUBLE PREVSLEEPTIME; // Stored value returned on prev sleep cycle.
 
-        public:
+    public:
         void request_ready_time(double Ready_Time);          // Set sleep time to loweset
         void request_ready_time(double Ready_Time, char ID); // For debugging. will print id if 
                                                                     // id if sleep time requested is <=0

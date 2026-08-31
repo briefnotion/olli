@@ -221,7 +221,7 @@ constexpr double kAmbientAdaptRate = 0.05; // exponential moving average rate
 constexpr double kEnergyMultiplier = 1.8;  // speech threshold = ambient * this
 constexpr double kMinEnergyThreshold = 100.0;
 
-constexpr double kAutoSleepTimeoutSec = 300.0; // 5 minutes, matches AUTO_SLEEP_TIMEOUT
+constexpr double kAutoSleepTimeoutSec = 45.0; // 45 seconds
 
 // Extra time beyond a beep's own duration to keep ignoring mic input for -
 // covers speaker-to-mic latency and any room echo tail.

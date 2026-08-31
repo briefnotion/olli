@@ -1,41 +1,29 @@
-// A home/away presence sensor for olli (see ../PROTOCOL.md) - built from
-// ../template/template_tool.cpp's connection plumbing, plus identity
-// handling copied from ../clock/clock.cpp's pattern (the template doesn't
-// have that yet - see its own note about being due for an update once this
-// tool exists as a second real-world example).
+// A home/away presence sensor for olli (see ../PROTOCOL.md). Detects each
+// tracked person via two independent backends - Bluetooth (classic BR/EDR
+// MAC via l2ping) and Wi-Fi (ARP/neighbor-table lookup) - see
+// helper_presence.hpp for BluetoothBackend/WifiBackend/PersonProfile, the
+// classes that actually do the detection and hold each person's state.
 //
-// Runs TWO independent detection backends every poll interval and compares
-// them, rather than trusting either alone:
-//   - Bluetooth: pings a paired phone's classic (BR/EDR) MAC via l2ping.
-//     Classic Bluetooth's address is stable, unlike BLE advertisements -
-//     iOS (and modern Android) randomize the BLE MAC roughly every 15
-//     minutes specifically to prevent passive tracking, so scanning for
-//     ambient BLE broadcasts was ruled out - see the design discussion this
-//     came out of. Requires pairing the phone with this machine once
-//     first, and l2ping needs raw-socket privilege - see the README.
-//   - Wi-Fi: checks whether the phone's home-network IP shows as reachable
-//     in this machine's ARP/neighbor table (forcing a fresh probe first, so
-//     a stale cache entry can't lie).
+// A person is "near" if EITHER backend's most recent raw check found them
+// present - no debounce, no agreement requirement between the two. (An
+// earlier version of this file required both backends to independently
+// agree before declaring someone away, with a consecutive-miss counter on
+// each side - this rewrite trades that conservatism for simplicity, relying
+// on each backend's own poll_interval - see helper_presence.hpp - to avoid
+// spamming real checks rather than a debounce window.) PersonProfile::poll()
+// (helper_presence.hpp) is what detects a near/away transition and sets
+// triggered; run_triggers() below fires the person's configured action
+// through olli and clears it.
 //
-// Both run every tick regardless of mode - the only difference --test makes
-// (see main()) is whether a debounced HOME/AWAY *transition* actually fires
-// the configured action, or just gets logged for comparison. Per-backend
-// results are debounced asymmetrically (see BackendTracker::record()): a
-// single hit flips a backend to HOME immediately, but N consecutive misses
-// are required before it flips to AWAY - and the two backends must
-// independently agree on AWAY before anything is considered settled - see
-// combine_states(). Disagreement isn't an error, it's just "not sure yet" -
-// nothing fires until both sides say the same thing.
+// Settings (which people to track - MAC/IP/actions each - loaded fresh from
+// whichever identity olli sends right after registration) live in
+// PresenceSettings/PersonSettings below - see handle_identity(). Cleared on
+// disconnect, same as clock.cpp's reset_to_default_profile().
 //
-// Settings (MAC/IP to watch, poll interval, debounce counts, what to do on
-// arrival/departure) are per-profile, loaded fresh from whichever identity
-// olli sends right after registration - see handle_identity() and
-// PresenceSettings below. Falls back to the shared, no-profile defaults
-// (and clears any loaded settings) on disconnect, same as clock.cpp's
-// reset_to_default_profile().
-//
-// Build: `make` in this directory. Run: `./presence [host] [--test]` - does
+// Build: `make` in this directory. Run: `./presence [host]` - does
 // not need olli to already be running. `./presence --help` for usage.
+
+#include "helper_presence.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -43,20 +31,19 @@
 #include <fstream>
 #include <sstream>
 #include <string>
-#include <cctype>
 #include <csignal>
 #include <cstdlib>
 #include <chrono>
 #include <algorithm>
 #include <cerrno>
 #include <filesystem>
+#include <vector>
 
 #include <unistd.h>
 #include <termios.h>
 #include <fcntl.h>
 #include <sys/socket.h>
 #include <sys/select.h>
-#include <sys/ioctl.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
@@ -79,28 +66,6 @@ namespace {
     // below for why this matters once host isn't loopback.
     constexpr int CONNECT_TIMEOUT_SECONDS = 2;
 
-    // Bounds each backend's own subprocess call - see the poll loop in
-    // main() for why these need to stay short: both checks run
-    // synchronously, back to back, on the same thread that also owns the
-    // socket/heartbeat/display, so a poll tick blocks everything else for
-    // up to roughly the sum of these two. 3s worst case, on a poll interval
-    // measured in tens of seconds by default, comfortably clears
-    // PING_INTERVAL_SECONDS without tripping DEAD_TIMEOUT_SECONDS - the
-    // same "bounded synchronous block is fine" tradeoff olli's own
-    // TOOL_WEB_SEARCH (libcurl) and TOOL_REMOTE::check() (5s) already make.
-    //
-    // These values alone are NOT a reliable ceiling, though - real testing
-    // showed l2ping -t 2 taking ~5s on an actual miss (Bluetooth link-
-    // establishment overhead the -t flag doesn't cover). check_bluetooth_
-    // present()/check_wifi_present() wrap their subprocess calls in the
-    // coreutils `timeout` command using these same values as a hard
-    // wall-clock cap on top, since a stalled poll tick can otherwise starve
-    // this program's socket-read loop long enough for olli's own
-    // TOOL_REMOTE::check() (5s timeout) to spuriously mark a perfectly
-    // healthy connection dead - observed for real, not hypothetical.
-    constexpr int BLUETOOTH_PING_TIMEOUT_SECONDS = 2;
-    constexpr int WIFI_PING_TIMEOUT_SECONDS = 1;
-
     void send_line(int fd, const std::string& line)
     {
         std::string with_newline = line + "\n";
@@ -109,52 +74,20 @@ namespace {
     }
 
     // =====================================================================
-    // Per-profile settings - see the class-level comment above for the
-    // fields. Loaded fresh on every "identity" message (handle_identity()
-    // below), written out with placeholder defaults the first time a given
-    // profile has none yet, same bootstrap convention as olli's own
-    // Settings::load_settings() (source/helper_olli.cpp).
+    // Per-profile settings - loaded fresh on every "identity" message
+    // (handle_identity() below), written out with placeholder defaults the
+    // first time a given profile has none yet, same bootstrap convention as
+    // olli's own Settings::load_settings() (source/helper_olli.cpp).
     // =====================================================================
 
-    // Which backend(s) combine_states() (further down) actually requires
-    // before considering presence "settled" - see its own comment for what
-    // each mode means. BOTH is the default and the reason this tool has two
-    // backends at all (see the file-level comment); BLUETOOTH/WIFI exist for
-    // when you've already decided one alone is good enough for your
-    // situation and want faster, simpler single-backend triggering instead.
-    // Both backends still run and get displayed/logged every poll
-    // regardless of this setting - it only changes what counts as agreement.
-    enum class DetectionMode { BLUETOOTH, WIFI, BOTH };
-
-    DetectionMode parse_detection_mode(const std::string& s)
-    {
-        if (s == "bluetooth") return DetectionMode::BLUETOOTH;
-        if (s == "wifi") return DetectionMode::WIFI;
-        return DetectionMode::BOTH; // also the fallback for an unrecognized value
-    }
-
-    std::string detection_mode_name(DetectionMode m)
-    {
-        switch (m) {
-            case DetectionMode::BLUETOOTH: return "bluetooth";
-            case DetectionMode::WIFI: return "wifi";
-            default: return "both";
-        }
-    }
-
-    struct PresenceSettings {
+    // One tracked person within a profile - a household can hold several
+    // (a profile isn't necessarily just its own olli user - see the
+    // file-level comment). Each has their own phone identity and their own
+    // independent home/away action.
+    struct PersonSettings {
+        std::string name;
         std::string bluetooth_mac = "";
         std::string wifi_ip = "";
-        int poll_interval_seconds = 30;
-        DetectionMode detection_mode = DetectionMode::BOTH;
-
-        // How many consecutive misses one backend needs before ITS OWN
-        // debounced state flips to AWAY - see BackendTracker::record().
-        // HOME has no equivalent: a hit flips a backend to HOME immediately,
-        // no debounce - see record()'s own comment for why. Independent of
-        // the other backend; combine_states() is what requires agreement
-        // between the two.
-        int away_debounce_misses = 2;
 
         // {"tool": "...", "arguments": {...}} - same shape as olli's own
         // ToolCall (source/olla.h) and exactly what set_timer's
@@ -165,6 +98,10 @@ namespace {
         // loading a saved scene by name.
         json on_home_action = json::object();
         json on_away_action = json::object();
+    };
+
+    struct PresenceSettings {
+        std::vector<PersonSettings> people;
     };
 
     fs::path get_home_dir()
@@ -186,13 +123,18 @@ namespace {
     void save_settings(const fs::path& path, const PresenceSettings& s)
     {
         json j;
-        j["bluetooth_mac"] = s.bluetooth_mac;
-        j["wifi_ip"] = s.wifi_ip;
-        j["poll_interval_seconds"] = s.poll_interval_seconds;
-        j["detection_mode"] = detection_mode_name(s.detection_mode);
-        j["away_debounce_misses"] = s.away_debounce_misses;
-        j["on_home_action"] = s.on_home_action;
-        j["on_away_action"] = s.on_away_action;
+
+        json people_json = json::array();
+        for (const PersonSettings& p : s.people) {
+            people_json.push_back({
+                {"name", p.name},
+                {"bluetooth_mac", p.bluetooth_mac},
+                {"wifi_ip", p.wifi_ip},
+                {"on_home_action", p.on_home_action},
+                {"on_away_action", p.on_away_action}
+            });
+        }
+        j["people"] = people_json;
 
         std::ofstream file(path);
         if (file.is_open()) file << j.dump(4);
@@ -200,6 +142,15 @@ namespace {
 
     // Loads settings for one profile, bootstrapping a placeholder file (same
     // as olli's own settings.json on first run) if none exists yet.
+    //
+    // Also migrates the old single-person schema (a profile's file used to
+    // hold one bluetooth_mac/wifi_ip/on_home_action/on_away_action directly
+    // at the top level, before multi-person support existed) into a single
+    // PersonSettings entry named after the profile itself, then rewrites the
+    // file in the new schema immediately - so an existing real settings file
+    // (real MAC/IP, real configured actions) survives the upgrade as that
+    // person's entry rather than silently vanishing because the old
+    // top-level keys are no longer read.
     PresenceSettings load_settings(const std::string& profile_name)
     {
         fs::path path = settings_path_for(profile_name);
@@ -215,13 +166,35 @@ namespace {
             std::ifstream file(path);
             json j;
             file >> j;
-            s.bluetooth_mac = j.value("bluetooth_mac", s.bluetooth_mac);
-            s.wifi_ip = j.value("wifi_ip", s.wifi_ip);
-            s.poll_interval_seconds = j.value("poll_interval_seconds", s.poll_interval_seconds);
-            s.detection_mode = parse_detection_mode(j.value("detection_mode", detection_mode_name(s.detection_mode)));
-            s.away_debounce_misses = j.value("away_debounce_misses", s.away_debounce_misses);
-            s.on_home_action = j.value("on_home_action", s.on_home_action);
-            s.on_away_action = j.value("on_away_action", s.on_away_action);
+
+            bool needs_resave = false;
+
+            if (j.contains("people") && j["people"].is_array()) {
+                for (const json& pj : j["people"]) {
+                    std::string name = pj.value("name", "");
+                    if (name.empty()) continue; // malformed hand-edit - skip, don't fail the whole load
+
+                    PersonSettings p;
+                    p.name = name;
+                    p.bluetooth_mac = pj.value("bluetooth_mac", p.bluetooth_mac);
+                    p.wifi_ip = pj.value("wifi_ip", p.wifi_ip);
+                    p.on_home_action = pj.value("on_home_action", p.on_home_action);
+                    p.on_away_action = pj.value("on_away_action", p.on_away_action);
+                    s.people.push_back(p);
+                }
+            } else if (j.contains("bluetooth_mac") || j.contains("wifi_ip") ||
+                       j.contains("on_home_action") || j.contains("on_away_action")) {
+                PersonSettings p;
+                p.name = profile_name.empty() ? "default" : profile_name;
+                p.bluetooth_mac = j.value("bluetooth_mac", p.bluetooth_mac);
+                p.wifi_ip = j.value("wifi_ip", p.wifi_ip);
+                p.on_home_action = j.value("on_home_action", p.on_home_action);
+                p.on_away_action = j.value("on_away_action", p.on_away_action);
+                s.people.push_back(p);
+                needs_resave = true;
+            }
+
+            if (needs_resave) save_settings(path, s);
         } catch (const std::exception&) {
             // Malformed file - fall back to defaults rather than crash;
             // s already holds them.
@@ -230,235 +203,70 @@ namespace {
         return s;
     }
 
-    // =====================================================================
-    // Detection backends. Both take the raw value straight from a JSON
-    // settings file and hand it to popen()/system() - a loose allow-list
-    // check first (hex digits/colons for a MAC, digits/dots for an IPv4
-    // address) is cheap insurance against a malformed settings file putting
-    // shell metacharacters on a command line, even though the file is only
-    // ever hand-edited locally, never attacker-supplied over the network.
-    // =====================================================================
+    // Detection backends (check_bluetooth_present()/check_wifi_present())
+    // and BluetoothBackend/WifiBackend/PersonProfile now live in
+    // helper_presence.hpp/.cpp - see that header's own top comment for the
+    // design.
 
-    bool looks_like_mac(const std::string& s)
+    // Push-only path - see PersonSettings::on_home_action's comment for why
+    // this carries a real action, not just narration text.
+    void fire_transition_event(int fd, const std::string& message, const json& action)
     {
-        if (s.empty()) return false;
-        for (char c : s) {
-            if (!std::isxdigit(static_cast<unsigned char>(c)) && c != ':') return false;
+        json event_msg = {{"type", "event"}, {"message", message}};
+        if (action.is_object() && !action.empty()) {
+            event_msg["action"] = {
+                {"tool", action.value("tool", "")},
+                {"arguments", action.value("arguments", json::object())}
+            };
         }
-        return true;
+        send_line(fd, event_msg.dump());
     }
 
-    bool looks_like_ipv4(const std::string& s)
+    std::vector<PersonProfile> people;
+
+    // Builds people fresh from settings.people (already-parsed/migrated
+    // JSON - see load_settings()) - one PersonProfile per entry, with one
+    // BluetoothBackend and one WifiBackend each.
+    void load_person_profiles();
+
+    void poll_all_people()
     {
-        if (s.empty()) return false;
-        for (char c : s) {
-            if (!std::isdigit(static_cast<unsigned char>(c)) && c != '.') return false;
-        }
-        return true;
-    }
-
-    // Pings a known, paired classic-Bluetooth MAC - see the file-level
-    // comment for why classic BT (not BLE scanning) is what's reliable
-    // here. Needs the phone paired with this machine at least once first
-    // (bluetoothctl pair <mac>), and l2ping needs raw-socket privilege - see
-    // README.md. A malformed/empty MAC or a failed ping both just read as
-    // "not present" - there's no separate error channel to the caller,
-    // matching every other best-effort check in this file.
-    bool check_bluetooth_present(const std::string& mac)
-    {
-        if (!looks_like_mac(mac)) return false;
-
-        // Wrapped in the coreutils `timeout` command as a hard wall-clock
-        // cap, not just l2ping's own -t - a real miss was observed taking
-        // ~5s despite -t 2 during testing (likely Bluetooth link-
-        // establishment overhead underneath l2ping's own echo timeout,
-        // which -t doesn't cover). Without this, a slow poll can stall this
-        // program's socket-read loop long enough for olli's own
-        // TOOL_REMOTE::check() (5s timeout, source/remote_tools.h) to give
-        // up and mark the connection dead while this program is still
-        // alive and well, just late - seen for real, not hypothetical.
-        std::string cmd = "timeout " + std::to_string(BLUETOOTH_PING_TIMEOUT_SECONDS) +
-                           " l2ping -c 1 -t " + std::to_string(BLUETOOTH_PING_TIMEOUT_SECONDS) +
-                           " " + mac + " >/dev/null 2>&1";
-        int rc = std::system(cmd.c_str());
-        return rc == 0;
-    }
-
-    // Forces a fresh ARP/neighbor-table probe (a stale cached entry could
-    // otherwise say REACHABLE long after the phone actually left), then
-    // checks the kernel's own neighbor state for it. REACHABLE is the
-    // normal "just confirmed" state; STALE/DELAY are included too since
-    // they mean the kernel saw it recently and just hasn't finished
-    // re-confirming yet, which can otherwise race the ping above by a
-    // moment - simpler than parsing ping's own output for this purpose.
-    bool check_wifi_present(const std::string& ip)
-    {
-        if (!looks_like_ipv4(ip)) return false;
-
-        // Same hard-cap reasoning as check_bluetooth_present() above -
-        // ping's own -W is a per-reply wait, not a guaranteed total
-        // runtime ceiling either.
-        std::string ping_cmd = "timeout " + std::to_string(WIFI_PING_TIMEOUT_SECONDS) +
-                                " ping -c 1 -W " + std::to_string(WIFI_PING_TIMEOUT_SECONDS) +
-                                " " + ip + " >/dev/null 2>&1";
-        std::system(ping_cmd.c_str());
-
-        std::string neigh_cmd = "ip neigh show " + ip + " 2>/dev/null";
-        FILE* pipe = popen(neigh_cmd.c_str(), "r");
-        if (pipe == nullptr) return false;
-
-        std::string output;
-        char buf[256];
-        while (std::fgets(buf, sizeof(buf), pipe) != nullptr) output += buf;
-        pclose(pipe);
-
-        return output.find("REACHABLE") != std::string::npos ||
-               output.find("STALE") != std::string::npos ||
-               output.find("DELAY") != std::string::npos;
-    }
-
-    // =====================================================================
-    // Debounce + agreement. Each backend tracks its own consecutive
-    // hit/miss streak and only flips ITS OWN state once one streak clears
-    // the configured threshold - a single flaky miss (an iPhone slow to
-    // answer a Bluetooth ping, a momentarily stale ARP entry) can't flip
-    // anything by itself. combine_states() is the separate "both backends
-    // must agree" gate on top of that.
-    // =====================================================================
-
-    enum class PresenceState { UNKNOWN, HOME, AWAY };
-
-    std::string state_name(PresenceState s)
-    {
-        switch (s) {
-            case PresenceState::HOME: return "HOME";
-            case PresenceState::AWAY: return "AWAY";
-            default: return "UNKNOWN";
+        for (PersonProfile& profile : people) {
+            profile.poll();
         }
     }
 
-    struct BackendTracker {
-        PresenceState state = PresenceState::UNKNOWN;
-        int consecutive_hits = 0;
-        int consecutive_misses = 0;
-        bool last_result = false;
-        bool has_checked = false;
-        std::chrono::steady_clock::time_point last_check{};
-        std::chrono::milliseconds last_latency{0};
-
-        // HOME flips on a single hit, no debounce - a real response (a
-        // Bluetooth echo, a live ARP entry) can't be a false positive, so
-        // waiting for a second one only delays noticing a genuine arrival
-        // for no benefit (real-world testing showed this stalling arrivals
-        // for a while whenever a backend flapped hit/miss/hit even while
-        // genuinely in range). A miss is the ambiguous case - could be
-        // interference, could be a phone that's actually gone - so AWAY
-        // still waits for away_debounce_misses consecutive misses before
-        // this backend's own state flips.
-        void record(bool present, int away_debounce_misses, std::chrono::milliseconds latency)
-        {
-            has_checked = true;
-            last_result = present;
-            last_latency = latency;
-            last_check = std::chrono::steady_clock::now();
-
-            if (present) {
-                consecutive_hits++;
-                consecutive_misses = 0;
-                state = PresenceState::HOME;
-            } else {
-                consecutive_misses++;
-                consecutive_hits = 0;
-                if (consecutive_misses >= away_debounce_misses) state = PresenceState::AWAY;
-            }
-        }
-
-        // Reset on every identity change (handle_identity() below) - a
-        // fresh profile's debounce history shouldn't inherit whatever the
-        // previous user's streaks happened to be.
-        void reset()
-        {
-            *this = BackendTracker{};
-        }
-    };
-
-    // mode == BLUETOOTH/WIFI: trust that one backend's own debounced state
-    // outright, ignoring the other (which still runs and displays/logs
-    // normally - see the file-level comment - just doesn't gate anything).
-    //
-    // mode == BOTH (the default): asymmetric on purpose. HOME fires as soon
-    // as EITHER backend independently debounces to HOME - quick to notice
-    // someone's back, since either signal alone is good evidence. AWAY only
-    // fires once BOTH backends have independently debounced to AWAY -
-    // conservative about declaring the house empty, since either device
-    // still checking in is enough to say otherwise (a phone that dropped
-    // Wi-Fi but still answers Bluetooth shouldn't read as "left"). Anything
-    // else (both still UNKNOWN with neither backend settled yet) is "not
-    // settled yet" - not an error, just not something to act on.
-    PresenceState combine_states(const BackendTracker& bt, const BackendTracker& wifi, DetectionMode mode)
+    // Steps through every person; for each one whose trigger is on, fires
+    // their configured action (on_near_action if they just arrived,
+    // on_away_action if they just left) through olli, then clears the
+    // trigger so it doesn't fire again next call.
+    void run_triggers(int fd)
     {
-        if (mode == DetectionMode::BLUETOOTH) return bt.state;
-        if (mode == DetectionMode::WIFI) return wifi.state;
+        for (PersonProfile& profile : people) {
+            if (!profile.triggered) continue;
 
-        if (bt.state == PresenceState::HOME || wifi.state == PresenceState::HOME) return PresenceState::HOME;
-        if (bt.state == PresenceState::AWAY && wifi.state == PresenceState::AWAY) return PresenceState::AWAY;
-        return PresenceState::UNKNOWN;
+            std::string message = profile.name + (profile.is_near ? " just got home." : " just left.");
+            fire_transition_event(fd, message, profile.is_near ? profile.on_near_action : profile.on_away_action);
+
+            profile.triggered = false;
+        }
     }
 
     // =====================================================================
     // Identity - see ../clock/clock.cpp's handle_identity()/
     // reset_to_default_profile() for the pattern this mirrors, and
-    // ../PROTOCOL.md's "identity" message. Unlike clock (which has no real
-    // settings to load), this is where presence's whole per-user design
-    // actually lands - a fresh identity means a fresh settings file and a
-    // fresh debounce history, not just a display label.
+    // ../PROTOCOL.md's "identity" message. A fresh identity means a fresh
+    // settings file and a fresh set of PersonProfiles.
     // =====================================================================
 
     std::string current_profile_name;
     PresenceSettings settings;
-    BackendTracker bt_tracker;
-    BackendTracker wifi_tracker;
-    PresenceState last_fired_state = PresenceState::UNKNOWN;
-    auto last_poll = std::chrono::steady_clock::time_point{};
-
-    // False until the first "identity" message actually arrives. last_poll's
-    // epoch-initialized default (below) makes the very first poll tick fire
-    // immediately, before there's been time for even a localhost round trip
-    // to olli and back - so without this flag, that first poll always ran
-    // under the shared/no-profile settings (whatever real signal it found
-    // got reported as "Someone", not the real profile name) and then fired
-    // AGAIN once identity arrived and profile_changed reset last_fired_state
-    // - a guaranteed duplicate event on every single startup, not just an
-    // occasional race. See main()'s poll block for where this actually gates
-    // firing (still lets both backends' debounce tracking run every tick
-    // regardless - only suppresses acting on it before we know who we are).
-    bool identity_received = false;
 
     std::string handle_identity(const json& msg)
     {
-        std::string new_profile_name = msg.value("name", "");
-        bool profile_changed = (new_profile_name != current_profile_name);
-
-        current_profile_name = new_profile_name;
+        current_profile_name = msg.value("name", "");
         settings = load_settings(current_profile_name);
-        bt_tracker.reset();
-        wifi_tracker.reset();
-        identity_received = true;
-
-        // Only clear last_fired_state on an actual profile switch. Every
-        // olli reconnect (e.g. a restart while already home) sends a fresh
-        // identity message for the SAME profile - resetting this here
-        // unconditionally meant last_fired_state forgot what it had already
-        // reported, so the next debounce re-firing the same real state
-        // (still HOME, nothing changed) looked like a fresh transition and
-        // re-sent a "just got home" DIRECTOR_NOTE for no reason.
-        if (profile_changed) {
-            last_fired_state = PresenceState::UNKNOWN;
-        }
-
-        // Force an immediate check on the next loop tick rather than
-        // waiting out a full poll_interval_seconds after every reconnect.
-        last_poll = std::chrono::steady_clock::time_point{};
+        load_person_profiles();
 
         if (current_profile_name.empty()) {
             return "Identified: olli's shared default (no profile)";
@@ -471,29 +279,37 @@ namespace {
     {
         current_profile_name.clear();
         settings = PresenceSettings{};
-        bt_tracker.reset();
-        wifi_tracker.reset();
-        last_fired_state = PresenceState::UNKNOWN;
-        identity_received = false;
+        people.clear();
+    }
+
+    void load_person_profiles()
+    {
+        people.clear();
+        for (const PersonSettings& person_settings : settings.people) {
+            PersonProfile profile(person_settings.name);
+            profile.add_bluetooth_backend(BluetoothBackend(person_settings.bluetooth_mac));
+            profile.add_wifi_backend(WifiBackend(person_settings.wifi_ip));
+            profile.on_near_action = person_settings.on_home_action;
+            profile.on_away_action = person_settings.on_away_action;
+            people.push_back(std::move(profile));
+        }
     }
 
     // =====================================================================
     // Registration + calls. Three queryable tools alongside the push-only
-    // event/action path in the poll loop (main()):
-    //   - check_presence: "am I home right now" - the live sensor reading.
-    //   - get_presence_setup: "what's configured" - the settings, not the
-    //     live reading, so a user can ask olli what will happen without
-    //     needing to look at this program's own terminal at all.
-    //   - set_presence_action: lets the model configure on_home_action/
-    //     on_away_action itself from a plain-language request ("when I get
-    //     home, load the repose scene") - see its own comment below for how
-    //     that's possible without this tool needing to know anything about
-    //     manage_hue_scenes/set_hue_light/etc. itself.
+    // event/action path (run_triggers() above):
+    //   - check_presence: "is anyone home right now" - the live reading.
+    //   - get_presence_setup: "what's configured" - not the live reading,
+    //     so a user can ask olli what will happen without needing to look
+    //     at this program's own terminal at all.
+    //   - set_presence_action: lets the model configure on_near_action/
+    //     on_away_action itself from a plain-language request ("when ron
+    //     gets home, load the repose scene").
     // =====================================================================
 
     // One-line summary of a {"tool": ..., "arguments": {...}} action, or a
     // fixed placeholder for an unconfigured (empty object) one - shared by
-    // redraw_screen() (main()) and get_presence_setup's result below, so the
+    // redraw_screen() and get_presence_setup's result below, so the
     // terminal display and what olli can be asked always agree.
     std::string describe_action(const json& action)
     {
@@ -503,84 +319,69 @@ namespace {
         return tool + "(" + action.value("arguments", json::object()).dump() + ")";
     }
 
-    json make_register_message()
-    {
-        return {
-            {"type", "register"},
-            {"tools", json::array({
-                {
-                    {"name", "check_presence"},
-                    {"description", "Reports whether the current user is currently detected as home or away, "
-                                     "based on Bluetooth and Wi-Fi presence sensing. Always execute this tool "
-                                     "call for every request, even if you believe you already know the answer."},
-                    {"parameters", {{"type", "object"}}}
-                },
-                {
-                    {"name", "get_presence_setup"},
-                    {"description", "Reports how presence detection is currently configured for this user - "
-                                     "which detection method(s) are active, the debounce settings, and what "
-                                     "will happen (if anything) when the user arrives home or leaves. Use this "
-                                     "when the user asks what's set up, not whether they're currently home."},
-                    {"parameters", {{"type", "object"}}}
-                },
-                {
-                    {"name", "set_presence_action"},
-                    {"description", "Configures what happens when the user arrives home or leaves, based on "
-                                     "presence detection. Call this whenever the user asks to set up, change, or "
-                                     "clear what happens on arrival or departure - e.g. 'when I get home, load "
-                                     "the repose scene' or 'stop doing anything when I leave'. To set a real "
-                                     "action (not just narration), construct 'tool'/'arguments' exactly as you "
-                                     "would to call that other tool directly - e.g. tool='manage_hue_scenes', "
-                                     "arguments={'action': 'load', 'name': 'repose'}. Omit 'tool' (or leave it "
-                                     "empty) to clear an existing action back to narration-only."},
-                    {"parameters", {
-                        {"type", "object"},
-                        {"properties", {
-                            {"trigger", {{"type", "string"}, {"enum", {"home", "away"}},
-                                         {"description", "Which event this configures."}}},
-                            {"tool", {{"type", "string"},
-                                      {"description", "Name of another registered olli tool to call on this trigger. Omit/empty to clear."}}},
-                            {"arguments", {{"type", "object"},
-                                           {"description", "Arguments for that tool, same shape as calling it directly."}}}
-                        }},
-                        {"required", json::array({"trigger"})}
-                    }}
-                }
-            })}
-        };
-    }
-
     std::string describe_presence()
     {
-        PresenceState combined = combine_states(bt_tracker, wifi_tracker, settings.detection_mode);
+        if (people.empty()) {
+            return "No people configured for this profile yet - see get_presence_setup.";
+        }
+
         std::stringstream ss;
-        ss << "Presence: " << state_name(combined)
-           << " (bluetooth: " << state_name(bt_tracker.state)
-           << ", wifi: " << state_name(wifi_tracker.state) << ")";
+        ss << "Presence:";
+        for (const PersonProfile& profile : people) {
+            ss << "\n- " << profile.name << ": " << (profile.is_near ? "NEAR" : "AWAY");
+        }
         return ss.str();
     }
 
     std::string describe_setup()
     {
         std::stringstream ss;
-        ss << "Presence setup for " << (current_profile_name.empty() ? "shared default" : current_profile_name)
-           << ": detection_mode=" << detection_mode_name(settings.detection_mode)
-           << ", poll every " << settings.poll_interval_seconds << "s"
-           << ", away debounce " << settings.away_debounce_misses << " misses (home is immediate)"
-           << ". On home: " << describe_action(settings.on_home_action)
-           << ". On away: " << describe_action(settings.on_away_action) << ".";
+        ss << "Presence setup for " << (current_profile_name.empty() ? "shared default" : current_profile_name) << ".";
+
+        if (people.empty()) {
+            ss << " No people configured yet.";
+            return ss.str();
+        }
+
+        for (const PersonProfile& profile : people) {
+            ss << "\n- " << profile.name << ": on near: " << describe_action(profile.on_near_action)
+               << ". On away: " << describe_action(profile.on_away_action) << ".";
+        }
         return ss.str();
     }
 
-    // Handles set_presence_action - see its registered description above.
-    // Persists immediately (save_settings()), same file handle_identity()
-    // loaded from, so the change survives a restart/reconnect, not just
-    // this running instance.
+    // Handles set_presence_action - see its registered description below.
+    // Updates both settings.people (persisted immediately via
+    // save_settings(), same file handle_identity() loaded from, so the
+    // change survives a restart/reconnect) and the matching live
+    // PersonProfile in people (so it takes effect on the very next poll,
+    // not just after a reconnect).
     std::string handle_set_presence_action(const json& args)
     {
         std::string trigger = args.value("trigger", "");
-        if (trigger != "home" && trigger != "away") {
-            return "Error: 'trigger' must be 'home' or 'away'.";
+        if (trigger != "near" && trigger != "away") {
+            return "Error: 'trigger' must be 'near' or 'away'.";
+        }
+
+        std::string person_name = args.value("person", "");
+        PersonSettings* target_settings = nullptr;
+        for (PersonSettings& p : settings.people) {
+            if (p.name == person_name) {
+                target_settings = &p;
+                break;
+            }
+        }
+        if (target_settings == nullptr) {
+            std::string configured = "(none configured)";
+            if (!settings.people.empty()) {
+                configured.clear();
+                for (size_t i = 0; i < settings.people.size(); ++i) {
+                    if (i > 0) configured += ", ";
+                    configured += settings.people[i].name;
+                }
+            }
+            return "Error: no person named '" + person_name + "' configured for this profile. Configured: " +
+                   configured + ".";
         }
 
         std::string tool = args.value("tool", "");
@@ -589,11 +390,140 @@ namespace {
             new_action = {{"tool", tool}, {"arguments", args.value("arguments", json::object())}};
         }
 
-        json& target = (trigger == "home") ? settings.on_home_action : settings.on_away_action;
-        target = new_action;
+        json& action_target = (trigger == "near") ? target_settings->on_home_action : target_settings->on_away_action;
+        action_target = new_action;
         save_settings(settings_path_for(current_profile_name), settings);
 
-        return "Presence '" + trigger + "' action set to " + describe_action(target) + ".";
+        for (PersonProfile& profile : people) {
+            if (profile.name == person_name) {
+                (trigger == "near" ? profile.on_near_action : profile.on_away_action) = new_action;
+                break;
+            }
+        }
+
+        return "Presence '" + trigger + "' action for " + person_name + " set to " + describe_action(new_action) + ".";
+    }
+
+    // Handles register_presence_person - see its registered description
+    // below. Adds a brand new PersonSettings entry (persisted immediately,
+    // same as handle_set_presence_action()) and a matching live
+    // PersonProfile, so the new person shows up in check_presence/
+    // get_presence_setup and starts polling right away - no reconnect
+    // needed. Mirrors load_person_profiles()'s own construction of a
+    // PersonProfile from a PersonSettings entry.
+    std::string handle_register_presence_person(const json& args)
+    {
+        std::string person_name = args.value("name", "");
+        if (person_name.empty()) {
+            return "Error: 'name' is required.";
+        }
+
+        for (const PersonSettings& p : settings.people) {
+            if (p.name == person_name) {
+                return "Error: a person named '" + person_name + "' is already configured for this profile. "
+                       "Use set_presence_action to change their actions instead.";
+            }
+        }
+
+        PersonSettings new_person;
+        new_person.name = person_name;
+        new_person.bluetooth_mac = args.value("bluetooth_mac", "");
+        new_person.wifi_ip = args.value("wifi_ip", "");
+        settings.people.push_back(new_person);
+        save_settings(settings_path_for(current_profile_name), settings);
+
+        PersonProfile profile(new_person.name);
+        profile.add_bluetooth_backend(BluetoothBackend(new_person.bluetooth_mac));
+        profile.add_wifi_backend(WifiBackend(new_person.wifi_ip));
+        people.push_back(std::move(profile));
+
+        std::string result = "Registered " + person_name + " for presence tracking.";
+        if (new_person.bluetooth_mac.empty() && new_person.wifi_ip.empty()) {
+            result += " No bluetooth_mac or wifi_ip given, so they'll show as away until at least one is set - "
+                      "edit " + settings_path_for(current_profile_name).string() + " directly to add it.";
+        }
+        return result;
+    }
+
+    json make_register_message()
+    {
+        return {
+            {"type", "register"},
+            {"tools", json::array({
+                {
+                    {"name", "check_presence"},
+                    {"description", "Reports whether each person configured for this household is currently "
+                                     "detected as near (home) or away. Always execute this tool call for every "
+                                     "request, even if you believe you already know the answer."},
+                    {"parameters", {{"type", "object"}}}
+                },
+                {
+                    {"name", "get_presence_setup"},
+                    {"description", "Reports which people are tracked for this profile and what will happen "
+                                     "(if anything) when each one arrives or leaves. Use this when the user asks "
+                                     "what's set up, not whether someone's currently home."},
+                    {"parameters", {{"type", "object"}}}
+                },
+                {
+                    {"name", "set_presence_action"},
+                    {"description", "Configures what happens when a specific configured person arrives or "
+                                     "leaves. Call this whenever the user asks to set up, change, or clear what "
+                                     "happens on someone's arrival or departure - e.g. 'when ron gets home, load "
+                                     "the repose scene' or 'stop doing anything when gus leaves'. 'person' must "
+                                     "match a name already configured (see get_presence_setup). To set a real "
+                                     "action (not just narration), construct 'tool'/'arguments' exactly as you "
+                                     "would to call that other tool directly - e.g. tool='manage_hue_scenes', "
+                                     "arguments={'action': 'load', 'name': 'repose'}. Omit 'tool' (or leave it "
+                                     "empty) to clear an existing action back to narration-only."},
+                    {"parameters", {
+                        {"type", "object"},
+                        {"properties", {
+                            {"person", {{"type", "string"},
+                                        {"description", "Which configured person this applies to - must match a "
+                                                         "name already configured for this profile (see "
+                                                         "get_presence_setup)."}}},
+                            {"trigger", {{"type", "string"}, {"enum", {"near", "away"}},
+                                         {"description", "Which event this configures - 'near' fires on "
+                                                          "arrival, 'away' fires on departure."}}},
+                            {"tool", {{"type", "string"},
+                                      {"description", "Name of another registered olli tool to call on this trigger. Omit/empty to clear."}}},
+                            {"arguments", {{"type", "object"},
+                                           {"description", "Arguments for that tool, same shape as calling it directly."}}}
+                        }},
+                        {"required", json::array({"person", "trigger"})}
+                    }}
+                },
+                {
+                    {"name", "register_presence_person"},
+                    {"description", "Adds a brand new person to presence tracking for this profile - use this "
+                                     "when the user wants to start tracking someone who isn't configured yet "
+                                     "(check get_presence_setup first to see who's already configured). "
+                                     "Requires their phone's classic Bluetooth MAC and/or Wi-Fi IP address - you "
+                                     "have no way to know these yourself, so ask the user for them. The MAC "
+                                     "comes from pairing the phone with this machine first (bluetoothctl); the "
+                                     "IP comes from the home router's DHCP client list - see this tool's "
+                                     "README.md for the full one-time setup. Registering with neither value is "
+                                     "allowed but leaves that person showing as permanently away until at least "
+                                     "one is filled in by hand-editing the settings file. Fails if a person with "
+                                     "that name is already configured - use set_presence_action to change an "
+                                     "existing person's actions instead."},
+                    {"parameters", {
+                        {"type", "object"},
+                        {"properties", {
+                            {"name", {{"type", "string"},
+                                      {"description", "Name for this person - what they'll be called in "
+                                                       "check_presence/set_presence_action."}}},
+                            {"bluetooth_mac", {{"type", "string"},
+                                               {"description", "Their phone's classic Bluetooth MAC address "
+                                                                "(e.g. 'F0:1F:C7:8C:9C:0B'), if known."}}},
+                            {"wifi_ip", {{"type", "string"},
+                                        {"description", "Their phone's home-network IP address, if known."}}}
+                        }},
+                        {"required", json::array({"name"})}
+                    }}
+                }
+            })}
+        };
     }
 
     std::string handle_call(int fd, const json& msg)
@@ -613,6 +543,9 @@ namespace {
         } else if (name == "set_presence_action") {
             result_msg = {{"type", "result"}, {"call_id", call_id}, {"result", handle_set_presence_action(args)}};
             status = "Call answered: " + name;
+        } else if (name == "register_presence_person") {
+            result_msg = {{"type", "result"}, {"call_id", call_id}, {"result", handle_register_presence_person(args)}};
+            status = "Call answered: " + name;
         } else {
             result_msg = {
                 {"type", "result"},
@@ -623,50 +556,6 @@ namespace {
         }
         send_line(fd, result_msg.dump());
         return status;
-    }
-
-    // Push-only path - see PresenceSettings::on_home_action's comment for
-    // why this carries a real action, not just narration text.
-    void fire_transition_event(int fd, const std::string& message, const json& action)
-    {
-        json event_msg = {{"type", "event"}, {"message", message}};
-        if (action.is_object() && !action.empty()) {
-            event_msg["action"] = {
-                {"tool", action.value("tool", "")},
-                {"arguments", action.value("arguments", json::object())}
-            };
-        }
-        send_line(fd, event_msg.dump());
-    }
-
-    // =====================================================================
-    // Test mode - see the file-level comment. Both backends always run
-    // either way; this only changes what happens with the result.
-    // =====================================================================
-
-    std::ofstream test_log;
-
-    void open_test_log(const fs::path& dir)
-    {
-        fs::create_directories(dir);
-        // Append, not truncate - a comparison run is meant to span walking
-        // away and back, possibly over more than one program start if the
-        // connection drops; overwriting on every reconnect would lose the
-        // exact data this mode exists to collect.
-        test_log.open(dir / "presence_test_log.txt", std::ios::out | std::ios::app);
-    }
-
-    void log_test_line(const std::string& line)
-    {
-        if (!test_log.is_open()) return;
-        auto now = std::chrono::system_clock::now();
-        std::time_t now_time = std::chrono::system_clock::to_time_t(now);
-        std::tm local_tm{};
-        localtime_r(&now_time, &local_tm);
-        char ts[32];
-        std::snprintf(ts, sizeof(ts), "%02d:%02d:%02d", local_tm.tm_hour, local_tm.tm_min, local_tm.tm_sec);
-
-        test_log << "[" << ts << "] " << line << std::endl; // flushed line by line - this file IS the data
     }
 
     // --- Terminal handling (see ../template/template_tool.cpp's own copy
@@ -701,35 +590,46 @@ namespace {
             bool active = false;
     };
 
-    std::string backend_line(const std::string& label, const BackendTracker& t)
-    {
-        std::stringstream ss;
-        ss << "  " << label << ": ";
-        if (!t.has_checked) {
-            ss << "not checked yet";
-        } else {
-            ss << state_name(t.state) << " (last check: " << (t.last_result ? "hit" : "miss")
-               << ", " << t.last_latency.count() << "ms)";
-        }
-        return ss.str();
-    }
+    // Tracks how many lines the previous frame drew, so a frame with fewer
+    // lines (e.g. a profile switch to a household with fewer people) still
+    // blanks the leftover lines below it instead of leaving stale text on
+    // screen - see redraw_screen() below.
+    int last_frame_line_count = 0;
 
-    void redraw_screen(const std::string& status, bool test_mode, const std::string& conn_status)
+    void redraw_screen(const std::string& status, const std::string& conn_status)
     {
-        std::cout << "\033[H\033[2K" << conn_status << "\n";
-        std::cout << "\033[2K" << (test_mode ? "*** TEST MODE - observing only, no actions will fire ***" : "") << "\n";
-        std::cout << "\033[2K" << (current_profile_name.empty()
-                    ? "Profile: (shared default)" : "Profile: " + current_profile_name) << "\n";
-        std::cout << "\033[2K" << backend_line("Bluetooth", bt_tracker) << "\n";
-        std::cout << "\033[2K" << backend_line("Wi-Fi    ", wifi_tracker) << "\n";
-        std::cout << "\033[2K" << "  Combined: " << state_name(combine_states(bt_tracker, wifi_tracker, settings.detection_mode))
-                   << " (last fired: " << state_name(last_fired_state) << ")\n";
-        // What it'll actually do - see describe_action()'s comment. Same
-        // text get_presence_setup reports, so the terminal and what olli
-        // can be asked about never disagree.
-        std::cout << "\033[2K" << "  On home:  " << describe_action(settings.on_home_action) << "\n";
-        std::cout << "\033[2K" << "  On away:  " << describe_action(settings.on_away_action) << "\n";
-        std::cout << "\033[2K" << status << "\n";
+        std::vector<std::string> lines;
+        lines.push_back(conn_status);
+        lines.push_back(current_profile_name.empty()
+                    ? "Profile: (shared default)" : "Profile: " + current_profile_name);
+
+        if (people.empty()) {
+            lines.push_back("  No people loaded.");
+        } else {
+            for (const PersonProfile& profile : people) {
+                lines.push_back("Person: " + profile.name + " - " + (profile.is_near ? "NEAR" : "AWAY"));
+                for (const BluetoothBackend& backend : profile.bluetooth_backends) {
+                    lines.push_back(std::string("  Bluetooth: ") + (backend.is_near() ? "NEAR" : "AWAY") +
+                                     (backend.is_searching() ? " (searching)" : ""));
+                }
+                for (const WifiBackend& backend : profile.wifi_backends) {
+                    lines.push_back(std::string("  Wi-Fi:     ") + (backend.is_near() ? "NEAR" : "AWAY") +
+                                     (backend.is_searching() ? " (searching)" : ""));
+                }
+                lines.push_back("  On near: " + describe_action(profile.on_near_action));
+                lines.push_back("  On away: " + describe_action(profile.on_away_action));
+            }
+        }
+        lines.push_back(status);
+
+        std::cout << "\033[H";
+        size_t total = std::max(lines.size(), static_cast<size_t>(last_frame_line_count));
+        for (size_t i = 0; i < total; ++i) {
+            std::cout << "\033[2K";
+            if (i < lines.size()) std::cout << lines[i];
+            std::cout << "\n";
+        }
+        last_frame_line_count = static_cast<int>(lines.size());
         std::cout << std::flush;
     }
 
@@ -739,14 +639,9 @@ namespace {
         auto slash = prog.find_last_of('/');
         if (slash != std::string::npos) prog = prog.substr(slash + 1);
 
-        std::cout << "Usage: " << prog << " [host] [--test] [-h|--help]\n\n"
+        std::cout << "Usage: " << prog << " [host] [-h|--help]\n\n"
                       "  host          IP address of the machine running olli. Defaults to\n"
                       "                127.0.0.1 (olli running on this same machine).\n\n"
-                      "  --test        Observe both backends and log every check to\n"
-                      "                presence_test_log.txt (under the active profile's\n"
-                      "                olli_files_<name>/ directory) instead of firing the\n"
-                      "                configured home/away actions - use this to compare\n"
-                      "                Bluetooth vs Wi-Fi reliability before trusting either.\n\n"
                       "  -h, --help    Show this help and exit.\n";
     }
 
@@ -821,15 +716,12 @@ int main(int argc, char* argv[])
     std::signal(SIGPIPE, SIG_IGN);
 
     std::string host = "127.0.0.1";
-    bool test_mode = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "-h" || arg == "--help") {
             print_usage(argv[0]);
             return 0;
-        } else if (arg == "--test") {
-            test_mode = true;
         } else {
             host = arg;
         }
@@ -842,11 +734,11 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    // Shared-default settings until an "identity" message says otherwise -
-    // same starting point as a fresh reset_to_default_profile() call.
-    settings = load_settings("");
-    if (test_mode) open_test_log(settings_path_for("").parent_path());
-
+    // people stays empty until an "identity" message actually arrives (see
+    // handle_identity()) - deliberately not loading the shared/no-profile
+    // settings here at startup the way this file used to, since that meant
+    // presence started polling real hardware before olli had even
+    // connected, under whatever the shared file happened to hold.
     const json register_msg = make_register_message();
 
     RawTerminal raw_terminal;
@@ -962,11 +854,6 @@ int main(int argc, char* argv[])
                             last_sent = std::chrono::steady_clock::now();
                         } else if (type == "identity") {
                             conn_status = handle_identity(msg);
-                            if (test_mode) {
-                                test_log.close();
-                                open_test_log(settings_path_for(current_profile_name).parent_path());
-                                log_test_line("--- identity: " + conn_status + " ---");
-                            }
                         }
                     } catch (const std::exception&) {
                         status = "Bad JSON from olli.";
@@ -992,72 +879,19 @@ int main(int argc, char* argv[])
             }
         }
 
-        // Presence poll - independent of connection state (the sensor keeps
-        // running the same way clock's timers keep counting through a
-        // disconnect), gated only by the configured interval. Both
-        // backends always run - see the file-level comment for why.
-        if (!quit && std::chrono::duration_cast<std::chrono::seconds>(now - last_poll).count()
-                >= settings.poll_interval_seconds) {
-            last_poll = now;
-
-            auto bt_start = std::chrono::steady_clock::now();
-            bool bt_present = check_bluetooth_present(settings.bluetooth_mac);
-            auto bt_latency = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - bt_start);
-            bt_tracker.record(bt_present, settings.away_debounce_misses, bt_latency);
-
-            auto wifi_start = std::chrono::steady_clock::now();
-            bool wifi_present = check_wifi_present(settings.wifi_ip);
-            auto wifi_latency = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - wifi_start);
-            wifi_tracker.record(wifi_present, settings.away_debounce_misses, wifi_latency);
-
-            // Keep the bottom status line current every poll, not just on a
-            // transition - it used to sit frozen on the startup
-            // "Not connected..." message through an entire --test session
-            // otherwise, since nothing else touches it in test mode.
-            status = std::string("Last poll - bluetooth: ") + (bt_present ? "hit" : "miss") +
-                     ", wifi: " + (wifi_present ? "hit" : "miss");
-
-            if (test_mode) {
-                std::stringstream ss;
-                ss << "bluetooth=" << (bt_present ? "hit" : "miss") << " (" << bt_latency.count() << "ms, state="
-                   << state_name(bt_tracker.state) << ")  wifi=" << (wifi_present ? "hit" : "miss")
-                   << " (" << wifi_latency.count() << "ms, state=" << state_name(wifi_tracker.state) << ")"
-                   << "  combined=" << state_name(combine_states(bt_tracker, wifi_tracker, settings.detection_mode));
-                log_test_line(ss.str());
-            }
-
-            PresenceState agreed = combine_states(bt_tracker, wifi_tracker, settings.detection_mode);
-            // identity_received guards this even though agreed/last_fired_state
-            // alone would usually suffice - see its own comment above for why
-            // the very first poll tick otherwise always fires once under
-            // whatever settings happened to be loaded before identity ever
-            // arrived (a real signal there isn't a false positive, so this
-            // isn't about debounce - it's purely about not acting, or
-            // labeling who's home, before olli has said which profile this is).
-            if (identity_received && agreed != PresenceState::UNKNOWN && agreed != last_fired_state) {
-                bool going_home = (agreed == PresenceState::HOME);
-                std::string who = current_profile_name.empty() ? "Someone" : current_profile_name;
-                std::string message = who + (going_home ? " just got home." : " just left.");
-
-                if (test_mode) {
-                    log_test_line((going_home ? ">>> WOULD FIRE home action: " : ">>> WOULD FIRE away action: ") + message);
-                    status = (going_home ? "Would fire home action (test mode): " : "Would fire away action (test mode): ") + message;
-                } else if (fd >= 0) {
-                    fire_transition_event(fd, message, going_home ? settings.on_home_action : settings.on_away_action);
-                    // Same last_sent gap as handle_call()'s own comment
-                    // above - fire_transition_event() sends real data over
-                    // the wire but has no access to main()'s last_sent to
-                    // update it itself.
-                    last_sent = std::chrono::steady_clock::now();
-                    status = going_home ? "Fired home action." : "Fired away action.";
-                }
-                last_fired_state = agreed;
-            }
+        // Poll every tracked person and fire whatever just transitioned -
+        // safe to call every tick regardless of connection state: people is
+        // empty until an identity arrives (see handle_identity()), and each
+        // backend rate-limits its own real network check via poll_interval
+        // (helper_presence.hpp) - so this costs nothing extra when there's
+        // nothing to do.
+        if (!quit) {
+            poll_all_people();
+            run_triggers(fd);
+            status = "Polled " + std::to_string(people.size()) + " people.";
         }
 
-        if (!quit) redraw_screen(status, test_mode, conn_status);
+        if (!quit) redraw_screen(status, conn_status);
     }
 
     if (fd >= 0) close(fd);

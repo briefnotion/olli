@@ -58,8 +58,8 @@ whoever's next - the gap is diagnosis, not remediation.
   discovery issue above. No automated recovery exists; the field just
   needs fixing by hand if it ever actually happens (accepted tradeoff, see
   the design discussion this came out of).
-- **Real observed latency numbers**, useful context for tuning
-  `poll_interval_seconds`/timeouts later: a real `l2ping` hit against a
+- **Real observed latency numbers**, useful context for tuning poll
+  intervals/timeouts later: a real `l2ping` hit against a
   locked, idle, paired phone measured ~20-130ms standalone, but ~1-2s
   during actual poll-loop operation (each poll re-establishes the
   Bluetooth connection from scratch, since nothing holds it open between

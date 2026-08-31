@@ -7,8 +7,8 @@
 CXX ?= g++
 CXXFLAGS = -std=c++17 -Wall -Wextra -I../../../json/include
 
-presence: presence.cpp
-	$(CXX) $(CXXFLAGS) -o presence presence.cpp
+presence: presence.cpp helper_presence.cpp helper_presence.hpp
+	$(CXX) $(CXXFLAGS) -o presence presence.cpp helper_presence.cpp
 
 clean:
 	rm -f presence

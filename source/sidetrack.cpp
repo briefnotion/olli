@@ -33,16 +33,22 @@ static bool poll_second_guess_call(ollama_system& instance, COMMS& comms,
                                     std::vector<std::unique_ptr<TOOL_BASE>>& tools_list,
                                     CLASS_SYSTEM* system, std::atomic<bool>& keyboard_enabled)
 {
-    // comms is the real main chat's own - unlike an isolated comms, its
-    // INTERRUPTED is never ours to clear: the real consumer
-    // (ollama_system::input(), gated on is_processing, olla.cpp) owns
-    // that. Only read it here to decide whether to stop SIDETRACK_CHAT_
-    // INSTANCE's own in-flight call - clearing it ourselves too could race
-    // with that and suppress a real interrupt to the main chat.
+    // comms is the real main chat's own. ollama_system::input() (olla.cpp)
+    // only clears INTERRUPTED when it's the one consuming it - gated on its
+    // own is_processing, which is false the whole time second-guess is
+    // running (it only starts once the main turn has already finished). So
+    // a bare interrupt (no ENTER_PRESSED - e.g. a spoken interrupt phrase or
+    // a keystroke) fired during this window never reaches that clear and
+    // would dangle true otherwise. Safe to clear it here: main.cpp's loop
+    // always runs chat.input() before sidetrack.check() each tick, so by
+    // the time we see it as true, main already had its chance to consume it
+    // this same tick - and every later is_processing transition on main's
+    // side comes bundled with its own fresh ENTER_PRESSED clear regardless.
     if (comms.INTERRUPTED)
     {
         instance.stop();
-        debug_log_instance_event("sidetrack-second-guess", "interrupted mid-response - stopping");
+        comms.INTERRUPTED = false;
+        DEBUG_LOG_CLASS::instance().log_event("sidetrack-second-guess", "interrupted mid-response - stopping");
     }
 
     instance.handle_instance_tools(system, tools_list, comms, keyboard_enabled);
@@ -52,7 +58,13 @@ static bool poll_second_guess_call(ollama_system& instance, COMMS& comms,
         instance.chat_thread.join();
     }
 
-    return !instance.is_processing && instance.last_received.complete && instance.last_received.tool_calls.empty();
+    // last_received.complete deliberately not checked here - an interrupted
+    // call is still "over" (is_processing false, thread joined), it just
+    // finished uncleanly. Stage 4/6 (run_second_guess) already handle a
+    // !complete result explicitly; gating advancement on complete here
+    // stalled stage 3/5 forever on any interrupt, since a call that ends
+    // interrupted never becomes complete after the fact.
+    return !instance.is_processing && instance.last_received.tool_calls.empty();
 }
 
 void SIDETRACK_CLASS::run_second_guess(ollama_system& main_instance, COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, CLASS_SYSTEM* system)
@@ -96,18 +108,19 @@ void SIDETRACK_CLASS::run_second_guess(ollama_system& main_instance, COMMS& comm
             }
             else
             {
-                debug_log_instance_event("sidetrack-second-guess",
+                DEBUG_LOG_CLASS::instance().log_event("sidetrack-second-guess",
                     "chain limit (" + std::to_string(SECOND_GUESS_MAX_CHAIN) + ") reached - parked until a real user turn");
             }
         }
     }
     SECOND_GUESS_PREVIOUS_HISTORY_SIZE = main_instance.history.size();
 
-    // comms.INTERRUPTED means "abort in-flight generation/speech" (comms.h)
-    // - read-only here, deliberately never cleared: the real consumer
-    // (ollama_system::input(), olla.cpp, gated on is_processing) owns
-    // clearing it. Clearing it here too could race with that and suppress
-    // a real interrupt to the main chat. This is the same comms the real
+    // comms.INTERRUPTED means "abort in-flight generation/speech" (comms.h).
+    // Cleared here once consumed, same reasoning as poll_second_guess_call()'s
+    // own comment above: ollama_system::input() (olla.cpp) only clears it
+    // when gated on main's own is_processing, which is false throughout this
+    // whole pre-start window, so a bare interrupt (no ENTER_PRESSED) would
+    // otherwise dangle true indefinitely. This is the same comms the real
     // chat uses for its own submissions - reused rather than an isolated
     // one, on the accepted risk that second-guess's own send() calls
     // (which read/write comms.INPUT_FROM_USER too) could in principle
@@ -116,9 +129,10 @@ void SIDETRACK_CLASS::run_second_guess(ollama_system& main_instance, COMMS& comm
     {
         if (second_guess_stage != 0)
         {
-            debug_log_instance_event("sidetrack-second-guess", "aborted before starting - main chat interrupted");
+            DEBUG_LOG_CLASS::instance().log_event("sidetrack-second-guess", "aborted before starting - main chat interrupted");
         }
         second_guess_stage = 0; // abort - main chat got interrupted before we even started
+        comms.INTERRUPTED = false;
         return;
     }
 
@@ -161,12 +175,12 @@ void SIDETRACK_CLASS::run_second_guess(ollama_system& main_instance, COMMS& comm
         SIDETRACK_CHAT_INSTANCE.PROPS.stream_thinking = true;
 
         // Distinguishes this instance's own send()-logged messages
-        // (debug_log_message(), called unconditionally inside send(),
+        // (DEBUG_LOG_CLASS::log_message(), called unconditionally inside send(),
         // olla.cpp) from consolidation's use of the same
         // SIDETRACK_CHAT_INSTANCE in debug_full_history.txt - both used to
         // log under one generic "sidetrack" label, impossible to tell apart.
         SIDETRACK_CHAT_INSTANCE.debug_label = "sidetrack-second-guess";
-        debug_log_instance_event("sidetrack-second-guess", "review started");
+        DEBUG_LOG_CLASS::instance().log_event("sidetrack-second-guess", "review started");
 
         SIDETRACK_CHAT_INSTANCE.clear_history();
         Message task_note;
@@ -201,19 +215,25 @@ void SIDETRACK_CLASS::run_second_guess(ollama_system& main_instance, COMMS& comm
         size_t first_non_space = answer.find_first_not_of(" \t\r\n");
         if (first_non_space != std::string::npos) answer = answer.substr(first_non_space);
 
+        // Strip leading markdown emphasis (_DONE_, **DONE**, etc.) before
+        // the DONE check below - the model sometimes wraps the marker in
+        // emphasis instead of sending it plain.
+        size_t first_word_char = answer.find_first_not_of("_* \t\r\n");
+        if (first_word_char != std::string::npos) answer = answer.substr(first_word_char);
+
         if (!SIDETRACK_CHAT_INSTANCE.last_received.complete)
         {
-            debug_log_instance_event("sidetrack-second-guess", "interrupted during the DONE check - nothing to add");
+            DEBUG_LOG_CLASS::instance().log_event("sidetrack-second-guess", "interrupted during the DONE check - nothing to add");
             second_guess_stage = 100;
         }
         else if (starts_with(answer, "DONE"))
         {
-            debug_log_instance_event("sidetrack-second-guess", "DONE - nothing more needed");
+            DEBUG_LOG_CLASS::instance().log_event("sidetrack-second-guess", "DONE - nothing more needed");
             second_guess_stage = 100;
         }
         else
         {
-            debug_log_instance_event("sidetrack-second-guess", "not done - asking it to say/do what's needed");
+            DEBUG_LOG_CLASS::instance().log_event("sidetrack-second-guess", "not done - asking it to say/do what's needed");
             // Streaming back on for this one - this is the real content the
             // user should actually see/hear, unlike the DONE-check above.
             SIDETRACK_CHAT_INSTANCE.PROPS.stream_output = true;
@@ -240,7 +260,7 @@ void SIDETRACK_CLASS::run_second_guess(ollama_system& main_instance, COMMS& comm
         if (!SIDETRACK_CHAT_INSTANCE.last_received.complete)
         {
             answer += "...";
-            debug_log_instance_event("sidetrack-second-guess", "interrupted mid-answer - keeping partial response");
+            DEBUG_LOG_CLASS::instance().log_event("sidetrack-second-guess", "interrupted mid-answer - keeping partial response");
         }
 
         if (!answer.empty())
@@ -254,11 +274,11 @@ void SIDETRACK_CLASS::run_second_guess(ollama_system& main_instance, COMMS& comm
                 main_instance.history.push_back(followup);
             }
             main_instance.save_history();
-            debug_log_instance_event("sidetrack-second-guess", "committed follow-up to main history");
+            DEBUG_LOG_CLASS::instance().log_event("sidetrack-second-guess", "committed follow-up to main history");
         }
         else
         {
-            debug_log_instance_event("sidetrack-second-guess", "empty answer - nothing committed");
+            DEBUG_LOG_CLASS::instance().log_event("sidetrack-second-guess", "empty answer - nothing committed");
         }
 
         second_guess_stage = 100;
@@ -342,12 +362,12 @@ void SIDETRACK_CLASS::run_consolidation(ollama_system& main_instance)
         SIDETRACK_CHAT_INSTANCE.PROPS.LOAD_SAVE_HISTORY_ON_DISK = false;
 
         // Distinguishes this instance's own send()-logged messages
-        // (debug_log_message(), called unconditionally inside send(),
+        // (DEBUG_LOG_CLASS::log_message(), called unconditionally inside send(),
         // olla.cpp) from second-guess's use of the same
         // SIDETRACK_CHAT_INSTANCE in debug_full_history.txt - both used to
         // log under one generic "sidetrack" label, impossible to tell apart.
         SIDETRACK_CHAT_INSTANCE.debug_label = "sidetrack-consolidate";
-        debug_log_instance_event("sidetrack-consolidate", "pass started");
+        DEBUG_LOG_CLASS::instance().log_event("sidetrack-consolidate", "pass started");
 
         // Fresh scratch history, seeded with one protected (level -1)
         // instruction message - the "persona" for this throwaway instance,
@@ -469,7 +489,7 @@ void SIDETRACK_CLASS::run_consolidation(ollama_system& main_instance)
                 }
             }
 
-            debug_log_instance_event("sidetrack-consolidate",
+            DEBUG_LOG_CLASS::instance().log_event("sidetrack-consolidate",
                 "squashing " + std::to_string(overflow_count) + " messages at level " + std::to_string(level));
 
             blank_comms.INPUT_FROM_USER = "What happened in all your memory? Summarize it.";
@@ -491,7 +511,7 @@ void SIDETRACK_CLASS::run_consolidation(ollama_system& main_instance)
                 // If the LLM call failed or produced nothing, leave this
                 // level's messages untouched - it'll be retried next time
                 // consolidation runs.
-                debug_log_instance_event("sidetrack-consolidate",
+                DEBUG_LOG_CLASS::instance().log_event("sidetrack-consolidate",
                     "level " + std::to_string(level) + " squash failed/empty - left untouched, will retry later");
             }
         }
@@ -508,7 +528,7 @@ void SIDETRACK_CLASS::run_consolidation(ollama_system& main_instance)
         main_instance.replace_history(consolidated_history);
         main_instance.save_history();
 
-        debug_log_instance_event("sidetrack-consolidate",
+        DEBUG_LOG_CLASS::instance().log_event("sidetrack-consolidate",
             "pass finished - " + std::to_string(consolidated_history.size()) + " messages remain");
 
         consolidation_stage = 100;

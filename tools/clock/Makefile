@@ -5,10 +5,10 @@
 # "Building the C++ core" section).
 
 CXX ?= g++
-CXXFLAGS = -std=c++17 -Wall -Wextra -I../../../json/include
+CXXFLAGS = -std=c++17 -Wall -Wextra -I../../../json/include -I../olli_link
 
-clock: clock.cpp
-	$(CXX) $(CXXFLAGS) -o clock clock.cpp
+clock: clock.cpp ../olli_link/olli_link.cpp ../olli_link/olli_link.hpp
+	$(CXX) $(CXXFLAGS) -o clock clock.cpp ../olli_link/olli_link.cpp
 
 clean:
 	rm -f clock

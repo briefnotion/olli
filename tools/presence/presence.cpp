@@ -25,24 +25,22 @@
 
 #include "helper_presence.hpp"
 
+#include "../olli_link/olli_link.hpp"
+
 #include <nlohmann/json.hpp>
 
 #include <iostream>
 #include <fstream>
 #include <sstream>
 #include <string>
-#include <csignal>
 #include <cstdlib>
 #include <chrono>
 #include <algorithm>
-#include <cerrno>
 #include <filesystem>
 #include <vector>
 
 #include <unistd.h>
 #include <termios.h>
-#include <fcntl.h>
-#include <sys/socket.h>
 #include <sys/select.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -51,28 +49,6 @@ using json = nlohmann::json;
 namespace fs = std::filesystem;
 
 namespace {
-    constexpr int REMOTE_TOOL_PORT = 47601;
-
-    // Heartbeat/reconnect timing - see ../PROTOCOL.md. Kept in step with
-    // TOOL_REMOTE's own PING_INTERVAL_SECONDS/DEAD_TIMEOUT_SECONDS
-    // (source/remote_tools.h) even though nothing enforces the two staying
-    // equal - either side can independently notice a timeout regardless of
-    // what the other's numbers are.
-    constexpr int RECONNECT_INTERVAL_SECONDS = 3;
-    constexpr int PING_INTERVAL_SECONDS = 5;
-    constexpr int DEAD_TIMEOUT_SECONDS = 15;
-
-    // Caps how long one connection attempt can take - see try_connect()
-    // below for why this matters once host isn't loopback.
-    constexpr int CONNECT_TIMEOUT_SECONDS = 2;
-
-    void send_line(int fd, const std::string& line)
-    {
-        std::string with_newline = line + "\n";
-        ssize_t written = write(fd, with_newline.data(), with_newline.size());
-        (void)written;
-    }
-
     // =====================================================================
     // Per-profile settings - loaded fresh on every "identity" message
     // (handle_identity() below), written out with placeholder defaults the
@@ -210,16 +186,16 @@ namespace {
 
     // Push-only path - see PersonSettings::on_home_action's comment for why
     // this carries a real action, not just narration text.
-    void fire_transition_event(int fd, const std::string& message, const json& action)
+    void fire_transition_event(OLLI_LINK& link, const std::string& message, const json& action)
     {
-        json event_msg = {{"type", "event"}, {"message", message}};
+        json wire_action = nullptr;
         if (action.is_object() && !action.empty()) {
-            event_msg["action"] = {
+            wire_action = {
                 {"tool", action.value("tool", "")},
                 {"arguments", action.value("arguments", json::object())}
             };
         }
-        send_line(fd, event_msg.dump());
+        link.send_event(message, wire_action);
     }
 
     std::vector<PersonProfile> people;
@@ -228,6 +204,11 @@ namespace {
     // JSON - see load_settings()) - one PersonProfile per entry, with one
     // BluetoothBackend and one WifiBackend each.
     void load_person_profiles();
+
+    // Same-profile-reconnect counterpart to load_person_profiles() - see its
+    // own definition below and handle_identity()'s comment for why this
+    // exists.
+    void sync_person_actions();
 
     void poll_all_people()
     {
@@ -240,13 +221,13 @@ namespace {
     // their configured action (on_near_action if they just arrived,
     // on_away_action if they just left) through olli, then clears the
     // trigger so it doesn't fire again next call.
-    void run_triggers(int fd)
+    void run_triggers(OLLI_LINK& link)
     {
         for (PersonProfile& profile : people) {
             if (!profile.triggered) continue;
 
             std::string message = profile.name + (profile.is_near ? " just got home." : " just left.");
-            fire_transition_event(fd, message, profile.is_near ? profile.on_near_action : profile.on_away_action);
+            fire_transition_event(link, message, profile.is_near ? profile.on_near_action : profile.on_away_action);
 
             profile.triggered = false;
         }
@@ -262,11 +243,44 @@ namespace {
     std::string current_profile_name;
     PresenceSettings settings;
 
+    // Which profile `people` currently reflects. Unlike current_profile_name
+    // (cleared on every disconnect - see reset_to_default_profile()), this
+    // is only ever updated inside handle_identity() itself, so it survives a
+    // disconnect and lets handle_identity() tell a genuine profile switch
+    // apart from olli simply reconnecting as the same profile it already was
+    // - see handle_identity()'s own comment for why that distinction matters.
+    std::string people_profile_name;
+
     std::string handle_identity(const json& msg)
     {
         current_profile_name = msg.value("name", "");
         settings = load_settings(current_profile_name);
-        load_person_profiles();
+
+        if (current_profile_name != people_profile_name) {
+            // A real profile switch (or the very first identity this run) -
+            // different people, fresh reality, fresh state.
+            load_person_profiles();
+            people_profile_name = current_profile_name;
+        } else {
+            // Same profile re-identifying after a reconnect (olli restarted,
+            // a network blip, whatever caused the drop). The people we
+            // already have still reflect the real world - a phone that was
+            // near before a 2-second connection blip is still near.
+            // load_person_profiles() would rebuild every PersonProfile from
+            // scratch with is_near/backend near defaulted to false, and the
+            // very next poll would then read a real "still here" hit as a
+            // brand new arrival and fire a spurious "just got home" - this
+            // is exactly what was happening: a real, repeating connection
+            // drop (see olli's own TOOL_REMOTE dead-timeout) was turning
+            // into a repeating false "ron just got home" narration, with no
+            // real presence change in between, confirmed via
+            // debug_full_history.txt. So on a same-profile reconnect, only
+            // resync each person's configured actions (in case
+            // settings.json changed on disk while disconnected) and
+            // add/remove people to match - never touch an existing person's
+            // live near/away/backend state.
+            sync_person_actions();
+        }
 
         if (current_profile_name.empty()) {
             return "Identified: olli's shared default (no profile)";
@@ -279,7 +293,11 @@ namespace {
     {
         current_profile_name.clear();
         settings = PresenceSettings{};
-        people.clear();
+        // people (and people_profile_name) are deliberately left alone - a
+        // disconnect isn't a profile change, and handle_identity() needs
+        // people_profile_name intact to recognize the same profile coming
+        // back after a reconnect. See its own comment for why clearing here
+        // caused real, observed flapping.
     }
 
     void load_person_profiles()
@@ -292,6 +310,38 @@ namespace {
             profile.on_near_action = person_settings.on_home_action;
             profile.on_away_action = person_settings.on_away_action;
             people.push_back(std::move(profile));
+        }
+    }
+
+    // Same-profile-reconnect counterpart to load_person_profiles() - updates
+    // each already-tracked person's configured actions from freshly-loaded
+    // settings, and adds/removes people to match, all without touching an
+    // existing person's live near/away/backend state (see handle_identity()).
+    // Doesn't handle an existing person's bluetooth_mac/wifi_ip changing
+    // while disconnected - a narrower case than this fix targets; a person
+    // added or removed from settings is still tracked/dropped correctly.
+    void sync_person_actions()
+    {
+        people.erase(std::remove_if(people.begin(), people.end(),
+            [](const PersonProfile& p) {
+                return std::none_of(settings.people.begin(), settings.people.end(),
+                    [&](const PersonSettings& s) { return s.name == p.name; });
+            }), people.end());
+
+        for (const PersonSettings& person_settings : settings.people) {
+            auto it = std::find_if(people.begin(), people.end(),
+                [&](const PersonProfile& p) { return p.name == person_settings.name; });
+            if (it != people.end()) {
+                it->on_near_action = person_settings.on_home_action;
+                it->on_away_action = person_settings.on_away_action;
+            } else {
+                PersonProfile profile(person_settings.name);
+                profile.add_bluetooth_backend(BluetoothBackend(person_settings.bluetooth_mac));
+                profile.add_wifi_backend(WifiBackend(person_settings.wifi_ip));
+                profile.on_near_action = person_settings.on_home_action;
+                profile.on_away_action = person_settings.on_away_action;
+                people.push_back(std::move(profile));
+            }
         }
     }
 
@@ -526,35 +576,29 @@ namespace {
         };
     }
 
-    std::string handle_call(int fd, const json& msg)
+    std::string handle_call(OLLI_LINK& link, const json& msg)
     {
         std::string call_id = msg.value("call_id", "");
         std::string name = msg.value("name", "");
         json args = msg.value("arguments", json::object());
 
-        json result_msg;
         std::string status;
         if (name == "check_presence") {
-            result_msg = {{"type", "result"}, {"call_id", call_id}, {"result", describe_presence()}};
+            link.send_result(call_id, describe_presence());
             status = "Call answered: " + name;
         } else if (name == "get_presence_setup") {
-            result_msg = {{"type", "result"}, {"call_id", call_id}, {"result", describe_setup()}};
+            link.send_result(call_id, describe_setup());
             status = "Call answered: " + name;
         } else if (name == "set_presence_action") {
-            result_msg = {{"type", "result"}, {"call_id", call_id}, {"result", handle_set_presence_action(args)}};
+            link.send_result(call_id, handle_set_presence_action(args));
             status = "Call answered: " + name;
         } else if (name == "register_presence_person") {
-            result_msg = {{"type", "result"}, {"call_id", call_id}, {"result", handle_register_presence_person(args)}};
+            link.send_result(call_id, handle_register_presence_person(args));
             status = "Call answered: " + name;
         } else {
-            result_msg = {
-                {"type", "result"},
-                {"call_id", call_id},
-                {"error", "Unknown tool name: " + name}
-            };
+            link.send_error(call_id, "Unknown tool name: " + name);
             status = "Unknown call received: " + name;
         }
-        send_line(fd, result_msg.dump());
         return status;
     }
 
@@ -645,76 +689,10 @@ namespace {
                       "  -h, --help    Show this help and exit.\n";
     }
 
-    // Same bounded, non-blocking connect as ../template/template_tool.cpp's
-    // try_connect() - see its own comment for the full reasoning.
-    int try_connect(const in_addr& host_addr)
-    {
-        int fd = socket(AF_INET, SOCK_STREAM, 0);
-        if (fd < 0) return -1;
-
-        int flags = fcntl(fd, F_GETFL, 0);
-        if (flags != -1) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-
-        sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(static_cast<uint16_t>(REMOTE_TOOL_PORT));
-        addr.sin_addr = host_addr;
-
-        int rc = connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
-
-        if (rc < 0 && errno == EINPROGRESS) {
-            timeval tv{};
-            tv.tv_sec = CONNECT_TIMEOUT_SECONDS;
-            tv.tv_usec = 0;
-
-            fd_set write_fds;
-            FD_ZERO(&write_fds);
-            FD_SET(fd, &write_fds);
-
-            int ready = select(fd + 1, nullptr, &write_fds, nullptr, &tv);
-            if (ready <= 0) {
-                close(fd);
-                return -1;
-            }
-
-            int so_error = 0;
-            socklen_t len = sizeof(so_error);
-            if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &so_error, &len) < 0 || so_error != 0) {
-                close(fd);
-                return -1;
-            }
-        } else if (rc < 0) {
-            close(fd);
-            return -1;
-        }
-
-        if (flags != -1) fcntl(fd, F_SETFL, flags);
-        return fd;
-    }
-
-    bool extract_line(std::string& buffer, std::string& out)
-    {
-        auto newline_pos = buffer.find('\n');
-        if (newline_pos == std::string::npos) return false;
-
-        out = buffer.substr(0, newline_pos);
-        buffer.erase(0, newline_pos + 1);
-        if (!out.empty() && out.back() == '\r') out.pop_back();
-        return true;
-    }
 }
 
 int main(int argc, char* argv[])
 {
-    // Writing to a socket right as olli closes its end raises SIGPIPE,
-    // whose default disposition kills this whole process - ignoring it
-    // makes write() (send_line(), above) just return -1 (EPIPE) instead,
-    // same as olli's own core does for the same reason (see
-    // source/main.cpp's std::signal(SIGPIPE, SIG_IGN) call), and what
-    // tools/template/olli_link.cpp now does too. Set here, as early as
-    // possible, before the first connection attempt.
-    std::signal(SIGPIPE, SIG_IGN);
-
     std::string host = "127.0.0.1";
 
     for (int i = 1; i < argc; ++i) {
@@ -739,7 +717,7 @@ int main(int argc, char* argv[])
     // settings here at startup the way this file used to, since that meant
     // presence started polling real hardware before olli had even
     // connected, under whatever the shared file happened to hold.
-    const json register_msg = make_register_message();
+    OLLI_LINK link(host, host_addr, make_register_message());
 
     RawTerminal raw_terminal;
     std::cout << "\033[2J";
@@ -758,13 +736,8 @@ int main(int argc, char* argv[])
     // a real terminal for someone to press it on.
     bool has_real_terminal = isatty(STDIN_FILENO) != 0;
 
-    int fd = -1;
     std::string status = "Not connected to olli at " + host + " - retrying...";
     std::string conn_status = status;
-    std::string read_buffer;
-    auto last_sent = std::chrono::steady_clock::now();
-    auto last_received = std::chrono::steady_clock::now();
-    auto last_connect_attempt = std::chrono::steady_clock::time_point{};
 
     bool quit = false;
     while (!quit) {
@@ -779,9 +752,9 @@ int main(int argc, char* argv[])
             FD_SET(STDIN_FILENO, &read_fds);
             max_fd = STDIN_FILENO;
         }
-        if (fd >= 0) {
-            FD_SET(fd, &read_fds);
-            max_fd = std::max(fd, max_fd);
+        if (link.fd() >= 0) {
+            FD_SET(link.fd(), &read_fds);
+            max_fd = std::max(link.fd(), max_fd);
         }
 
         int ready = select(max_fd + 1, &read_fds, nullptr, nullptr, &tv);
@@ -793,90 +766,21 @@ int main(int argc, char* argv[])
             }
         }
 
-        auto now = std::chrono::steady_clock::now();
+        bool socket_readable = link.fd() >= 0 && ready > 0 && FD_ISSET(link.fd(), &read_fds);
 
-        if (!quit && fd < 0) {
-            if (std::chrono::duration_cast<std::chrono::seconds>(now - last_connect_attempt).count()
-                    >= RECONNECT_INTERVAL_SECONDS) {
-                last_connect_attempt = now;
-                fd = try_connect(host_addr);
-                if (fd >= 0) {
-                    send_line(fd, register_msg.dump());
-                    conn_status = "Registered with olli at " + host + ". Waiting for identity/calls...";
-                    last_sent = last_received = now;
-                    read_buffer.clear();
-                } else {
-                    conn_status = "Not connected to olli at " + host + " - retrying...";
-                }
-            }
-        }
-        else if (!quit && fd >= 0 && ready > 0 && FD_ISSET(fd, &read_fds)) {
-            char buf[4096];
-            ssize_t n = read(fd, buf, sizeof(buf));
+        if (!quit) {
+            link.service(socket_readable);
 
-            if (n <= 0) {
-                close(fd);
-                fd = -1;
-                reset_to_default_profile();
-                conn_status = "Disconnected from olli at " + host + " - retrying...";
-            } else {
-                read_buffer.append(buf, static_cast<size_t>(n));
+            if (link.consume_disconnected()) reset_to_default_profile();
 
-                std::string line;
-                while (extract_line(read_buffer, line)) {
-                    if (line.empty()) continue;
-
-                    last_received = std::chrono::steady_clock::now();
-                    try {
-                        json msg = json::parse(line);
-                        std::string type = msg.value("type", "");
-                        if (type == "call") {
-                            status = handle_call(fd, msg);
-                            // handle_call() sends its result via send_line()
-                            // internally but never touched last_sent, so a
-                            // call answered right after an idle stretch
-                            // could still have the heartbeat block below
-                            // queue a ping right behind it. Not just
-                            // cosmetic: olli's own TOOL_REMOTE::check()
-                            // (source/remote_tools.cpp) reads exactly one
-                            // line as "the" answer to its call - if a ping
-                            // beat the real result onto the wire, it would
-                            // misread the ping as an unexpected response and
-                            // orphan the real result to desync a later,
-                            // unrelated call. See ../PROTOCOL.md's ping/pong
-                            // section ("either message counts as proof of
-                            // life") and tools/template/olli_link.cpp's
-                            // OLLI_LINK::send_result() for where this same
-                            // bug was first found and fixed.
-                            last_sent = std::chrono::steady_clock::now();
-                        } else if (type == "ping") {
-                            send_line(fd, json{{"type", "pong"}}.dump());
-                            last_sent = std::chrono::steady_clock::now();
-                        } else if (type == "identity") {
-                            conn_status = handle_identity(msg);
-                        }
-                    } catch (const std::exception&) {
-                        status = "Bad JSON from olli.";
-                    }
-                }
-            }
-        }
-
-        // Heartbeat - see ../PROTOCOL.md.
-        if (!quit && fd >= 0) {
-            now = std::chrono::steady_clock::now();
-
-            if (std::chrono::duration_cast<std::chrono::seconds>(now - last_sent).count() >= PING_INTERVAL_SECONDS) {
-                send_line(fd, json{{"type", "ping"}}.dump());
-                last_sent = now;
+            json msg;
+            while (link.next_message(msg)) {
+                std::string type = msg.value("type", "");
+                if (type == "call") status = handle_call(link, msg);
+                else if (type == "identity") conn_status = handle_identity(msg);
             }
 
-            if (std::chrono::duration_cast<std::chrono::seconds>(now - last_received).count() >= DEAD_TIMEOUT_SECONDS) {
-                close(fd);
-                fd = -1;
-                reset_to_default_profile();
-                conn_status = "Connection to olli at " + host + " timed out - retrying...";
-            }
+            if (!link.status().empty()) conn_status = link.status();
         }
 
         // Poll every tracked person and fire whatever just transitioned -
@@ -887,13 +791,12 @@ int main(int argc, char* argv[])
         // nothing to do.
         if (!quit) {
             poll_all_people();
-            run_triggers(fd);
+            run_triggers(link);
             status = "Polled " + std::to_string(people.size()) + " people.";
         }
 
         if (!quit) redraw_screen(status, conn_status);
     }
 
-    if (fd >= 0) close(fd);
     return 0;
 }

@@ -7,14 +7,14 @@ plumbing).
 
 ## Layout
 
-Two kinds of file in here, kept deliberately separate:
-
-- **`olli_link.hpp` / `olli_link.cpp`** - the "talk to olli" plumbing:
-  connect/reconnect, heartbeat, socket read/write, message framing. Generic,
-  tool-agnostic - a new tool doesn't need to touch either file.
-- **`template_tool.cpp`** - everything specific to what this tool actually
-  does: what it registers, how it answers a call, and (if it has one) its
-  display. This is the file you fill in.
+- **[`../olli_link/olli_link.hpp`](../olli_link/olli_link.hpp) /
+  [`olli_link.cpp`](../olli_link/olli_link.cpp)** - the "talk to olli"
+  plumbing: connect/reconnect, heartbeat, socket read/write, message
+  framing. Generic, tool-agnostic, and shared by every remote tool - a new
+  tool doesn't need to touch either file.
+- **`template_tool.cpp`** (this directory) - everything specific to what
+  this tool actually does: what it registers, how it answers a call, and
+  (if it has one) its display. This is the file you fill in.
 
 Inside `template_tool.cpp`, `olli_processing()` is the one function that
 ties the two together, called once per main-loop tick. Its own top half
@@ -30,10 +30,11 @@ the actual talking, unchanged from tool to tool.
    cd tools/your_tool_name
    mv template_tool.cpp your_tool_name.cpp
    ```
-   Leave `olli_link.hpp`/`olli_link.cpp` named as they are - they're generic
-   plumbing, not tool-specific, so there's nothing in them to rename.
+   Nothing to copy from `../olli_link/` - it's shared, not per-tool.
 2. In `Makefile`, replace every `template_tool` with `your_tool_name` (the
-   `.cpp` filename and the build target - `olli_link.cpp` stays as-is). Do
+   `.cpp` filename and the build target - the `-I../olli_link` include path
+   and `../olli_link/olli_link.cpp` build input stay as-is, since
+   `tools/your_tool_name/` sits at the same depth as `tools/template/`). Do
    the same in `.gitignore` (it ignores the compiled binary by name - a
    stale entry there just means the old, wrong binary name gets tracked by
    accident).
@@ -53,8 +54,9 @@ the actual talking, unchanged from tool to tool.
 
 Nothing else needs to change unless your tool genuinely needs different
 *connection* behavior, not just different logic - everything in
-`olli_link.hpp`/`olli_link.cpp`, and everything past CUSTOMIZE #2 inside
-`olli_processing()`, is the same plumbing every remote tool needs.
+`../olli_link/olli_link.hpp`/`olli_link.cpp`, and everything past
+CUSTOMIZE #2 inside `olli_processing()`, is the same plumbing every remote
+tool needs.
 
 ## What you get for free
 
@@ -78,16 +80,15 @@ Nothing else needs to change unless your tool genuinely needs different
   `select()` call in `main()`, and the `redraw_screen()` call at the bottom
   of the loop - nothing else depends on any of it.
 
-## Why a copy per tool, not a shared library
+## Why `olli_link` is a shared directory, not a copy per tool
 
-`olli_link.hpp`/`olli_link.cpp` split the plumbing out of the tool-specific
-code *within* a tool's own directory, but there's still no shared library
-*across* tools - copying this whole directory (all three files) is the
-mechanism for starting a new one, and each tool keeps its own standalone
-build (see `../PROTOCOL.md`'s "Repo / build layout" section). That's
-deliberate: every tool stays fully self-contained, buildable and readable
-on its own, with nothing to version or break across tools when one of them
-changes. Worth revisiting only if keeping `olli_link.*` in sync by hand
-across enough copies becomes a real maintenance burden - not a problem yet
-with one tool on this layout (`../clock/` and `../presence/` are still the
-older, single-file shape).
+`olli_link.hpp`/`olli_link.cpp` used to be copied into each tool's own
+directory (this template was where that pattern started). Once `presence`
+and `clock` turned out to have independently hand-rolled the identical
+plumbing inline, keeping it in sync by hand across that many copies became
+the real maintenance burden the pattern was always going to hit - see
+`../PROTOCOL.md`'s "Repo / build layout" section for the history. It now
+lives once, in `../olli_link/`, and every tool's `Makefile` (including this
+one) points at it via `-I../olli_link`; each tool still keeps its own
+standalone build otherwise (own `Makefile`, own binary, own tool-specific
+`.cpp`) - only the network plumbing is shared.

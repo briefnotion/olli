@@ -7,11 +7,11 @@
 # on a detached std::thread).
 
 CXX ?= g++
-CXXFLAGS = -std=c++17 -Wall -Wextra -pthread -I../../../json/include
+CXXFLAGS = -std=c++17 -Wall -Wextra -pthread -I../../../json/include -I../olli_link
 LDLIBS = -lcurl
 
-hue: hue.cpp olli_link.cpp olli_link.hpp
-	$(CXX) $(CXXFLAGS) -o hue hue.cpp olli_link.cpp $(LDLIBS)
+hue: hue.cpp ../olli_link/olli_link.cpp ../olli_link/olli_link.hpp
+	$(CXX) $(CXXFLAGS) -o hue hue.cpp ../olli_link/olli_link.cpp $(LDLIBS)
 
 clean:
 	rm -f hue

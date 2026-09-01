@@ -20,6 +20,8 @@
 // 127.0.0.1 (olli on this same machine); pass olli's real IP to reach it
 // somewhere else on the network. `./clock -h` / `--help` for usage.
 
+#include "../olli_link/olli_link.hpp"
+
 #include <nlohmann/json.hpp>
 
 #include <iostream>
@@ -27,18 +29,14 @@
 #include <sstream>
 #include <iomanip>
 #include <chrono>
-#include <csignal>
 #include <ctime>
 #include <vector>
 #include <map>
 #include <deque>
 #include <algorithm>
-#include <cerrno>
 
 #include <unistd.h>
 #include <termios.h>
-#include <fcntl.h>
-#include <sys/socket.h>
 #include <sys/select.h>
 #include <sys/ioctl.h>
 #include <netinet/in.h>
@@ -47,27 +45,6 @@
 using json = nlohmann::json;
 
 namespace {
-    constexpr int REMOTE_TOOL_PORT = 47601;
-
-    // Heartbeat/reconnect timing - see ../PROTOCOL.md. Kept in step with
-    // TOOL_REMOTE's own PING_INTERVAL_SECONDS/DEAD_TIMEOUT_SECONDS
-    // (source/remote_tools.h) even though nothing enforces the two staying
-    // equal - either side can independently notice a timeout regardless of
-    // what the other's numbers are.
-    constexpr int RECONNECT_INTERVAL_SECONDS = 3;
-    constexpr int PING_INTERVAL_SECONDS = 5;
-    constexpr int DEAD_TIMEOUT_SECONDS = 15;
-
-    // Caps how long one connection attempt can take - see try_connect()
-    // below for why this matters once host isn't loopback.
-    constexpr int CONNECT_TIMEOUT_SECONDS = 2;
-
-    void send_line(int fd, const std::string& line)
-    {
-        std::string with_newline = line + "\n";
-        ssize_t written = write(fd, with_newline.data(), with_newline.size());
-        (void)written;
-    }
 
     std::string current_time(const std::string& format)
     {
@@ -142,7 +119,7 @@ namespace {
     // it fires on the first tick after reconnecting instead of being lost.
     // Updates `status` too, same as handle_call()'s return value, so the
     // display reflects it immediately.
-    void handle_expired_timers(int fd, std::string& status, std::chrono::steady_clock::time_point& last_sent)
+    void handle_expired_timers(OLLI_LINK& link, std::string& status)
     {
         auto now = std::chrono::steady_clock::now();
         for (auto& [label, timer] : active_timers) {
@@ -153,7 +130,7 @@ namespace {
                 blink_ticks_left = BLINK_TOTAL_TICKS;
             }
 
-            if (timer.event_sent || fd < 0) continue;
+            if (timer.event_sent || !link.is_connected()) continue;
 
             std::stringstream ss;
             ss << "### [TIMER EXPIRED] ###\n";
@@ -163,20 +140,15 @@ namespace {
             }
             ss << "Inform the user in character.";
 
-            json event_msg = {{"type", "event"}, {"message", ss.str()}};
+            json action = nullptr;
             if (!timer.on_expire_tool.empty()) {
-                event_msg["action"] = {
+                action = {
                     {"tool", timer.on_expire_tool},
                     {"arguments", timer.on_expire_arguments}
                 };
             }
 
-            send_line(fd, event_msg.dump());
-            // Same last_sent gap as handle_call()'s own comment in main() -
-            // this sends real data over the wire but, unlike that call
-            // site, had no way to update main()'s last_sent at all before
-            // last_sent was added to this function's own parameters.
-            last_sent = std::chrono::steady_clock::now();
+            link.send_event(ss.str(), action);
             timer.event_sent = true;
             status = "Timer '" + label + "' expired.";
         }
@@ -457,23 +429,18 @@ namespace {
     // above, which owns the whole screen via cursor positioning, so a plain
     // std::cout print here would corrupt it the same way an unmanaged write
     // corrupts olli's own ncurses display (see TODO.md's history on that).
-    std::string handle_call(int fd, const json& msg)
+    std::string handle_call(OLLI_LINK& link, const json& msg)
     {
         std::string call_id = msg.value("call_id", "");
         std::string name = msg.value("name", "");
 
-        json result_msg;
         std::string status;
         if (name == "get_clock_time") {
             std::string format = "%H:%M:%S";
             if (msg.contains("arguments")) {
                 format = msg["arguments"].value("format", format);
             }
-            result_msg = {
-                {"type", "result"},
-                {"call_id", call_id},
-                {"result", current_time(format)}
-            };
+            link.send_result(call_id, current_time(format));
             status = "Call answered: " + name;
         } else if (name == "set_timer") {
             std::string label;
@@ -509,11 +476,7 @@ namespace {
                 res << " Linked action: " << on_expire_tool << " will run automatically when it finishes.";
             }
 
-            result_msg = {
-                {"type", "result"},
-                {"call_id", call_id},
-                {"result", res.str()}
-            };
+            link.send_result(call_id, res.str());
             status = "Timer '" + label + "' set for " + std::to_string(static_cast<long long>(seconds)) + "s.";
         } else if (name == "check_timer") {
             std::string label;
@@ -538,21 +501,12 @@ namespace {
                 }
             }
 
-            result_msg = {
-                {"type", "result"},
-                {"call_id", call_id},
-                {"result", res}
-            };
+            link.send_result(call_id, res);
             status = "Call answered: " + name;
         } else {
-            result_msg = {
-                {"type", "result"},
-                {"call_id", call_id},
-                {"error", "Unknown tool name: " + name}
-            };
+            link.send_error(call_id, "Unknown tool name: " + name);
             status = "Unknown call received: " + name;
         }
-        send_line(fd, result_msg.dump());
         return status;
     }
 
@@ -603,66 +557,6 @@ namespace {
         };
     }
 
-    // Bounded to CONNECT_TIMEOUT_SECONDS rather than a plain blocking
-    // connect(). A loopback target that's simply not listening yet refuses
-    // almost instantly either way (ECONNREFUSED), but once host can be a
-    // real remote address (see main()'s [host] argument), an unreachable
-    // one - wrong IP, firewalled, host down with packets silently dropped -
-    // can otherwise leave a blocking connect() hanging for the platform's
-    // full TCP timeout (commonly 20-30+ seconds), freezing the whole
-    // display for that entire stretch. The socket is put in non-blocking
-    // mode just for the connect attempt itself (select() on it for
-    // writability, then check SO_ERROR to see whether it actually
-    // succeeded) and returned to blocking mode afterward, matching every
-    // other fd this program already handles via select() in the main loop.
-    // Returns -1 (silently - the caller's status line already says
-    // "retrying") on any failure or timeout.
-    int try_connect(const in_addr& host_addr)
-    {
-        int fd = socket(AF_INET, SOCK_STREAM, 0);
-        if (fd < 0) return -1;
-
-        int flags = fcntl(fd, F_GETFL, 0);
-        if (flags != -1) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-
-        sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(static_cast<uint16_t>(REMOTE_TOOL_PORT));
-        addr.sin_addr = host_addr;
-
-        int rc = connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
-
-        if (rc < 0 && errno == EINPROGRESS) {
-            timeval tv{};
-            tv.tv_sec = CONNECT_TIMEOUT_SECONDS;
-            tv.tv_usec = 0;
-
-            fd_set write_fds;
-            FD_ZERO(&write_fds);
-            FD_SET(fd, &write_fds);
-
-            int ready = select(fd + 1, nullptr, &write_fds, nullptr, &tv);
-            if (ready <= 0) {
-                close(fd); // timed out, or select() error
-                return -1;
-            }
-
-            int so_error = 0;
-            socklen_t len = sizeof(so_error);
-            if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &so_error, &len) < 0 || so_error != 0) {
-                close(fd);
-                return -1;
-            }
-        } else if (rc < 0) {
-            close(fd); // failed immediately - e.g. loopback ECONNREFUSED
-            return -1;
-        }
-        // rc == 0: connected immediately, no waiting needed.
-
-        if (flags != -1) fcntl(fd, F_SETFL, flags); // back to blocking for the connection's lifetime
-        return fd;
-    }
-
     // Takes argv[0] rather than a hardcoded name - see the same choice in
     // tools/template/template_tool.cpp, made after a rename there once
     // exposed a hardcoded name going stale.
@@ -681,15 +575,6 @@ namespace {
 
 int main(int argc, char* argv[])
 {
-    // Writing to a socket right as olli closes its end raises SIGPIPE,
-    // whose default disposition kills this whole process - ignoring it
-    // makes write() (send_line(), above) just return -1 (EPIPE) instead,
-    // same as olli's own core does for the same reason (see
-    // source/main.cpp's std::signal(SIGPIPE, SIG_IGN) call), and what
-    // tools/template/olli_link.cpp now does too. Set here, as early as
-    // possible, before the first connection attempt.
-    std::signal(SIGPIPE, SIG_IGN);
-
     std::string host = "127.0.0.1";
 
     if (argc > 1) {
@@ -708,7 +593,7 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    const json register_msg = make_register_message();
+    OLLI_LINK link(host, host_addr, make_register_message());
 
     RawTerminal raw_terminal; // hides cursor, enables raw stdin - restores both on scope exit
     std::cout << "\033[2J"; // one full clear at startup, redraw_screen() only overwrites from here on
@@ -729,15 +614,7 @@ int main(int argc, char* argv[])
     // someone to press it on.
     bool has_real_terminal = isatty(STDIN_FILENO) != 0;
 
-    int fd = -1;
     std::string status = "Not connected to olli at " + host + " - retrying...";
-    std::string read_buffer;
-    auto last_sent = std::chrono::steady_clock::now();
-    auto last_received = std::chrono::steady_clock::now();
-    // Epoch (not "now"), so the very first loop iteration attempts a
-    // connection immediately instead of waiting a full
-    // RECONNECT_INTERVAL_SECONDS first.
-    auto last_connect_attempt = std::chrono::steady_clock::time_point{};
 
     bool quit = false;
     while (!quit) {
@@ -754,9 +631,9 @@ int main(int argc, char* argv[])
             FD_SET(STDIN_FILENO, &read_fds);
             max_fd = STDIN_FILENO;
         }
-        if (fd >= 0) {
-            FD_SET(fd, &read_fds);
-            max_fd = std::max(fd, max_fd);
+        if (link.fd() >= 0) {
+            FD_SET(link.fd(), &read_fds);
+            max_fd = std::max(link.fd(), max_fd);
         }
 
         int ready = select(max_fd + 1, &read_fds, nullptr, nullptr, &tv);
@@ -768,112 +645,30 @@ int main(int argc, char* argv[])
             }
         }
 
-        auto now = std::chrono::steady_clock::now();
+        bool socket_readable = link.fd() >= 0 && ready > 0 && FD_ISSET(link.fd(), &read_fds);
 
-        if (!quit && fd < 0) {
-            // Not connected - retry periodically rather than on every tick.
-            if (std::chrono::duration_cast<std::chrono::seconds>(now - last_connect_attempt).count()
-                    >= RECONNECT_INTERVAL_SECONDS) {
-                last_connect_attempt = now;
-                fd = try_connect(host_addr);
-                if (fd >= 0) {
-                    send_line(fd, register_msg.dump());
-                    status = "Registered with olli at " + host + ". Waiting for calls...";
-                    last_sent = last_received = now;
-                    read_buffer.clear();
-                } else {
-                    status = "Not connected to olli at " + host + " - retrying...";
-                }
-            }
-        }
-        else if (!quit && fd >= 0 && ready > 0 && FD_ISSET(fd, &read_fds)) {
-            char buf[4096];
-            ssize_t n = read(fd, buf, sizeof(buf));
+        if (!quit) {
+            link.service(socket_readable);
 
-            if (n <= 0) {
-                // olli closed the connection (or a real error) - drop back
-                // to "not connected" and keep ticking rather than exiting.
-                close(fd);
-                fd = -1;
-                reset_to_default_profile();
-                status = "Disconnected from olli at " + host + " - retrying...";
-            } else {
-                read_buffer.append(buf, static_cast<size_t>(n));
+            if (link.consume_disconnected()) reset_to_default_profile();
 
-                auto newline_pos = read_buffer.find('\n');
-                while (newline_pos != std::string::npos) {
-                    std::string line = read_buffer.substr(0, newline_pos);
-                    read_buffer.erase(0, newline_pos + 1);
-                    if (!line.empty() && line.back() == '\r') line.pop_back();
-
-                    if (!line.empty()) {
-                        last_received = std::chrono::steady_clock::now();
-                        try {
-                            json msg = json::parse(line);
-                            std::string type = msg.value("type", "");
-                            if (type == "call") {
-                                status = handle_call(fd, msg);
-                                // handle_call() sends its result via
-                                // send_line() internally but never touched
-                                // last_sent, so a call answered right after
-                                // an idle stretch could still have the
-                                // heartbeat block below queue a ping right
-                                // behind it - olli's TOOL_REMOTE::check()
-                                // (source/remote_tools.cpp) reads exactly
-                                // one line as "the" answer to its call, so
-                                // it would misread that ping as an
-                                // unexpected response and orphan the real
-                                // result. See ../PROTOCOL.md's ping/pong
-                                // section and
-                                // tools/template/olli_link.cpp's
-                                // OLLI_LINK::send_result() for where this
-                                // bug was first found and fixed.
-                                last_sent = std::chrono::steady_clock::now();
-                            } else if (type == "ping") {
-                                send_line(fd, json{{"type", "pong"}}.dump());
-                                last_sent = std::chrono::steady_clock::now();
-                            } else if (type == "identity") {
-                                status = handle_identity(msg);
-                            }
-                            // "pong", or anything else: the last_received
-                            // update above is already all that's needed.
-                        } catch (const std::exception&) {
-                            status = "Bad JSON from olli.";
-                        }
-                    }
-
-                    newline_pos = read_buffer.find('\n');
-                }
-            }
-        }
-
-        // Heartbeat - see ../PROTOCOL.md. Independent of whatever happened
-        // to arrive this tick above, so a quiet stretch still gets pinged
-        // and still gets timed out if olli stops answering.
-        if (!quit && fd >= 0) {
-            now = std::chrono::steady_clock::now();
-
-            if (std::chrono::duration_cast<std::chrono::seconds>(now - last_sent).count() >= PING_INTERVAL_SECONDS) {
-                send_line(fd, json{{"type", "ping"}}.dump());
-                last_sent = now;
+            json msg;
+            while (link.next_message(msg)) {
+                std::string type = msg.value("type", "");
+                if (type == "call") status = handle_call(link, msg);
+                else if (type == "identity") status = handle_identity(msg);
             }
 
-            if (std::chrono::duration_cast<std::chrono::seconds>(now - last_received).count() >= DEAD_TIMEOUT_SECONDS) {
-                close(fd);
-                fd = -1;
-                reset_to_default_profile();
-                status = "Connection to olli at " + host + " timed out - retrying...";
-            }
+            if (!link.status().empty()) status = link.status();
         }
 
         // Timer expiry - independent of whatever arrived this tick above,
-        // same as the heartbeat block. See handle_expired_timers()'s
-        // comment.
-        if (!quit) handle_expired_timers(fd, status, last_sent);
+        // same as the heartbeat handled inside link.service(). See
+        // handle_expired_timers()'s comment.
+        if (!quit) handle_expired_timers(link, status);
 
         if (!quit) redraw_screen(status);
     }
 
-    if (fd >= 0) close(fd);
     return 0;
 }

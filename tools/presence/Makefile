@@ -5,10 +5,10 @@
 # "Building the C++ core" section).
 
 CXX ?= g++
-CXXFLAGS = -std=c++17 -Wall -Wextra -I../../../json/include
+CXXFLAGS = -std=c++17 -Wall -Wextra -I../../../json/include -I../olli_link
 
-presence: presence.cpp helper_presence.cpp helper_presence.hpp
-	$(CXX) $(CXXFLAGS) -o presence presence.cpp helper_presence.cpp
+presence: presence.cpp helper_presence.cpp helper_presence.hpp ../olli_link/olli_link.cpp ../olli_link/olli_link.hpp
+	$(CXX) $(CXXFLAGS) -o presence presence.cpp helper_presence.cpp ../olli_link/olli_link.cpp
 
 clean:
 	rm -f presence

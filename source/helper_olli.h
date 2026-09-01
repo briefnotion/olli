@@ -40,53 +40,66 @@ std::string timestamp_prefix();
 // the one place the full, unsummarized original wording survives for
 // whoever's debugging a session afterward.
 //
-// A free function taking plain strings (not a Message&) rather than a
-// method on ollama_system: Message is defined in olla.h, which includes
-// this header, not the other way around - so this stays decoupled from
-// that type instead of creating a circular include.
+// Message is defined in olla.h, which includes this header, not the other
+// way around - methods here take plain strings rather than a Message&, so
+// this stays decoupled from that type instead of creating a circular
+// include.
 //
-// g_debug_log_file must be 'inline' (C++17), not 'static' - same reasoning
-// as history_mutex in olla.h: a 'static' definition here would give every
-// translation unit its own private copy, so writes from different threads
-// (main chat, sidetrack) would land in different, unconnected file handles
-// instead of the one real log.
-inline std::mutex g_debug_log_mutex;
-inline std::ofstream g_debug_log_file;
+// One global instance (instance() below) rather than a plain global
+// variable - a 'static' member/local would give every translation unit its
+// own private copy (same reasoning as history_mutex in olla.h), so writes
+// from different threads (main chat, sidetrack) would land in different,
+// unconnected file handles instead of the one real log. A Meyer's singleton
+// avoids needing an 'inline' variable trick for that: the function-local
+// static in instance() is guaranteed to be the same object everywhere.
+class DEBUG_LOG_CLASS {
+    public:
+        // The single global access point - DEBUG_LOG_CLASS::instance().log_message(...).
+        static DEBUG_LOG_CLASS& instance();
 
-// Truncates and (re)opens the debug log fresh - call once at startup,
-// before any thread that might log has started.
-void debug_log_reset(const std::filesystem::path& filepath);
+        // Truncates and (re)opens the debug log fresh - call once at startup,
+        // before any thread that might log has started.
+        void reset(const std::filesystem::path& filepath);
 
-// Appends one record and flushes immediately, so the log is current even if
-// the process is killed rather than exited cleanly:
-//
-//   === <instance_label> / <role> ===
-//   Time:    HH:MM:SS.mmm
-//   Content: <content, possibly spanning several more lines>
-//   ------------------------------------
-//
-// Same record shape debug_log_instance_event() below uses (see
-// write_record(), helper_olli.cpp) - every entry in debug_full_history.txt
-// reads the same way no matter which of the two wrote it, and the closing
-// rule line unambiguously bounds a record even when its own content spans
-// many lines or contains bracket-looking text of its own. Thread-safe - any
-// ollama_system instance, from any thread, can call this. instance_label is
-// ollama_system::debug_label (olla.h) - a short human-readable tag ("chat",
-// "sidetrack-review", "task-runner:water the plants", ...) set once per
-// instance at creation, distinguishing which instance produced this record,
-// since main chat/sidetrack's review/task-runner automation instances all
-// funnel through the same send()/completion code and write to this one
-// shared file.
-void debug_log_message(const std::string& instance_label, const std::string& role, const std::string& content);
+        // Appends one record and flushes immediately, so the log is current even if
+        // the process is killed rather than exited cleanly:
+        //
+        //   === <instance_label> / <role> ===
+        //   Time:    HH:MM:SS.mmm
+        //   Content: <content, possibly spanning several more lines>
+        //   ------------------------------------
+        //
+        // Same record shape log_event() below uses (see write_record(),
+        // helper_olli.cpp) - every entry in debug_full_history.txt reads
+        // the same way no matter which of the two wrote it, and the closing
+        // rule line unambiguously bounds a record even when its own content
+        // spans many lines or contains bracket-looking text of its own.
+        // Thread-safe - any ollama_system instance, from any thread, can
+        // call this. instance_label is ollama_system::debug_label (olla.h)
+        // - a short human-readable tag ("chat", "sidetrack-review",
+        // "task-runner:water the plants", ...) set once per instance at
+        // creation, distinguishing which instance produced this record,
+        // since main chat/sidetrack's review/task-runner automation
+        // instances all funnel through the same send()/completion code and
+        // write to this one shared file.
+        void log_message(const std::string& instance_label, const std::string& role, const std::string& content);
 
-// Appends one record in the same shape as debug_log_message() above, with
-// "EVENT" standing in for role and the event description ("instance
-// created"/"instance closed") standing in for content. Call at an
-// instance's creation and again right before it goes out of scope/stops
-// being used, so the log shows exactly when each instance existed alongside
-// its interleaved messages. Same file/mutex as debug_log_message() - always
-// call after debug_log_reset() has run.
-void debug_log_instance_event(const std::string& instance_label, const std::string& event);
+        // Appends one record in the same shape as log_message() above, with
+        // "EVENT" standing in for role and the event description ("instance
+        // created"/"instance closed") standing in for content. Call at an
+        // instance's creation and again right before it goes out of scope/stops
+        // being used, so the log shows exactly when each instance existed alongside
+        // its interleaved messages. Same file/mutex as log_message() - always
+        // call after reset() has run.
+        void log_event(const std::string& instance_label, const std::string& event);
+
+    private:
+        std::string time_now();
+        void write_record(const std::string& instance_label, const std::string& kind, const std::string& content);
+
+        std::mutex file_mutex;
+        std::ofstream file;
+};
 
 // ----
 

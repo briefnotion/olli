@@ -484,7 +484,7 @@ void TOOL_TASK_RUNNER::handle_tool(ollama_system& chat, std::vector<std::unique_
         // paired with it in chat's own background_tasks, not a throwaway.
         auto [instance, instance_comms] = chat.spawn_background_task();
         instance.debug_label = "task-runner:" + intent_phrase;
-        debug_log_instance_event(instance.debug_label, "instance created");
+        DEBUG_LOG_CLASS::instance().log_event(instance.debug_label, "instance created");
 
         if (!instance.OLLAMA_OPENING.empty())
             instance.OLLAMA_OPENING = found_task.TASK_PURPOSE;
@@ -555,7 +555,7 @@ void TOOL_TASK_RUNNER::handle_tool(ollama_system& chat, std::vector<std::unique_
             chat.integrate_tool_result(tools_list, comms, "", instance.gather_history());
         }
 
-        debug_log_instance_event(instance.debug_label, "instance closed");
+        DEBUG_LOG_CLASS::instance().log_event(instance.debug_label, "instance closed");
 
         if (running_directory)
         {

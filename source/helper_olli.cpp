@@ -45,60 +45,64 @@ namespace {
     // Matches history_write()'s own rule-line convention (olla.cpp) rather
     // than inventing a second style for a second debug file.
     constexpr const char* DEBUG_LOG_RULE = "------------------------------------";
-
-    // HH:MM:SS.mmm, local time - finer-grained than timestamp_prefix()'s
-    // minute resolution just above (that one's sized for filenames; this
-    // one's sized for telling rapid-fire events apart, which is exactly
-    // what this log gets used to diagnose - a flapping sensor firing
-    // several times inside one minute needs more than minute resolution to
-    // make sense of afterward).
-    std::string debug_log_time() {
-        auto now = std::chrono::system_clock::now();
-        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
-        std::time_t now_c = std::chrono::system_clock::to_time_t(now);
-        std::tm local_tm{};
-        localtime_r(&now_c, &local_tm);
-
-        char buf[16];
-        std::snprintf(buf, sizeof(buf), "%02d:%02d:%02d.%03d",
-                      local_tm.tm_hour, local_tm.tm_min, local_tm.tm_sec,
-                      static_cast<int>(ms.count()));
-        return std::string(buf);
-    }
-
-    // One record shape shared by debug_log_message() and
-    // debug_log_instance_event() below, so every entry in
-    // debug_full_history.txt reads the same way regardless of which one
-    // wrote it - a real message, a DIRECTOR_NOTE, a raw tool result, an
-    // instance created/closed marker. Bounding every record with the same
-    // rule line on the way out is what actually fixes the readability
-    // problem the old one-line-per-entry format had: content that itself
-    // spans many lines, or happens to contain bracket-looking text of its
-    // own (sidetrack-consolidate's own summarization prompt quotes older
-    // [role]: content verbatim - see sidetrack.cpp), used to be visually
-    // indistinguishable from a real header on the line right above or below
-    // it. Caller already holds g_debug_log_mutex.
-    void write_record(const std::string& instance_label, const std::string& kind, const std::string& content) {
-        if (!g_debug_log_file.is_open()) return;
-        g_debug_log_file << "=== " << instance_label << " / " << kind << " ===\n"
-                          << "Time:    " << debug_log_time() << "\n"
-                          << "Content: " << content << "\n"
-                          << DEBUG_LOG_RULE << "\n" << std::flush;
-    }
 }
 
-void debug_log_reset(const std::filesystem::path& filepath) {
-    std::lock_guard<std::mutex> lock(g_debug_log_mutex);
-    g_debug_log_file.open(filepath, std::ios::out | std::ios::trunc);
+DEBUG_LOG_CLASS& DEBUG_LOG_CLASS::instance() {
+    static DEBUG_LOG_CLASS the_instance;
+    return the_instance;
 }
 
-void debug_log_message(const std::string& instance_label, const std::string& role, const std::string& content) {
-    std::lock_guard<std::mutex> lock(g_debug_log_mutex);
+// HH:MM:SS.mmm, local time - finer-grained than timestamp_prefix()'s
+// minute resolution above (that one's sized for filenames; this one's
+// sized for telling rapid-fire events apart, which is exactly what this
+// log gets used to diagnose - a flapping sensor firing several times
+// inside one minute needs more than minute resolution to make sense of
+// afterward).
+std::string DEBUG_LOG_CLASS::time_now() {
+    auto now = std::chrono::system_clock::now();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
+    std::time_t now_c = std::chrono::system_clock::to_time_t(now);
+    std::tm local_tm{};
+    localtime_r(&now_c, &local_tm);
+
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%02d:%02d:%02d.%03d",
+                  local_tm.tm_hour, local_tm.tm_min, local_tm.tm_sec,
+                  static_cast<int>(ms.count()));
+    return std::string(buf);
+}
+
+// One record shape shared by log_message() and log_event() below, so every
+// entry in debug_full_history.txt reads the same way regardless of which
+// one wrote it - a real message, a DIRECTOR_NOTE, a raw tool result, an
+// instance created/closed marker. Bounding every record with the same
+// rule line on the way out is what actually fixes the readability
+// problem the old one-line-per-entry format had: content that itself
+// spans many lines, or happens to contain bracket-looking text of its
+// own (sidetrack-consolidate's own summarization prompt quotes older
+// [role]: content verbatim - see sidetrack.cpp), used to be visually
+// indistinguishable from a real header on the line right above or below
+// it. Caller already holds file_mutex.
+void DEBUG_LOG_CLASS::write_record(const std::string& instance_label, const std::string& kind, const std::string& content) {
+    if (!file.is_open()) return;
+    file << "=== " << instance_label << " / " << kind << " ===\n"
+         << "Time:    " << time_now() << "\n"
+         << "Content: " << content << "\n"
+         << DEBUG_LOG_RULE << "\n" << std::flush;
+}
+
+void DEBUG_LOG_CLASS::reset(const std::filesystem::path& filepath) {
+    std::lock_guard<std::mutex> lock(file_mutex);
+    file.open(filepath, std::ios::out | std::ios::trunc);
+}
+
+void DEBUG_LOG_CLASS::log_message(const std::string& instance_label, const std::string& role, const std::string& content) {
+    std::lock_guard<std::mutex> lock(file_mutex);
     write_record(instance_label, role, content);
 }
 
-void debug_log_instance_event(const std::string& instance_label, const std::string& event) {
-    std::lock_guard<std::mutex> lock(g_debug_log_mutex);
+void DEBUG_LOG_CLASS::log_event(const std::string& instance_label, const std::string& event) {
+    std::lock_guard<std::mutex> lock(file_mutex);
     write_record(instance_label, "EVENT", event);
 }
 

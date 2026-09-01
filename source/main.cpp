@@ -169,12 +169,12 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         // Raw, unfiltered debug log of every message any ollama_system
         // instance ever creates (main chat, sidetrack, task-runner
         // background tasks) - review only, wiped fresh on every startup.
-        // See debug_log_message()'s declaration in helper_olli.h for why
+        // See DEBUG_LOG_CLASS::log_message()'s declaration in helper_olli.h for why
         // this exists: consolidate() (sidetrack.cpp) eventually folds old
         // 'tool'/DIRECTOR_NOTE messages (and everything else) into an
         // LLM-written summary in the live history/history.json - this is
         // the one place the full, original wording survives afterward.
-        debug_log_reset(settings_path / "debug_full_history.txt");
+        DEBUG_LOG_CLASS::instance().reset(settings_path / "debug_full_history.txt");
 
         // Flat-text, human-readable transcript (speaker labels, "Olli: " for
         // the assistant) kept independent of history.json's own structured,
@@ -196,7 +196,7 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         chat.PROPS.model = "qwen3:8b";
         chat.debug_label = "chat";
         chat.open(tools_list);
-        debug_log_instance_event("chat", "instance created");
+        DEBUG_LOG_CLASS::instance().log_event("chat", "instance created");
 
         if (crash_restart)
         {
@@ -371,7 +371,7 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         // history size change) only runs from inside the loop above, which has
         // already exited by this point.
         chat.save_history();
-        debug_log_instance_event("chat", "instance closed");
+        DEBUG_LOG_CLASS::instance().log_event("chat", "instance closed");
 
         // Archives this run's chat_log.txt into chat_logs/<timestamp>.chat_log.txt
         // - see OUTPUT_CLASS::close_chat_log() in user_io.cpp. The other call

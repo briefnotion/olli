@@ -261,7 +261,7 @@ class ollama_system {
         ollama_system();
 
         // Short human-readable tag identifying this instance in
-        // debug_full_history.txt (debug_log_message()/debug_log_instance_event(),
+        // debug_full_history.txt (DEBUG_LOG_CLASS::log_message()/log_event(),
         // helper_olli.h) - main chat, sidetrack's review, a task-runner
         // automation instance, etc. all funnel through the same send()/
         // completion code and share one log file, so without this every

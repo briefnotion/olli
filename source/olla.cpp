@@ -256,7 +256,7 @@ static void parse_tool_calls(const json& msg_chunk, std::vector<ToolCall>& out)
 }
 
 // One-line human-readable summary of a pure tool-call turn (no
-// accompanying text) for debug_log_message()/history_write()'s debug
+// accompanying text) for DEBUG_LOG_CLASS::log_message()/history_write()'s debug
 // text, e.g. "[tool_calls: set_hue_light({\"light_id\":\"2\",\"on\":false})]" -
 // used wherever there'd otherwise just be an empty content string.
 static std::string summarize_tool_calls(const std::vector<ToolCall>& calls)
@@ -298,7 +298,7 @@ void ollama_system::send(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, CO
         input_msg.content = new_user_input;
         history.push_back(input_msg);
     }
-    debug_log_message(debug_label, role, new_user_input);
+    DEBUG_LOG_CLASS::instance().log_message(debug_label, role, new_user_input);
 
     json messages_json = json::array();
     {
@@ -492,7 +492,7 @@ void ollama_system::send(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, CO
         assistant_msg.tool_calls = last_received.tool_calls;
         history.push_back(assistant_msg);
 
-        debug_log_message(debug_label, "assistant", final_content.empty() ? summarize_tool_calls(last_received.tool_calls) : final_content);
+        DEBUG_LOG_CLASS::instance().log_message(debug_label, "assistant", final_content.empty() ? summarize_tool_calls(last_received.tool_calls) : final_content);
     }
 
     // Same trailing blank line the old direct-cout version always printed
@@ -531,7 +531,7 @@ void ollama_system::send_tool_result(const std::string& tool_call_id, const std:
         std::lock_guard<std::mutex> lock(history_mutex);
         history.push_back(msg);
     }
-    debug_log_message(debug_label, msg.role, msg.content);
+    DEBUG_LOG_CLASS::instance().log_message(debug_label, msg.role, msg.content);
 }
 
 // prune_turn_scaffolding() used to live here - deleted every 'tool' message

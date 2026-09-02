@@ -8,6 +8,7 @@
 #include "tools.h"
 #include "olla.h"
 #include "user_io.h"
+#include "io_worker.h"
 
 void add_tool(json& tools, const std::string& name, const std::string& description, json parameters)
 {
@@ -65,7 +66,7 @@ void TOOL_SET_THINKING_MODE::handle_tool(ollama_system& chat, COMMS&, const std:
     }
 }
 
-bool TOOL_SET_THINKING_MODE::check(ollama_system& chat, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>&, COMMS& comms, const ToolCall& tc) {
+bool TOOL_SET_THINKING_MODE::check(IO_WORKER_CLASS&, ollama_system& chat, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>&, COMMS& comms, const ToolCall& tc) {
     if (tc.name != "set_thinking_mode")
         return false;
 
@@ -265,7 +266,7 @@ void TOOL_WEB_SEARCH::handle_tool(ollama_system& chat, std::vector<std::unique_p
     }
 }
 
-bool TOOL_WEB_SEARCH::check(ollama_system& chat, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms, const ToolCall& tc) {
+bool TOOL_WEB_SEARCH::check(IO_WORKER_CLASS&, ollama_system& chat, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms, const ToolCall& tc) {
     if (tc.name != "web_search" && tc.name != "fetch_website_content")
         return false;
 
@@ -427,7 +428,7 @@ void TOOL_TASK_RUNNER::register_tool(ollama_system&, json& tools)
         task_params);
 }
 
-void TOOL_TASK_RUNNER::handle_tool(ollama_system& chat, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms, const std::string& name, const json& args, const std::string& tc_id)
+void TOOL_TASK_RUNNER::handle_tool(IO_WORKER_CLASS& io_worker, ollama_system& chat, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms, const std::string& name, const json& args, const std::string& tc_id)
 {
     if (name != "run_automation_task")
     {
@@ -437,32 +438,10 @@ void TOOL_TASK_RUNNER::handle_tool(ollama_system& chat, std::vector<std::unique_
     bool running_directory = false;
     std::filesystem::path working_dir;
 
-    // The spawned automation instance below is deliberately isolated (see
-    // its 'nullptr, not the real CLASS_SYSTEM' comment further down) - it
-    // gets its own private tools_list, populated the same way any real one
-    // is (populate_default_tools(), olla.h), rather than sharing this
-    // instance's own tools_list. A local variable is fine here even though
-    // 'instance' itself outlives this function call (it sits in
-    // chat.background_tasks until a later process() tick erases it, see
-    // olla.cpp's PART 2) - that later cleanup pass reuses the *caller's*
-    // own tools_list rather than this one (see its comment in olla.cpp), so
-    // nothing outlives this function needing automation_tools_list to still
-    // be alive.
-    std::vector<std::unique_ptr<TOOL_BASE>> automation_tools_list;
-    populate_default_tools(automation_tools_list);
-
-    KEYBOARD_INPUT keyboard_input;
-    keyboard_input.PROPS.ENABLED = false;
-    // Must match the main key_input's RAW_ECHO (main.cpp) - defaults to true,
-    // which raw-echoes every keystroke straight to the terminal via cout,
-    // corrupting the ncurses screen buffer when USE_NCURSES is the active
-    // display path (see KEYBOARD_INPUT_PROPERTIES::RAW_ECHO's comment in
-    // user_io.h). This was the source of the stray CRLF seen during
-    // [[ASK]]/[[ENTER TO CONTINUE]] prompts in run system test.
-    keyboard_input.PROPS.RAW_ECHO = !USE_NCURSES;
-
     std::string intent_phrase = args["intent_phrase"];
-    chat.log("[TaskRunner] Searching for automation matching: \"" + intent_phrase + "\"\n");
+
+    comms.INPUT_FROM_SYSTEM = "[TaskRunner] Searching for automation matching: \"" + intent_phrase + "\"\n";
+    io_worker.exchange(comms, tools_list);
 
     auto task_it = std::find_if(
         task_manager.TASK_LIST.begin(),
@@ -476,6 +455,10 @@ void TOOL_TASK_RUNNER::handle_tool(ollama_system& chat, std::vector<std::unique_
 
     if (task_found)
     {
+        // TASK_LIST is hardcoded in memory for now (tools_helper.cpp) while
+        // this is being debugged - the plan is to load task definitions from
+        // disk into memory at olli startup once the system grows. This
+        // in-memory lookup is a placeholder for that.
         const auto& found_task = *task_it;
 
         // The automation runs on its own background instance so it doesn't
@@ -486,12 +469,22 @@ void TOOL_TASK_RUNNER::handle_tool(ollama_system& chat, std::vector<std::unique_
         instance.debug_label = "task-runner:" + intent_phrase;
         DEBUG_LOG_CLASS::instance().log_event(instance.debug_label, "instance created");
 
-        if (!instance.OLLAMA_OPENING.empty())
-            instance.OLLAMA_OPENING = found_task.TASK_PURPOSE;
+        // Give the spawned instance the task's own purpose as its opening
+        // persona instead of the generic default (olla.h) - OLLAMA_OPENING
+        // is never empty at this point (it always starts at that default),
+        // so this always applies for a task-runner automation instance.
+        instance.OLLAMA_OPENING = found_task.TASK_PURPOSE;
 
-        instance.PROPS.stream_output = false;
+        instance.PROPS.stream_output = true;
 
-        instance.open(automation_tools_list, chat.PROPS);
+        // Shares the caller's own tools_list (not a freshly-built one) so
+        // it actually has access to whatever the main chat does -
+        // including any TOOL_REMOTE devices registered dynamically at
+        // runtime (main.cpp), which populate_default_tools() alone never
+        // includes. It's also already the same long-lived reference PART
+        // 2's cleanup pass (olla.cpp) uses once this function returns, so
+        // there's no separate lifetime to reason about.
+        instance.open(tools_list, chat.PROPS);
 
         // A scratch directory for the task, cleaned up (remove_all below)
         // once the automation finishes.
@@ -505,49 +498,165 @@ void TOOL_TASK_RUNNER::handle_tool(ollama_system& chat, std::vector<std::unique_
         std::string success_log = "SUCCESS: Automation found. Sequence loading...";
         chat.send_tool_result(tc_id, success_log);
 
-        for (size_t i = 0; i < found_task.COMMANDS.size(); ++i)
+
+        enum class SCRIPT_STATE
         {
+            GET_COMMAND,    // pull the next line, classify it
+            EXECUTE_COMMAND,// hand a line to the LLM
+            WAIT_RESPONSE,  // drain the LLM's turn (incl. any tool calls) to completion
+            WAIT_ENTER,     // [[ENTER TO CONTINUE]] - pure local pause, no LLM involved
+            WAIT_ASK,       // [[ASK]] - same wait, but the typed answer becomes the next input
+            DONE
+        };
 
-            if (starts_with(found_task.COMMANDS[i], "[[ENTER TO CONTINUE]]"))
-            {
-                cout << "\n-" << i << "--------------------------\nPRESS ENTER TO CONTINUE" << endl;
-                keyboard_input.PROPS.ENABLED = true;
-                while(keyboard_input.ENTER_PRESSED == false)
-                {
-                    keyboard_input.keyboard_input();
-                }
-                keyboard_input.ENTER_PRESSED = false;
-                keyboard_input.PROPS.ENABLED = false;
-            }
-            else if (starts_with(found_task.COMMANDS[i], "[[ASK]]"))
-            {
-                std::cout <<"\n-" << i << "--------------------------\nREQUEST: " << found_task.COMMANDS[i] << std::endl;
-                keyboard_input.PROPS.ENABLED = true;
-                while(keyboard_input.ENTER_PRESSED == false)
-                {
-                    keyboard_input.keyboard_input();
-                }
-                keyboard_input.ENTER_PRESSED = false;
-                keyboard_input.PROPS.ENABLED = false;
-                instance_comms.INPUT_FROM_USER = keyboard_input.LINE;
-                instance.send(automation_tools_list, instance_comms, "user");
-            }
-            else
-            {
-                std::cout <<"\n-" << i << "--------------------------\nINPUT: " << found_task.COMMANDS[i] << std::endl;
-                instance_comms.INPUT_FROM_USER = found_task.COMMANDS[i];
-                instance.send(automation_tools_list, instance_comms, "user");
-            }
+        SCRIPT_STATE state = SCRIPT_STATE::GET_COMMAND;
+        size_t i = 0;
+        std::string current_input;
 
+        // One flat loop drives the whole script - same shape as the main
+        // chat's own while loop (main.cpp), just with the state machine
+        // below standing in for "type a line". instance.process() and
+        // io_worker.exchange() each run exactly once per tick no matter
+        // what state we're in, so the instance's own tools/timers keep
+        // ticking and the screen stays live even while paused on
+        // [[ENTER TO CONTINUE]]/[[ASK]] - instead of three separate nested
+        // while-loops each spinning their own exchange() calls.
+        while (state != SCRIPT_STATE::DONE)
+        {
             // nullptr, not the real CLASS_SYSTEM: this automation instance
-            // deliberately drives its own local keyboard_input above (see
-            // its declaration/comment near the top of this function),
-            // isolated from the real system's - it has no business reaching
-            // the real one, same reasoning as sidetrack.cpp's own nullptr
-            // call site (see TOOL_BASE::check()'s comment in tools.h).
-            instance.process(nullptr, automation_tools_list, instance_comms, keyboard_input.PROPS.ENABLED);
-            instance.last_received.complete = false;
+            // is isolated from the real system's, same reasoning as
+            // sidetrack.cpp's own nullptr call site (see TOOL_BASE::check()'s
+            // comment in tools.h).
+            instance.process(io_worker, nullptr, tools_list, instance_comms);
+
+            switch (state)
+            {
+                case SCRIPT_STATE::GET_COMMAND:
+                {
+                    if (i >= found_task.COMMANDS.size())
+                    {
+                        state = SCRIPT_STATE::DONE;
+                        break;
+                    }
+
+                    const std::string& command = found_task.COMMANDS[i];
+
+                    if (starts_with(command, "[[ENTER TO CONTINUE]]"))
+                    {
+                        instance_comms.INPUT_FROM_LLM = "--------------------------\nPRESS ENTER TO CONTINUE\n";
+                        state = SCRIPT_STATE::WAIT_ENTER;
+                    }
+                    else if (starts_with(command, "[[ASK]]"))
+                    {
+                        instance_comms.INPUT_FROM_LLM = "--------------------------\nREQUEST: " + command + "\n";
+                        state = SCRIPT_STATE::WAIT_ASK;
+                    }
+                    else
+                    {
+                        instance_comms.INPUT_FROM_LLM = "--------------------------\nINPUT: " + command + "\n";
+                        current_input = command;
+                        state = SCRIPT_STATE::EXECUTE_COMMAND;
+                    }
+                    break;
+                }
+
+                case SCRIPT_STATE::WAIT_ENTER:
+                {
+                    if (instance_comms.ENTER_PRESSED)
+                    {
+                        instance_comms.ENTER_PRESSED = false;
+                        ++i;
+                        state = SCRIPT_STATE::GET_COMMAND;
+                    }
+                    break;
+                }
+
+                case SCRIPT_STATE::WAIT_ASK:
+                {
+                    if (instance_comms.ENTER_PRESSED)
+                    {
+                        instance_comms.ENTER_PRESSED = false;
+                        current_input = instance_comms.INPUT_FROM_USER;
+                        state = SCRIPT_STATE::EXECUTE_COMMAND;
+                    }
+                    break;
+                }
+
+                case SCRIPT_STATE::EXECUTE_COMMAND:
+                {
+                    instance_comms.INPUT_FROM_USER = current_input;
+
+                    // Run send() on its own thread instead of calling it
+                    // directly here - it's a blocking HTTP call, so calling
+                    // it inline would freeze this loop's own
+                    // io_worker.exchange() below for the whole request,
+                    // preventing anything from streaming to screen until it
+                    // returned. Same pattern as ollama_system::input()
+                    // (olla.cpp) and sidetrack.cpp's own
+                    // start_second_guess_call().
+                    instance.status.interrupt_signal = false;
+                    instance.is_processing = true;
+                    if (instance.chat_thread.joinable()) instance.chat_thread.join();
+                    instance.chat_thread = std::thread([&instance, &instance_comms, &tools_list]()
+                    {
+                        instance.send(tools_list, instance_comms, "user");
+                        instance.is_processing = false;
+                    });
+
+                    state = SCRIPT_STATE::WAIT_RESPONSE;
+                    break;
+                }
+
+                case SCRIPT_STATE::WAIT_RESPONSE:
+                {
+                    if (!instance.is_processing && instance.chat_thread.joinable())
+                    {
+                        instance.chat_thread.join();
+                    }
+
+                    bool response_finished = !instance.is_processing &&
+                                              instance.last_received.complete &&
+                                              instance.last_received.tool_calls.empty();
+
+                    if (response_finished)
+                    {
+                        instance.last_received.complete = false;
+                        ++i;
+                        state = SCRIPT_STATE::GET_COMMAND;
+                    }
+                    break;
+                }
+
+                case SCRIPT_STATE::DONE:
+                    break;
+            }
+
+            io_worker.exchange(instance_comms, tools_list);
         }
+
+        // Safety net - WAIT_RESPONSE already joins instance.chat_thread once
+        // is_processing clears, so this is normally a no-op by the time we
+        // get here; just making sure nothing joinable is left dangling.
+        if (instance.chat_thread.joinable())
+        {
+            instance.chat_thread.join();
+        }
+
+        // WAIT_RESPONSE resets this to false right after each command
+        // (including the last one) so it can tell a finished command from
+        // a still-in-flight one - see its own comment. Setting it back to
+        // true here, once the whole script is done, is what lets
+        // ollama_system::process()'s PART 2 (olla.cpp) recognize this
+        // instance as finished and erase it from chat.background_tasks;
+        // without this it would never be freed.
+        //
+        // last_received.response still holds the final command's reply -
+        // cleared here too, otherwise PART 2's own "if the task produced a
+        // response, relay it" check (olla.cpp) would fire a second,
+        // redundant narration of the same completion chat.integrate_tool_
+        // result() below already reports.
+        instance.last_received.complete = true;
+        instance.last_received.response.clear();
 
         {
             success_log = "SUCCESS: Automation Complete";
@@ -571,13 +680,13 @@ void TOOL_TASK_RUNNER::handle_tool(ollama_system& chat, std::vector<std::unique_
     }
 }
 
-bool TOOL_TASK_RUNNER::check(ollama_system& chat, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms, const ToolCall& tc) {
+bool TOOL_TASK_RUNNER::check(IO_WORKER_CLASS& io_worker, ollama_system& chat, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms, const ToolCall& tc) {
     if (tc.name != "run_automation_task")
         return false;
 
     chat.log("[System] Tool call received: " + tc.name + "\n");
 
-    handle_tool(chat, tools_list, comms, tc.name, tc.arguments, tc.id);
+    handle_tool(io_worker, chat, tools_list, comms, tc.name, tc.arguments, tc.id);
 
     return true;
 }
@@ -590,14 +699,8 @@ void TOOL_TASK_RUNNER::monitor_tool(ollama_system&, CLASS_SYSTEM*, std::vector<s
 // then routes to whichever tool's check() claims tc.name (see the
 // TOOL_BASE comment in tools.h) - an unrecognized name gets an error
 // result back instead of ever reaching a tool.
-void ollama_system::dispatch_tool_call(const ToolCall& tc, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms, std::atomic<bool>& Keyboard_Input_Enabled)
+void ollama_system::dispatch_tool_call(IO_WORKER_CLASS& io_worker, const ToolCall& tc, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms)
 {
-    // TODO: special-cased until ollama_system can reach CLASS_SYSTEM
-    // directly (see TODO.md) - only run_automation_task needs the main
-    // keyboard input disabled while its spawned instance runs.
-    bool disable_keyboard = (tc.name == "run_automation_task");
-    if (disable_keyboard) Keyboard_Input_Enabled = false;
-
     // Guard against a runaway chain - see tool_calls_this_turn's comment in
     // olla.h. Deliberately calls send_tool_result() only, not
     // integrate_tool_result() - the latter is what would start another
@@ -607,25 +710,22 @@ void ollama_system::dispatch_tool_call(const ToolCall& tc, CLASS_SYSTEM* system,
     if (tool_calls_this_turn >= PROPS.max_tool_calls_per_turn) {
         log("[System] Tool call capped this turn: " + tc.name + "\n");
         send_tool_result(tc.id, "Error: Too many tool calls this turn - stopping here to avoid a loop.");
-        if (disable_keyboard) Keyboard_Input_Enabled = true;
         return;
     }
     ++tool_calls_this_turn;
 
     bool handled = false;
     for (auto& tool : tools_list) {
-        if (tool->check(*this, system, tools_list, comms, tc)) { handled = true; break; }
+        if (tool->check(io_worker, *this, system, tools_list, comms, tc)) { handled = true; break; }
     }
 
     if (!handled) {
         log("[System] Tool error call received: " + tc.name + "\n");
         send_tool_result(tc.id, "Error: Tool '" + tc.name + "' is not recognized by the system.");
     }
-
-    if (disable_keyboard) Keyboard_Input_Enabled = true;
 }
 
-void ollama_system::handle_instance_tools(CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms, std::atomic<bool>& Keyboard_Input_Enabled)
+void ollama_system::handle_instance_tools(IO_WORKER_CLASS& io_worker, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms)
 {
     // System-injected calls (e.g. a timer's on_expire action - see
     // TOOL_REMOTE::monitor_tool()) - drained independently of the model's
@@ -637,7 +737,7 @@ void ollama_system::handle_instance_tools(CLASS_SYSTEM* system, std::vector<std:
         while (!pending_tool_calls.empty()) {
             ToolCall tc = pending_tool_calls.front();
             pending_tool_calls.pop();
-            dispatch_tool_call(tc, system, tools_list, comms, Keyboard_Input_Enabled);
+            dispatch_tool_call(io_worker, tc, system, tools_list, comms);
         }
     }
 
@@ -651,7 +751,7 @@ void ollama_system::handle_instance_tools(CLASS_SYSTEM* system, std::vector<std:
         last_received.tool_calls.clear();
 
         for (auto& tc : pending_calls) {
-            dispatch_tool_call(tc, system, tools_list, comms, Keyboard_Input_Enabled);
+            dispatch_tool_call(io_worker, tc, system, tools_list, comms);
         }
     }
 }

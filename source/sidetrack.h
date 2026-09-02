@@ -57,15 +57,6 @@ class SIDETRACK_CLASS
         double SECOND_GUESS_WAIT_TIME = 2.0 * 1000.0; // ms
         TIMED_IS_READY_SIMPLE SECOND_GUESS_WAIT_TIMER;
 
-        // handle_instance_tools()'s own gate for a model-issued
-        // run_automation_task call (see its own comment in olla.h) - kept
-        // entirely separate from the real io_worker.key_input.PROPS.ENABLED
-        // so that if the review ever did trigger an automation, it couldn't
-        // actually disable the real user's keyboard. Nothing else reads
-        // this, so isolating it here is a no-op in practice, just a safety
-        // margin.
-        std::atomic<bool> second_guess_keyboard_enabled{false};
-
         // history.size() as of the end of the last check() tick - a
         // real submission, tool result, or anything else that grows
         // history counts as activity too, not just an in-flight
@@ -85,7 +76,7 @@ class SIDETRACK_CLASS
         TIMED_IS_READY_SIMPLE PERSISTENT_CHECK_TIMER;
         size_t MAX_CONTEXT_SIZE = 200; // messages - tune as needed
 
-        void run_second_guess(ollama_system& main_instance, COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, CLASS_SYSTEM* system);
+        void run_second_guess(IO_WORKER_CLASS& io_worker, ollama_system& main_instance, COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, CLASS_SYSTEM* system);
         void persistent_time_checks(ollama_system& main_instance);
         void run_consolidation(ollama_system& main_instance);
         void run_clear_context(ollama_system& main_instance);
@@ -97,7 +88,7 @@ class SIDETRACK_CLASS
         // which this uses and which forces LOAD_SAVE_HISTORY_ON_DISK off
         // (this instance's history is scratch, never the real history.json).
         void create(OLLAMA_SYSTEM_PROPERTIES Properties);
-        void check(ollama_system& main_instance, COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, CLASS_SYSTEM* system);
+        void check(IO_WORKER_CLASS& io_worker, ollama_system& main_instance, COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, CLASS_SYSTEM* system);
 
         // Test/debug hook - skips IDLE_WAIT_TIMER_FOR_CONSOLIDATION and runs
         // the consolidation pass immediately. The real check()-driven path

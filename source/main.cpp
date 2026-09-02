@@ -304,11 +304,11 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
             // Dispatches any pending tool calls, flushes new text to TTS
             // (write_to_tts), periodically writes history to disk if it
             // changed. See ollama_system::process in olla.cpp.
-            chat.process(&system, tools_list, comms, io_worker.key_input.PROPS.ENABLED);
+            chat.process(io_worker, &system, tools_list, comms);
 
             // Runs sidetrack's main-thread half of both routines' state
             // machines - see SIDETRACK_CLASS::check's doc comment.
-            sidetrack.check(chat, comms, tools_list, &system);
+            sidetrack.check(io_worker, chat, comms, tools_list, &system);
 
             //if (sidetrack.SIGNALS.CONTEXT_CLEARED_SIGNAL)
             //{

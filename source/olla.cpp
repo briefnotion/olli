@@ -878,7 +878,7 @@ bool ollama_system::input(COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>&
  * 4. Trigger background consolidation (memory cleanup) every 60 seconds.
  */
 
-void ollama_system::process(CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms, std::atomic<bool>& Keyboard_Input_Enabled)
+void ollama_system::process(IO_WORKER_CLASS& io_worker, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms)
 {
     // ---------------------------------------------------------
     // PART 0: WRITE HISTORY TO FILE
@@ -903,7 +903,7 @@ void ollama_system::process(CLASS_SYSTEM* system, std::vector<std::unique_ptr<TO
     // ---------------------------------------------------------
     // PART 1: PROCESS MAIN CHAT TOOLS
     // ---------------------------------------------------------
-    handle_instance_tools(system, tools_list, comms, Keyboard_Input_Enabled);
+    handle_instance_tools(io_worker, system, tools_list, comms);
 
     // ---------------------------------------------------------
     // PART 2: MANAGE BACKGROUND TASKS
@@ -930,7 +930,7 @@ void ollama_system::process(CLASS_SYSTEM* system, std::vector<std::unique_ptr<TO
         // tools_list keeps this call always-valid without needing to keep a
         // second tools_list alive across ticks for an instance that's
         // already done.
-        task_instance.handle_instance_tools(system, tools_list, task_comms, Keyboard_Input_Enabled);
+        task_instance.handle_instance_tools(io_worker, system, tools_list, task_comms);
 
         // B. Thread Management: Join finished network threads
         if (!task_instance.is_processing && task_instance.chat_thread.joinable()) {

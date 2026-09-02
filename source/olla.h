@@ -241,15 +241,12 @@ class ollama_system {
         // Shared by both call sources handle_instance_tools() drains (the
         // model's own last_received.tool_calls, and the system-injected
         // pending_tool_calls) - same cap check, same tools_list dispatch,
-        // same "unrecognized name" fallback either way. Keyboard_Input_Enabled
-        // is only ever actually toggled for a model-issued run_automation_task
-        // call (see its own TODO comment in tools.cpp) - always true for
-        // anything from pending_tool_calls, which never contains that name.
+        // same "unrecognized name" fallback either way.
         // 'system' is just forwarded to each tool's check() - see that
         // parameter's own comment on TOOL_BASE::check() (tools.h). 'tools_list'
         // is the caller's own - see its comment on process() below for why
         // this is a reference parameter now, not a member.
-        void dispatch_tool_call(const ToolCall& tc, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms, std::atomic<bool>& Keyboard_Input_Enabled);
+        void dispatch_tool_call(IO_WORKER_CLASS& io_worker, const ToolCall& tc, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms);
 
         bool saveHistoryToJson(std::filesystem::path filepath);
         bool loadHistoryFromJson(std::filesystem::path filepath);
@@ -278,7 +275,7 @@ class ollama_system {
         // tool's check()/monitor_tool(). 'tools_list' is the caller's own -
         // see process()'s comment below for why this moved to a reference
         // parameter instead of living on ollama_system.
-        void handle_instance_tools(CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms, std::atomic<bool>& Keyboard_Input_Enabled);
+        void handle_instance_tools(IO_WORKER_CLASS& io_worker, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms);
 
         // Explicit flush to disk, e.g. right after consolidation commits or on shutdown.
         void save_history();
@@ -461,7 +458,7 @@ class ollama_system {
         // private one, the automation instance's own local one) supplies a
         // real, always-valid tools_list of its own - never null, because a
         // reference can't be.
-        void process(CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms, std::atomic<bool>& Keyboard_Input_Enabled);
+        void process(IO_WORKER_CLASS& io_worker, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms);
 
 };
 

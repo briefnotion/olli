@@ -29,9 +29,9 @@ static void start_second_guess_call(ollama_system& instance, COMMS& comms,
 // - joins the thread once it's done, and reports whether this round is
 // truly finished: not just "the network call returned," but also "no tool
 // call is still sitting there waiting to be dispatched or narrated."
-static bool poll_second_guess_call(ollama_system& instance, COMMS& comms,
+static bool poll_second_guess_call(IO_WORKER_CLASS& io_worker, ollama_system& instance, COMMS& comms,
                                     std::vector<std::unique_ptr<TOOL_BASE>>& tools_list,
-                                    CLASS_SYSTEM* system, std::atomic<bool>& keyboard_enabled)
+                                    CLASS_SYSTEM* system)
 {
     // comms is the real main chat's own. ollama_system::input() (olla.cpp)
     // only clears INTERRUPTED when it's the one consuming it - gated on its
@@ -51,7 +51,7 @@ static bool poll_second_guess_call(ollama_system& instance, COMMS& comms,
         DEBUG_LOG_CLASS::instance().log_event("sidetrack-second-guess", "interrupted mid-response - stopping");
     }
 
-    instance.handle_instance_tools(system, tools_list, comms, keyboard_enabled);
+    instance.handle_instance_tools(io_worker, system, tools_list, comms);
 
     if (!instance.is_processing && instance.chat_thread.joinable())
     {
@@ -67,7 +67,7 @@ static bool poll_second_guess_call(ollama_system& instance, COMMS& comms,
     return !instance.is_processing && instance.last_received.tool_calls.empty();
 }
 
-void SIDETRACK_CLASS::run_second_guess(ollama_system& main_instance, COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, CLASS_SYSTEM* system)
+void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ollama_system& main_instance, COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, CLASS_SYSTEM* system)
 {
     // A finished review (stage 100) otherwise has no way back to 0 - a new
     // ASSISTANT REPLY completing is what should make that happen, same idea
@@ -201,7 +201,7 @@ void SIDETRACK_CLASS::run_second_guess(ollama_system& main_instance, COMMS& comm
         // dispatching/narrating any tool call it decides to make (e.g.
         // actually checking whether a light it claimed was turned on
         // really is).
-        if (!poll_second_guess_call(SIDETRACK_CHAT_INSTANCE, comms, tools_list, system, second_guess_keyboard_enabled))
+        if (!poll_second_guess_call(io_worker, SIDETRACK_CHAT_INSTANCE, comms, tools_list, system))
         {
             return; // still working - try again next tick, do nothing else this one
         }
@@ -245,7 +245,7 @@ void SIDETRACK_CLASS::run_second_guess(ollama_system& main_instance, COMMS& comm
     else if (second_guess_stage == 5)
     {
         // Waiting on the second ("say/do it") call - same shape as stage 3.
-        if (!poll_second_guess_call(SIDETRACK_CHAT_INSTANCE, comms, tools_list, system, second_guess_keyboard_enabled))
+        if (!poll_second_guess_call(io_worker, SIDETRACK_CHAT_INSTANCE, comms, tools_list, system))
         {
             return;
         }
@@ -588,7 +588,7 @@ void SIDETRACK_CLASS::create(OLLAMA_SYSTEM_PROPERTIES Properties)
     PERSISTENT_CHECK_TIMER.set(PERSISTENT_CHECK_INTERVAL);
 }
 
-void SIDETRACK_CLASS::check(ollama_system& main_instance, COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, CLASS_SYSTEM* system)
+void SIDETRACK_CLASS::check(IO_WORKER_CLASS& io_worker, ollama_system& main_instance, COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, CLASS_SYSTEM* system)
 {
     // I'm trying to keep this function non blocking.
 
@@ -619,7 +619,7 @@ void SIDETRACK_CLASS::check(ollama_system& main_instance, COMMS& comms, std::vec
 
 
     // Second Guess Routine
-    run_second_guess(main_instance, comms, tools_list, system);
+    run_second_guess(io_worker, main_instance, comms, tools_list, system);
 
 
     // if all stages at 100, do not reset until something happens in main.

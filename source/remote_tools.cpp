@@ -253,7 +253,7 @@ bool TOOL_REMOTE::read_line_blocking(std::string& out, int timeout_ms)
     }
 }
 
-bool TOOL_REMOTE::check(ollama_system& chat, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms, const ToolCall& tc)
+bool TOOL_REMOTE::check(IO_WORKER_CLASS&, ollama_system& chat, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms, const ToolCall& tc)
 {
     bool is_mine = false;
     for (auto& def : tool_defs) {

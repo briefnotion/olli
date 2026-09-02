@@ -45,16 +45,17 @@ not needed elsewhere.
     design discussion this came from if reviving that idea - the real
     blocker was sidetrack/task-runner needing real tools but no safe
     `CLASS_SYSTEM`, not a technical one). Remote tools still only ever
-    register onto main chat's `tools_list` (`main.cpp`) - sidetrack/task-
-    runner still can't see them, deliberately, for now (see the sidetrack
-    rewrite entry below).
+    register onto main chat's `tools_list` (`main.cpp`) - task-runner
+    automation instances can see them too now (2026-09-02, see the
+    task-runner rewrite entry below); sidetrack still can't, deliberately
+    (see its own entry's data-race/single-connection concern).
   - **Done 2026-08-27: `TOOL_PERMISSIONS_CLASS` dropped entirely**, not
     redone - confirmed genuinely dead weight first: every flag was already
     hardcoded `true` (`main.cpp`), and remote tools (the majority of what's
     actually used) never checked it at all. Removed the class
     (`tools_helper.h`), the member on `ollama_system`/`TASK_SIMPLE`, and
     every gate check in `tools.cpp`.
-  - The task-runner display bug above.
+  - **Done 2026-09-02: the task-runner display bug below.**
   - General polish pass over the existing tool set (Hue lights, timers, web
     search, task runner) beyond the structural rework itself.
 
@@ -327,18 +328,17 @@ not needed elsewhere.
   `staged` - reuses each tool's own `register_tool()` into a throwaway json
   array rather than adding a separate name-only accessor to `TOOL_BASE`, so
   there's one source of truth for what counts as "available."
-- **Task runner (`TOOL_TASK_RUNNER::handle_tool`, tools.cpp) doesn't display
-  text correctly during an automation** - running `run system test`
-  (2026-08-21) surfaced this. One specific cause is already fixed: its local
-  `KEYBOARD_INPUT` never set `PROPS.RAW_ECHO = false`, so raw keystrokes
-  (including a literal `\r\n` on Enter) were echoed straight to the terminal
-  every tick while ncurses owned the screen, corrupting the display - see
-  `KEYBOARD_INPUT_PROPERTIES::RAW_ECHO`'s comment in user_io.h. Still
-  outstanding: the function's own `cout <<`/`std::cout <<` debug prints
-  (`"PRESS ENTER TO CONTINUE"`, `"REQUEST: ..."`, `"INPUT: ..."`) write
-  straight to the terminal too, bypassing the buffer-pull pattern (see below)
-  the rest of the codebase uses for exactly this reason - they should route
-  through `chat.log()`/`response_buffer` like everything else instead.
+- **Done 2026-09-02: task runner (`TOOL_TASK_RUNNER::handle_tool`,
+  tools.cpp) display bug, root cause fully resolved.** Originally: running
+  `run system test` (2026-08-21) surfaced raw keystrokes (including a
+  literal `\r\n` on Enter) echoing straight to the terminal every tick
+  while ncurses owned the screen (the local `KEYBOARD_INPUT`'s
+  `PROPS.RAW_ECHO` never set to `false`), plus the function's own
+  `cout <<` debug prints bypassing the buffer-pull pattern entirely. Both
+  are gone now - the whole function was rewritten to a state-machine loop
+  driving `comms`/`io_worker.exchange()` like everything else, with no
+  local `KEYBOARD_INPUT` or raw `cout` left at all. See the task-runner
+  rewrite entry under "Session & model behavior" for full detail.
 - **Filter tool calls and other non-conversational text out of the chat
   log** - `OUTPUT_CLASS::append_to_chat_log()` (user_io.cpp) just logs
   whatever flows through `chat_response`, same as the screen shows. Seen
@@ -733,6 +733,117 @@ Two-part plan, in order:
      unconfirmed as the actual cause - worth a real fix (e.g. only ever
      set `key_input.INTERRUPTED` alongside a real `ENTER_PRESSED`,
      matching how a real keypress already pairs them) if it recurs.
+
+### Task-runner rewrite (2026-09-02): state machine, live streaming, real tool access, leak fix
+
+`TOOL_TASK_RUNNER::handle_tool()` (tools.cpp) rewritten from three separate
+nested blocking `while` loops (one each for a plain command, `[[ENTER TO
+CONTINUE]]`, and `[[ASK]]`, each spinning its own `io_worker.exchange()`
+calls) into one flat `while` loop over an explicit `SCRIPT_STATE` enum
+(`GET_COMMAND`/`EXECUTE_COMMAND`/`WAIT_RESPONSE`/`WAIT_ENTER`/`WAIT_ASK`/
+`DONE`) - `instance.process()` and `io_worker.exchange()` each run exactly
+once per tick regardless of state, mirroring the shape of `main.cpp`'s own
+loop and `process()`'s existing PART 2 background-task poll. Several real,
+previously-latent bugs found and fixed along the way:
+
+- **`IO_WORKER_CLASS&` threaded through the tool-dispatch chain.** Added to
+  `TOOL_BASE::check()` (and all four overrides: `TOOL_SET_THINKING_MODE`,
+  `TOOL_WEB_SEARCH`, `TOOL_TASK_RUNNER`, `TOOL_REMOTE`), `dispatch_tool_call()`,
+  `handle_instance_tools()`, `process()` (olla.h/.cpp, tools.h/.cpp,
+  remote_tools.h/.cpp), and `SIDETRACK_CLASS::check()`/`run_second_guess()`/
+  the file-local `poll_second_guess_call()` (sidetrack.h/.cpp), since
+  sidetrack also calls `handle_instance_tools()` directly. `main.cpp` passes
+  the real `io_worker` at both call sites (`chat.process(...)`,
+  `sidetrack.check(...)`).
+- **`Keyboard_Input_Enabled`/`disable_keyboard` special-case removed from
+  `dispatch_tool_call()` entirely** (was: a hardcoded `tc.name ==
+  "run_automation_task"` string check toggling a `std::atomic<bool>&`
+  threaded through `process()`/`handle_instance_tools()`/
+  `dispatch_tool_call()` purely for this one tool - flagged as a stopgap by
+  its own TODO comment). No longer needed now that `TOOL_TASK_RUNNER` holds
+  `io_worker` directly. Removing it also let `SIDETRACK_CLASS`'s own
+  `second_guess_keyboard_enabled` - a deliberate fake placeholder so
+  sidetrack's review instance could never touch the real keyboard state via
+  the old mechanism - be deleted too, since sidetrack now gets the real
+  `io_worker` reference instead (harmless today since nothing yet toggles
+  keyboard-enabled state from `handle_tool()` - see the deferred item
+  below).
+- **Live streaming actually works now - two separate fixes needed.**
+  (1) `EXECUTE_COMMAND` used to call `instance.send()` directly/
+  synchronously - a blocking HTTP call, so the loop's own
+  `io_worker.exchange()` couldn't run *during* a request, only after it
+  fully returned. Now spawns `instance.chat_thread` (same pattern
+  `ollama_system::input()` and `sidetrack.cpp`'s own
+  `start_second_guess_call()` already use), so `WAIT_RESPONSE` can poll
+  `!instance.is_processing` while `io_worker.exchange()` keeps flushing
+  each tick. (2) Separately, `instance.PROPS.stream_output` was hardcoded
+  `false` (present since before this rewrite too) - since that's the
+  specific gate on whether streamed chunks reach `comms.INPUT_FROM_LLM` at
+  all (`send()`'s streaming callback, olla.cpp), the model's actual answers
+  never reached the screen regardless of fix (1) - only a trailing `"\n"`
+  did. `stream_thinking`/`use_thinking` staying default-`true` meant
+  reasoning text streamed live the whole time, masking this - easy to
+  mistake for "streaming already works." Flipped `stream_output` to `true`.
+  Confirmed live post-fix (weather-in-New-York answer visibly appeared on
+  screen, previously invisible).
+- **Automation instance now shares the caller's real `tools_list`, not a
+  separately-built one.** Previously built its own via
+  `populate_default_tools()` (thinking-mode/web-search/task-runner only) -
+  since `TOOL_REMOTE` instances only ever get added to `main.cpp`'s own
+  `tools_list` dynamically as devices register, and are `unique_ptr`-owned
+  (can't exist in two vectors at once), the automation instance could never
+  see or control any real connected device, and `TOOL_REMOTE::monitor_tool()`'s
+  keep-alive ping never ran for it either. Confirmed live before the fix:
+  "turn off all the lights" got a generic "I can't control smart devices
+  directly" answer instead of an actual tool call. `instance.open()`/
+  `send()`/`process()` all use the real `tools_list` now - also resolves a
+  lifetime concern the old comment was reasoning about (the local
+  `automation_tools_list` outliving its own scope via `instance` sitting in
+  `chat.background_tasks` after `handle_tool()` returns; the real
+  `tools_list` is already the same long-lived reference PART 2's cleanup
+  pass uses).
+- **`instance_comms` (from `spawn_background_task()`) now actually used** -
+  was created but every `send()`/`process()` call used the *main* chat's
+  own `comms` instead, so the automation's own I/O and the main chat's own
+  were the same buffers. Now isolated: everything inside the loop uses
+  `instance_comms`; only the pre-loop status line and the post-loop
+  `chat.send_tool_result()`/`integrate_tool_result()` calls (intentionally
+  reporting back to the real conversation) still use the real `comms`.
+- **`chat.background_tasks` leak fixed.** `WAIT_RESPONSE` resets
+  `instance.last_received.complete = false` after every command (including
+  the last one, to distinguish a finished command from a still-in-flight
+  one) - and nothing ever set it back to `true` afterward, so
+  `ollama_system::process()`'s PART 2 (`is_finished = !is_processing &&
+  last_received.complete && ...`) could never recognize a finished
+  automation instance as done, and its `unique_ptr<ollama_system>`+`COMMS`
+  just accumulated in `background_tasks` forever - present in the original
+  pre-rewrite code too (same unconditional reset after every command),
+  despite an inline comment claiming "the very next completion check below
+  erases it." Fixed by explicitly setting `complete = true` once the whole
+  script is done, right before returning - also clears
+  `last_received.response` at the same time, otherwise PART 2's own
+  separate "if the task produced a response, relay it" check would fire a
+  second, redundant narration of the same completion
+  `integrate_tool_result()` already reports.
+- Live-tested end to end against `run system test` (streaming, `[[ASK]]`,
+  `[[ENTER TO CONTINUE]]`, real tool dispatch, all confirmed via
+  `debug_full_history.txt` timestamps). `run process resume` not yet
+  exercised with the new loop.
+
+**Deferred, not fixed:**
+- No keyboard-enable/interrupt handling during an automation -
+  `io_worker.key_input.PROPS.ENABLED` management was deliberately left out
+  for now (manual workaround: don't type until a script step is actually
+  asking). Two known consequences: a keystroke typed before `WAIT_ENTER`/
+  `WAIT_ASK` sits stale in `instance_comms` and gets misread as the answer
+  to whatever prompt is reached next; and `comms.INTERRUPTED` is never
+  checked anywhere in the state machine, so there's currently no way to
+  abort a running automation once started.
+- Whether sidetrack's second-guess review should be suppressed after an
+  automation-driven reply - confirmed it currently reviews them like any
+  other assistant turn (`run_second_guess()`'s trigger is role-based, not
+  source-based, so it can't tell), decided to defer the actual design call
+  rather than fix it blind.
 
 ## Voice (Voca)
 

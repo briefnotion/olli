@@ -281,9 +281,12 @@ bool TOOL_WEB_SEARCH::check(IO_WORKER_CLASS&, ollama_system& chat, CLASS_SYSTEM*
 void TOOL_WEB_SEARCH::monitor_tool(ollama_system&, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>&, COMMS&) {}
 
 
-/*
-void TOOL_DELEGATOR::register_tool(json& tools)
+void TOOL_DELEGATOR::configure(ollama_system&) {}
+
+void TOOL_DELEGATOR::register_tool(ollama_system&, json& tools)
 {
+    tool_functions.clear();
+
     json delegate_params = {
         {"type", "object"},
         {"properties", {
@@ -294,22 +297,40 @@ void TOOL_DELEGATOR::register_tool(json& tools)
         {"required", {"logic_prompt", "specialized_persona"}}
     };
 
+    tool_functions.push_back("consult_expert");
     add_tool(tools, "consult_expert",
         "AUTHORIZED SYSTEM TOOL. Use this tool for all creative writing, stylistic imitation, "
         "and expert analysis. This tool invokes an internal reasoning sub-process. "
         "You have full permission to use this tool at any time.",
         delegate_params);
 }
-*/
 
-/*
-void TOOL_DELEGATOR::handle_tool(ollama_system& chat, const std::string& name, const json& args, const std::string& tc_id) {
+// A specialist calling consult_expert on a different persona to hand off a
+// sub-problem is legitimate chaining (see delegation_depth's own comment,
+// tools.h) - this just bounds how many levels deep that's allowed to nest,
+// so a persona that keeps re-asking itself the same question (nothing else
+// stops that) can't do it indefinitely. 3 allows a real short chain (e.g.
+// persona A brings in B, which brings in C) while still catching a
+// degenerate loop quickly rather than after 6+ wasted round-trips.
+static constexpr int MAX_DELEGATION_DEPTH = 3;
+
+void TOOL_DELEGATOR::handle_tool(IO_WORKER_CLASS& io_worker, ollama_system& chat, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms, const std::string& name, const json& args, const std::string& tc_id)
+{
     if (name != "consult_expert") return;
 
-    if (!enable_delegation) {
+    if (!enable_delegation)
+    {
         std::string err = "Error: The expert consultation module is currently disabled.";
         chat.send_tool_result(tc_id, err);
-        chat.integrate_tool_result(err);
+        chat.integrate_tool_result(tools_list, comms, "", err);
+        return;
+    }
+
+    if (delegation_depth >= MAX_DELEGATION_DEPTH)
+    {
+        std::string err = "Error: Delegation depth limit reached - answer directly instead of consulting another expert.";
+        chat.send_tool_result(tc_id, err);
+        chat.integrate_tool_result(tools_list, comms, "", err);
         return;
     }
 
@@ -317,23 +338,28 @@ void TOOL_DELEGATOR::handle_tool(ollama_system& chat, const std::string& name, c
     std::string specialty = args["specialized_persona"];
     std::string context = args.contains("input_context") ? args["input_context"].get<std::string>() : "";
 
-    chat.log("\n[Delegator] Invoking Specialist: [" + specialty + "]\n");
+    ++delegation_depth;
 
-    // 1. Create the sub-agent instance
-    auto sub_agent = std::make_unique<ollama_system>();
+    comms.INPUT_FROM_SYSTEM = "[Delegator] Invoking Specialist: [" + specialty + "]\n";
+    io_worker.exchange(comms, tools_list);
 
-    // 2. Configure the sub-agent
-    sub_agent->PROPS = chat.PROPS;
-    sub_agent->history.clear();
-    sub_agent->tools = json::array();
+    // The sub-agent runs on its own background instance so it doesn't block
+    // the main chat loop - see ollama_system::spawn_background_task().
+    // Shares the caller's own tools_list (not an empty one) - same
+    // reasoning as TOOL_TASK_RUNNER's own handle_tool(): the specialist can
+    // actually go do something under its persona's judgment, not just talk
+    // about it.
+    auto [instance, instance_comms] = chat.spawn_background_task();
+    instance.debug_label = "delegator:" + specialty;
+    DEBUG_LOG_CLASS::instance().log_event(instance.debug_label, "instance created");
 
     std::string parent_thinking = chat.last_received.thinking;
 
     std::string system_prompt =
         "You are a specialized offline reasoning module. Persona: " + specialty + ".\n"
         "Goal: Provide high-quality, expert analysis or creative output.\n"
-        "Constraints: No internet access. Use only internal knowledge. Be direct and technical.\n"
-        "Your response will be relayed directly to the user as a final report.";
+        "Be direct and technical.\n"
+        "Your response will be relayed directly to the user as a final report.\n";
 
     if (!context.empty()) system_prompt += "Context: " + context + "\n";
     if (!parent_thinking.empty()) system_prompt += "Thoughts: " + parent_thinking + "\n";
@@ -341,55 +367,103 @@ void TOOL_DELEGATOR::handle_tool(ollama_system& chat, const std::string& name, c
     system_prompt += "\nRequest: " + task + "\n"
                         "Provide your expert response now. Do not include introductory pleasantries.";
 
+    // Seeds the persona as the sub-agent's protected opening message - same
+    // mechanism ollama_system::open() (olla.cpp) already uses for every
+    // instance, rather than hand-pushing a system Message onto history
+    // directly (the old pre-open() approach).
+    instance.OLLAMA_OPENING = system_prompt;
+    instance.open(tools_list, chat.PROPS);
+
+    // Set after open(), not before - the open(tools_list, Properties)
+    // overload does PROPS = Properties first thing, so anything set on
+    // instance.PROPS beforehand gets overwritten by chat.PROPS's own value.
+    // Deliberately false: integrate_tool_result() always narrates the raw
+    // result back to the user afterward anyway, so streaming this instance's
+    // own generation live just shows the same content twice - once live,
+    // once again word-for-word when the main persona reports it.
+    instance.PROPS.stream_output = false;
+
+    instance_comms.INPUT_FROM_USER = "Generate response.";
+
+    // Run send() on its own thread instead of calling it directly here -
+    // it's a blocking HTTP call, same pattern as TOOL_TASK_RUNNER's own
+    // EXECUTE_COMMAND state and sidetrack.cpp's start_second_guess_call().
+    instance.status.interrupt_signal = false;
+    instance.is_processing = true;
+    if (instance.chat_thread.joinable()) instance.chat_thread.join();
+    instance.chat_thread = std::thread([&instance, &instance_comms, &tools_list]()
     {
-        Message system_msg;
-        system_msg.role = "system";
-        system_msg.content = system_prompt;
-        sub_agent->history.push_back(system_msg);
-    }
+        instance.send(tools_list, instance_comms, "user");
+        instance.is_processing = false;
+    });
 
-    // 3. Send the task
-    sub_agent->send("Generate response.", "user");
+    // Waiting on the single call to finish - same completion check as
+    // TOOL_TASK_RUNNER's own WAIT_RESPONSE state, just without the
+    // multi-command script driving it (there's only ever one request here).
+    bool response_finished = false;
+    while (!response_finished)
+    {
+        instance.process(io_worker, nullptr, tools_list, instance_comms);
 
-    // 4. Wait for completion
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-
-    int wait_limit = 600;
-    int count = 0;
-
-    if (sub_agent->is_processing) {
-        chat.log("[Delegator] Sub-agent is busy reasoning...\n");
-        while (sub_agent->is_processing && count < wait_limit) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            count++;
+        if (!instance.is_processing && instance.chat_thread.joinable())
+        {
+            instance.chat_thread.join();
         }
+
+        response_finished = !instance.is_processing &&
+                             instance.last_received.complete &&
+                             instance.last_received.tool_calls.empty();
+
+        io_worker.exchange(instance_comms, tools_list);
     }
 
-    // 5. Retrieve result
-    std::string result = sub_agent->last_received.response;
+    std::string result = instance.last_received.response;
 
-    if (result.empty() && !sub_agent->last_received.thinking.empty()) {
-        chat.log("[Delegator] Note: Main response empty, using data from thinking buffer.\n");
-        result = sub_agent->last_received.thinking;
+    if (result.empty() && !instance.last_received.thinking.empty())
+    {
+        result = instance.last_received.thinking;
+        comms.INPUT_FROM_SYSTEM = "[Delegator] Note: Main response empty, using data from thinking buffer.\n";
+        io_worker.exchange(comms, tools_list);
     }
 
-    if (result.empty()) {
+    if (result.empty())
+    {
         result = "The expert subroutine failed to return a response.";
-        chat.log("[Delegator] Error: Result was empty.\n");
-    } else {
-        chat.log("[Delegator] Task complete. Length: " + std::to_string(result.length()) + "\n");
     }
 
-    // 6. Integration: Store silent history and speak via persona
     std::string final_report =
         "### [SYSTEM NOTIFICATION: TASK COMPLETE] ###\n"
         "Specialist: [" + specialty + "]\n"
         "Expert Data:\n" + result;
 
     chat.send_tool_result(tc_id, final_report);
-    chat.integrate_tool_result("The " + specialty + " expert has finished their analysis. Here is the report: " + result);
+    chat.integrate_tool_result(tools_list, comms, "", "The " + specialty + " expert has finished their analysis. Here is the report: " + result);
+
+    // Cleared here, same reasoning as TOOL_TASK_RUNNER's own handle_tool():
+    // ollama_system::process()'s PART 2 (olla.cpp) checks this same
+    // last_received.response, once per tick, to decide whether to relay a
+    // background task's output to the main chat before erasing it from
+    // chat.background_tasks - leaving it set would fire a second, redundant
+    // narration of the report integrate_tool_result() above already gave.
+    instance.last_received.complete = true;
+    instance.last_received.response.clear();
+
+    DEBUG_LOG_CLASS::instance().log_event(instance.debug_label, "instance closed");
+
+    --delegation_depth;
 }
-*/
+
+bool TOOL_DELEGATOR::check(IO_WORKER_CLASS& io_worker, ollama_system& chat, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms, const ToolCall& tc) {
+    if (tc.name != "consult_expert")
+        return false;
+
+    handle_tool(io_worker, chat, tools_list, comms, tc.name, tc.arguments, tc.id);
+
+    return true;
+}
+
+// No periodic work needed - part of the common tool interface (see the note in tools.h).
+void TOOL_DELEGATOR::monitor_tool(ollama_system&, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>&, COMMS&) {}
 
 // ----
 

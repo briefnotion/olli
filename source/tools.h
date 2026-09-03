@@ -137,22 +137,52 @@ class TOOL_WEB_SEARCH : public TOOL_BASE
         void monitor_tool(ollama_system& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms) override;
 };
 
-// Disabled: recursive sub-agent delegation (a chat instance spawning a
-// secondary ollama_system to handle an isolated sub-task). Kept commented
-// out as a design reference, not wired into ollama_system - see the
-// matching commented-out block in tools.cpp for the implementation. Left
-// out of the TOOL_BASE hierarchy since it isn't part of tools_list.
-//
-//class TOOL_DELEGATOR {
-//    private:
-//
-//    public:
-//        // Testing switch: Turn this off to prevent the AI from spawning sub-agents
-//        bool enable_delegation = true;
-//
-//        void register_tool(json& tools);
-//        void handle_tool(ollama_system& chat, const std::string& name, const json& args, const std::string& tc_id);
-//};
+// Recursive sub-agent delegation - the model can hand a sub-question to a
+// specialist persona ("consult_expert"), which spawns an isolated
+// ollama_system sub-agent (chat.spawn_background_task(), same as
+// TOOL_TASK_RUNNER) to answer it, and relays the answer back as the tool
+// result. Was a design-reference sketch left out of the TOOL_BASE hierarchy
+// (predating the COMMS refactor - its old handle_tool()/register_tool()
+// signatures no longer matched anything callable); brought back in line
+// with TOOL_TASK_RUNNER's current shape.
+class TOOL_DELEGATOR : public TOOL_BASE
+{
+    private:
+        // Testing switch: Turn this off to prevent the AI from spawning sub-agents
+        bool enable_delegation = true;
+
+        // How many consult_expert calls are currently nested on the call
+        // stack right now - not "how many total delegations have happened."
+        // The sub-agent handle_tool() spawns gets the same shared tools_list
+        // (see handle_tool()'s own comment), which includes this very
+        // TOOL_DELEGATOR instance - so a specialist can call consult_expert
+        // itself, and that's intentional (a persona delegating a sub-problem
+        // to a different specialist is legitimate chaining). What isn't
+        // bounded without this: nothing stops a specialist from just asking
+        // itself the same question again with no new information, over and
+        // over. Incremented right before spawning a sub-agent, decremented
+        // right after - safe as a plain int rather than atomic, since every
+        // level of this recursion runs synchronously nested on the same
+        // calling thread (handle_tool()'s own wait loop blocks until its
+        // sub-agent finishes before returning - nothing else touches this
+        // object concurrently while that's in progress).
+        int delegation_depth = 0;
+
+        // Spawns a background ollama_system (chat.spawn_background_task())
+        // seeded with the requested persona as its system prompt, drives it
+        // to completion synchronously (same shape as TOOL_TASK_RUNNER's own
+        // handle_tool()), and relays its answer back as the tool result.
+        void handle_tool(IO_WORKER_CLASS& io_worker, ollama_system& chat, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms, const std::string& name, const json& args, const std::string& tc_id);
+
+    public:
+        void configure(ollama_system& chat) override;
+        void register_tool(ollama_system& chat, json& tools) override;
+        bool check(IO_WORKER_CLASS& io_worker, ollama_system& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms, const ToolCall& tc) override;
+
+        // No periodic work needed - same reasoning as TOOL_TASK_RUNNER's own
+        // no-op override.
+        void monitor_tool(ollama_system& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms) override;
+};
 
 class TOOL_TASK_RUNNER : public TOOL_BASE
 {

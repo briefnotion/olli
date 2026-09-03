@@ -733,6 +733,26 @@ Two-part plan, in order:
      unconfirmed as the actual cause - worth a real fix (e.g. only ever
      set `key_input.INTERRUPTED` alongside a real `ENTER_PRESSED`,
      matching how a real keypress already pairs them) if it recurs.
+   - **Confirmed and fixed 2026-09-03.** This was the actual cause of a
+     real, reproduced bug: interrupting mid-thinking-block during
+     second-guess left `comms.INTERRUPTED` stuck `true` forever (exactly
+     the narrow case above - a bare interrupt, no `ENTER_PRESSED`, while
+     `chat.is_processing` was false since second-guess only ever runs once
+     the main turn has already finished). Fixed in `sidetrack.cpp` at both
+     read sites (`poll_second_guess_call()` and the abort-before-starting
+     check in `run_second_guess()`) - each now clears `comms.INTERRUPTED`
+     itself right after consuming it, safe because `main.cpp`'s loop always
+     runs `chat.input()` before `sidetrack.check()` each tick, so main
+     chat already had first claim on the flag that same tick if it needed
+     it. A second, related bug found in the same investigation:
+     `poll_second_guess_call()`'s own "done" check required
+     `last_received.complete`, which is permanently `false` after an
+     interrupt - stalled stage 3/5 forever on any interrupt mid-call
+     (stage 4/6's own "handle an interrupted result gracefully" branches
+     existed but were unreachable as a result). Fixed by dropping
+     `complete` from that check entirely - `is_processing` false and
+     `tool_calls` empty is enough to mean "this call is over," clean or
+     not.
 
 ### Task-runner rewrite (2026-09-02): state machine, live streaming, real tool access, leak fix
 
@@ -844,6 +864,99 @@ previously-latent bugs found and fixed along the way:
   other assistant turn (`run_second_guess()`'s trigger is role-based, not
   source-based, so it can't tell), decided to defer the actual design call
   rather than fix it blind.
+
+### TOOL_DELEGATOR revived (2026-09-03): consult_expert, recursion depth cap, two open issues found in testing
+
+Was a commented-out design sketch (`tools.h`/`.cpp`, see git history for the
+pre-revival version) - predates the COMMS refactor entirely, so its old
+`register_tool(json&)`/`handle_tool(ollama_system&, ...)` signatures didn't
+match anything callable, and it was pulled out of the `TOOL_BASE` hierarchy
+as a result. Brought back in line with `TOOL_TASK_RUNNER`'s current shape:
+spawns a sub-agent via `chat.spawn_background_task()`, seeds its persona via
+`OLLAMA_OPENING` + `open(tools_list, chat.PROPS)` instead of hand-pushing a
+system `Message`, drives it with the same `chat_thread`+polling-loop pattern
+as everything else, and relays its answer via the modern 4-arg
+`integrate_tool_result()`. Registered in `populate_default_tools()`
+(`olla.cpp`) - live as `consult_expert` for the model to call like any other
+tool. The sub-agent shares the caller's own `tools_list`, deliberately (not
+the original's empty one - development had stopped before that mattered) -
+it can actually act under its persona's judgment, not just talk about it.
+
+- **`stream_output` ordering bug, fixed.** `open(tools_list, Properties)`
+  does `PROPS = Properties` first thing (`olla.cpp`), so anything set on
+  `instance.PROPS` *before* that call gets silently overwritten by
+  `chat.PROPS`'s own value. Set `stream_output = false` *after* `open()`
+  instead - deliberately off, since `integrate_tool_result()` always
+  narrates the raw result back to the user afterward anyway, so streaming
+  the sub-agent's own generation live just showed the same content twice
+  (confirmed live: a poem streamed once raw, then pasted again verbatim
+  inside the main persona's own reply - `[DIRECTOR_NOTE]`'s "report...
+  without changing the facts/values it contains" wording taken literally
+  for creative content). `TOOL_TASK_RUNNER::handle_tool()` sets
+  `stream_output` before its own `open()` call too - likely the same silent
+  no-op there, not fixed here, out of this task's scope.
+- **Recursion depth cap added** (`delegation_depth` member, max 3,
+  `tools.h`/`.cpp`). The sub-agent's shared `tools_list` includes
+  `TOOL_DELEGATOR` itself, so a specialist can call `consult_expert` on
+  itself - a *different* persona chaining in for a sub-problem is
+  legitimate (presumably the original intent), but nothing stopped a
+  persona from just re-asking itself the identical question with no new
+  information. Confirmed live: one "design a mood for movie night" request
+  recursed 6 levels deep before finally doing any real work, each hop a
+  full blocking network round-trip. Reentrant guard, safe as a plain `int`
+  (not atomic) since the whole chain runs synchronously nested on one
+  thread - `handle_tool()`'s own wait loop blocks until its sub-agent
+  finishes before anything else touches the object.
+- **Open, not fixed - empty-response bug.** After a successful
+  `set_hue_light` call deep in a recursive chain, `instance.last_received.
+  response` came back empty even though real work had just completed,
+  propagating "The expert subroutine failed to return a response." back up
+  through every nesting level - the lights had actually changed, but the
+  user was told they hadn't. Not yet isolated whether this needs deep
+  recursion to trigger, or can happen on a single ordinary delegation that
+  includes a tool call - the depth cap above stops the recursion but wasn't
+  confirmed to fix this specific symptom (the very next test run avoided it
+  via a different path: once blocked by the depth cap, the model just
+  fabricated a plausible-sounding text answer instead of calling the tool,
+  so the empty-response path never got exercised again either way).
+- **Open, not fixed - remote-tool heartbeat starves during any tool-result
+  narration, badly so during a deep delegation chain.**
+  `TOOL_REMOTE::monitor_tool()` (`remote_tools.cpp`) is what pings a
+  connected remote tool (e.g. `hue`) to keep it alive
+  (`PING_INTERVAL_SECONDS=5`, `DEAD_TIMEOUT_SECONDS=15`, `remote_tools.h`) -
+  called once per `process()` tick for every tool, which is fine during an
+  ordinary wait loop. The actual gap: `integrate_tool_result()`'s own
+  `this->send(tools_list, comms, "system")` (`olla.cpp`) is the one `send()`
+  call site in the whole codebase that isn't wrapped in a background
+  `std::thread` the way every other one is (`sidetrack.cpp`'s
+  `start_second_guess_call()`, `TOOL_TASK_RUNNER`/`TOOL_DELEGATOR`'s own
+  initial calls) - it blocks the calling thread for the entire network
+  round-trip (observed regularly taking ~15s on its own, right at
+  `DEAD_TIMEOUT_SECONDS`), during which nothing else runs, `monitor_tool()`
+  included. Not delegator-specific - a single ordinary tool call is already
+  marginal - but delegation's nesting stacks several of these blocking
+  windows on top of each other, making it far more likely to actually trip.
+  Confirmed live: the hue remote-tool connection went down mid-test during
+  a long recursive chain.
+  - Considered and set aside as too risky for now: threading
+    `integrate_tool_result()`'s `send()` call itself, reusing the existing
+    `chat_thread`/`is_processing` pair. Would likely "just work" for the
+    main chat's own top-level flow (`process()` PART 3, `olla.cpp`, already
+    tolerates `chat_thread` finishing on a later tick) but risks a real
+    race in every nested wait loop that already polls that same pair for
+    its *own* completion (`poll_second_guess_call()`, `TOOL_TASK_RUNNER`,
+    `TOOL_DELEGATOR`) - a loop could sample `is_processing` in the brief
+    gap between the tool-call-generating `send()` finishing and the
+    narration `send()` being launched, and conclude "done" before the
+    narration ever ran. Same shape as the empty-response bug above - not
+    confirmed to be the same bug, but suspicious.
+  - Preferred direction instead, deferred as a real cross-file change
+    (touches `tools/PROTOCOL.md` and every remote tool's own heartbeat
+    side, not just olli's): before a known-long blocking stretch, send
+    connected remote tools an explicit "standing by, don't go away" signal
+    instead of relying purely on the regular ping cadence - the remote side
+    would need to extend its own dead-timeout expectation on receiving it
+    rather than just resetting on real ping/pong traffic.
 
 ## Voice (Voca)
 

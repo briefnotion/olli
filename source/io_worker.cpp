@@ -1161,6 +1161,12 @@ void IO_WORKER_CLASS::exchange(COMMS& comms, std::vector<std::unique_ptr<TOOL_BA
             comms_buffer_audio.INPUT_FROM_SYSTEM += comms.INPUT_FROM_SYSTEM;
             comms.INPUT_FROM_SYSTEM.clear();
         }
+
+        // Plain assignment, not append-then-clear like the text buffers
+        // above - these are a current setting, not accumulating content, so
+        // there's nothing to clear on the source side either.
+        comms_buffer.INPUT_FROM_LLM_COLOR = comms.INPUT_FROM_LLM_COLOR;
+        comms_buffer.INPUT_FROM_USER_COLOR = comms.INPUT_FROM_USER_COLOR;
     }
 
     // Same direction as the block above (comms -> comms_buffer), just

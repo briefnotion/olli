@@ -42,6 +42,21 @@ namespace {
     // init_pair(1, ...) below, guarded by ncurses_colors_available.
     constexpr int PAIR_USER_INPUT_GREY = 1;
 
+    // Bright, distinct pair for a background task-runner automation
+    // instance's own comms (TOOL_TASK_RUNNER::handle_tool(), tools.cpp) -
+    // set on that instance's own instance_comms.INPUT_FROM_LLM_COLOR/
+    // INPUT_FROM_USER_COLOR (comms.h) so its output reads as visually
+    // separate from the main chat's white/grey. init_pair() calls below,
+    // guarded by ncurses_colors_available, same as pair 1 above.
+    constexpr int PAIR_TASK_RUNNER_LLM = 2;
+    constexpr int PAIR_TASK_RUNNER_USER = 3;
+
+    // Same idea, for a delegator sub-agent's own comms
+    // (TOOL_DELEGATOR::handle_tool(), tools.cpp) - distinct from both the
+    // main chat's white/grey and the task-runner's cyan/yellow above.
+    constexpr int PAIR_DELEGATOR_LLM = 4;
+    constexpr int PAIR_DELEGATOR_USER = 5;
+
     // How long the thinking box lingers after in_thinking_block drops
     // before it actually closes - see ncurses_thinking_closing's comment
     // in user_io.h.
@@ -1026,6 +1041,10 @@ void OUTPUT_CLASS::display_with_ncurses(const std::string& input_from_user_echo,
             start_color();
             use_default_colors(); // -1 below = terminal's own background, not a hardcoded one
             init_pair(PAIR_USER_INPUT_GREY, COLOR_WHITE, -1);
+            init_pair(PAIR_TASK_RUNNER_LLM, COLOR_CYAN, -1);
+            init_pair(PAIR_TASK_RUNNER_USER, COLOR_YELLOW, -1);
+            init_pair(PAIR_DELEGATOR_LLM, COLOR_MAGENTA, -1);
+            init_pair(PAIR_DELEGATOR_USER, COLOR_GREEN, -1);
         }
 
         std::signal(SIGWINCH, handle_sigwinch);
@@ -1170,9 +1189,12 @@ void OUTPUT_CLASS::display_with_ncurses(const std::string& input_from_user_echo,
 
     // Light grey (dimmed white) so what the user typed reads as visually
     // distinct from the assistant's replies (chat_response below stays
-    // plain/undecorated - see PAIR_USER_INPUT_GREY's comment).
+    // plain/undecorated - see PAIR_USER_INPUT_GREY's comment). Sourced from
+    // comms.INPUT_FROM_USER_COLOR (comms.h) now, not a local constant here -
+    // still defaults to the same COLOR_PAIR(1)|A_DIM this file's own
+    // init_pair(1, ...) call above sets up.
     int user_attr = 0;
-    if (ncurses_colors_available) user_attr = COLOR_PAIR(PAIR_USER_INPUT_GREY) | A_DIM;
+    if (ncurses_colors_available) user_attr = comms.INPUT_FROM_USER_COLOR;
 
     if (!user_input.empty())
     {
@@ -1201,9 +1223,11 @@ void OUTPUT_CLASS::display_with_ncurses(const std::string& input_from_user_echo,
 
     if (!chat_response.empty())
     {
-        // Plain/undecorated (whatever the terminal's default foreground
-        // is) - user_input above is the one that gets dimmed grey now.
-        chat_panel.append(chat_response, 0, ncurses_main_w);
+        // Sourced from comms.INPUT_FROM_LLM_COLOR (comms.h) now - defaults
+        // to 0, same plain/undecorated (terminal's own default foreground)
+        // rendering as before. user_input above is the one that gets
+        // dimmed grey now.
+        chat_panel.append(chat_response, comms.INPUT_FROM_LLM_COLOR, ncurses_main_w);
         append_to_chat_log(false, chat_response);
         chat_response.clear();
     }

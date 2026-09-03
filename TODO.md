@@ -318,6 +318,46 @@ not needed elsewhere.
 
 ## Display / OUTPUT_CLASS
 
+- **Done 2026-09-03: per-instance chat colors, driven by COMMS instead of
+  hardcoded in the display function.** `comms.h` gained two `int` fields,
+  `INPUT_FROM_LLM_COLOR`/`INPUT_FROM_USER_COLOR` - the ncurses attribute
+  value (`COLOR_PAIR(n) | A_DIM`-shaped) each buffer should render with,
+  same type `NCURSES_TEXT_PANEL::append()`'s own `attr` parameter already
+  takes (user_io.h). Defaults match what was already on screen (grey user
+  input via `COLOR_PAIR(1) | A_DIM`, `0`/plain for LLM output) - pulling in
+  `<ncursesw/curses.h>` for the macros was a deliberate, flagged tradeoff:
+  `comms.h` is included very widely and was previously ncurses-free by
+  design, and `PAIR_USER_INPUT_GREY`'s own pair index (1) is now duplicated
+  between `comms.h` and `user_io.cpp` rather than shared from one place -
+  kept simple on purpose, not revisited.
+  - `IO_WORKER_CLASS::exchange()` (io_worker.cpp) copies both fields from
+    the real `comms` into its own `comms_buffer` each tick, alongside the
+    existing text-buffer relay - plain assignment, not append-then-clear,
+    since a color is a current setting, not accumulating content.
+  - `display_with_ncurses()` (user_io.cpp) reads `comms.INPUT_FROM_USER_
+    COLOR`/`INPUT_FROM_LLM_COLOR` at its two render call sites now, instead
+    of a local `user_attr` variable and a bare `0`. `PAIR_USER_INPUT_GREY`
+    itself still only exists to `init_pair()` index 1 at ncurses startup -
+    nothing renders with it directly anymore.
+  - **Distinct colors given to background instances**, so their output
+    reads as visually separate from the main chat's white/grey: task-runner
+    automations (`TOOL_TASK_RUNNER::handle_tool()`) get bright cyan/yellow
+    (pair indices 2/3); delegator sub-agents (`TOOL_DELEGATOR::handle_tool()`)
+    get bright magenta/green (pair indices 4/5). Both set on the spawned
+    instance's own `instance_comms` right after `spawn_background_task()`,
+    same duplicated-index tradeoff as pair 1 above - `user_io.cpp` defines
+    and `init_pair()`s all of them, `tools.cpp` references the raw index
+    numbers directly (both files already reachable via the same include
+    chain, no new dependency).
+  - **Delegator's `stream_output` flipped back to `true`** (had been set
+    `false` earlier the same session specifically to stop a sub-agent's
+    answer from appearing twice - see the TOOL_DELEGATOR entry above).
+    With distinct colors now in place, the double appearance actually reads
+    as intentional: the live magenta/green stream shows the specialist
+    working, the final white/grey narration is the polished answer -
+    rather than looking like an accidental repeat, which is what it looked
+    like when both were the same color.
+
 - **Done 2026-08-27: right-side tools panel.** `display_with_ncurses()`
   (user_io.cpp) now reserves a fixed-width column on the right (`win_tools`,
   full screen height, hidden below ~43 total columns rather than squeezing
@@ -957,6 +997,49 @@ it can actually act under its persona's judgment, not just talk about it.
     instead of relying purely on the regular ping cadence - the remote side
     would need to extend its own dead-timeout expectation on receiving it
     rather than just resetting on real ping/pong traffic.
+
+- **Separate remote-tool bug found and fixed the same session (2026-09-03):
+  event/result race in `TOOL_REMOTE::check()` (`remote_tools.cpp`) -
+  unrelated to the heartbeat-starvation issue directly above despite living
+  in the same class.** `check()` and `monitor_tool()` both read off the
+  same per-connection socket - `check()` blocks waiting specifically for
+  the `"result"` matching its own call's `call_id`, `monitor_tool()`
+  non-blocking-polls each tick for anything else (`"ping"`/`"event"`).
+  Previously, if the remote tool pushed an unsolicited event (e.g.
+  `tools/clock/clock.cpp` noticing a timer expired) at the exact moment
+  `check()` was mid-wait, `check()`'s blocking read consumed that line
+  first, saw it wasn't a matching `"result"`, and reported a garbled
+  `"Error: unexpected response from remote tool."` - the event itself was
+  silently lost rather than ever reaching `monitor_tool()`'s own handling.
+  Confirmed live: a `check_timer` call failing this exact way right after a
+  `[TIMER EXPIRED]` push landed moments earlier in `run system test`
+  testing.
+  - **Not a wrong-tool-selection issue** - `is_mine`'s check at the top of
+    `check()` already confirms `tc.name` belongs to this specific
+    connection before any of this runs, and a genuinely invalid request
+    (e.g. a timer label that doesn't exist) comes back as a clean, real
+    `"error"` result from the remote tool, handled by a separate branch -
+    neither of those reach this code path at all.
+  - **Fixed by turning `check()`'s single read into a small loop**, bounded
+    by the same overall 5-second budget (shrinking each pass via
+    `read_line_blocking()`'s own timeout parameter): a `"ping"` gets
+    replied to and waiting continues; an `"event"` is handled inline (same
+    narration/`tool_calls_this_turn`-reset/queued-action logic
+    `monitor_tool()`'s own event branch already has, duplicated rather than
+    extracted into a shared helper - deliberately kept to this one function,
+    not touching `monitor_tool()` or the header) and waiting continues;
+    anything else (malformed, a pong, a mismatched `call_id`) is logged via
+    `DEBUG_LOG_CLASS` and waiting continues; only the real budget running
+    out (or a broken write mid-loop) now ends in failure.
+  - **Not empirically confirmed against a live collision** - correct by
+    construction (any non-matching line is now handled rather than
+    misread, before the loop can ever fall through to giving up), but the
+    one test run after this landed didn't actually land an event during an
+    in-flight call, so it didn't exercise the new code path either way.
+    Considered adding a dedicated debug-log line inside the new
+    `ping`/`event` branches specifically (so a future real collision would
+    leave unambiguous proof it was caught, unlike today where only the
+    fallback branch logs anything) - deferred, not done.
 
 ## Voice (Voca)
 

@@ -283,43 +283,95 @@ bool TOOL_REMOTE::check(IO_WORKER_CLASS&, ollama_system& chat, CLASS_SYSTEM*, st
     } else {
         last_sent = std::chrono::steady_clock::now();
 
-        std::string line;
-        // 5 seconds - generous for a localhost round trip, short enough
-        // that a hung remote tool doesn't stall the whole chat turn
-        // indefinitely (same reasoning as TOOL_WEB_SEARCH's own timeouts).
-        if (!read_line_blocking(line, 5000)) {
-            // Treated as dead rather than "maybe just slow" - otherwise a
-            // truly hung remote tool would cost a fresh 5s stall on every
-            // future call instead of failing fast once removed from
-            // tools_list (see is_alive(), checked in olla.cpp's process()).
-            mark_dead();
-            response_str = "Error: remote tool did not respond in time.";
-        } else {
+        // 5 seconds total budget - generous for a localhost round trip,
+        // short enough that a hung remote tool doesn't stall the whole chat
+        // turn indefinitely (same reasoning as TOOL_WEB_SEARCH's own
+        // timeouts). Loops instead of a single read: an unsolicited event
+        // (or a ping) can legitimately arrive on this same connection while
+        // waiting for this specific call's result - previously that line
+        // got mistaken for a garbled response to this call and the event
+        // was silently lost. Handled inline here (same as monitor_tool()
+        // would) and waiting continues.
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(5000);
+        bool got_result = false;
+
+        while (!got_result)
+        {
+            auto remaining_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now()).count();
+            if (remaining_ms <= 0) break;
+
+            std::string line;
+            if (!read_line_blocking(line, static_cast<int>(remaining_ms))) break;
+
             last_received = std::chrono::steady_clock::now();
-            json result_msg;
+            json msg;
             bool parsed_ok = true;
             try {
-                result_msg = json::parse(line);
+                msg = json::parse(line);
             } catch (const std::exception&) {
                 parsed_ok = false;
             }
 
-            // Known gap even with monitor_tool() below implemented: if a
-            // remote tool pushes an unsolicited event at the exact moment
-            // check() is blocked here waiting for a call's result, that
-            // event line gets consumed as this call's (mismatched) response
-            // instead of being handled as an event - it's treated as a
-            // protocol error and lost rather than passed along. Not a live
-            // problem for tools/clock/clock.cpp (it never pushes mid-call),
-            // but a real one for anything that might.
-            if (!parsed_ok || result_msg.value("type", "") != "result"
-                || result_msg.value("call_id", "") != tc.id) {
-                response_str = "Error: unexpected response from remote tool.";
-            } else if (result_msg.contains("error")) {
-                response_str = "Error: " + result_msg.value("error", "unknown remote error");
-            } else {
-                response_str = result_msg.value("result", "");
+            std::string type = parsed_ok ? msg.value("type", "") : "";
+
+            if (type == "result" && msg.value("call_id", "") == tc.id) {
+                if (msg.contains("error")) {
+                    response_str = "Error: " + msg.value("error", "unknown remote error");
+                } else {
+                    response_str = msg.value("result", "");
+                }
+                got_result = true;
             }
+            else if (type == "ping") {
+                if (write_line(fd, json{{"type", "pong"}}.dump())) {
+                    last_sent = std::chrono::steady_clock::now();
+                } else {
+                    mark_dead();
+                    break;
+                }
+            }
+            else if (type == "event") {
+                // Same handling monitor_tool() gives a pushed event - see
+                // its own comment there for why tool_calls_this_turn resets.
+                chat.tool_calls_this_turn = 0;
+
+                std::string message = msg.value("message", "");
+                if (!message.empty()) {
+                    chat.log("[RemoteTools] Event from remote tool: " + message + "\n");
+                    chat.integrate_tool_result(tools_list, comms, "", message);
+                }
+
+                if (msg.contains("action") && msg["action"].is_object()) {
+                    std::string action_tool = msg["action"].value("tool", "");
+                    json action_args = msg["action"].value("arguments", json::object());
+                    if (!action_tool.empty()) {
+                        static int next_id = 0;
+                        chat.pending_tool_calls.push({
+                            "system_action_" + std::to_string(++next_id),
+                            action_tool,
+                            action_args
+                        });
+                    }
+                }
+            }
+            else {
+                // Malformed, a pong, or a result for some other call_id -
+                // logged for whoever's debugging afterward, waiting
+                // continues.
+                DEBUG_LOG_CLASS::instance().log_event(tc.name, "unexpected remote response: " + line);
+            }
+        }
+
+        if (!got_result) {
+            // Treated as dead rather than "maybe just slow" - otherwise a
+            // truly hung remote tool would cost a fresh 5s stall on every
+            // future call instead of failing fast once removed from
+            // tools_list (see is_alive(), checked in olla.cpp's process()).
+            // Harmless if mark_dead() already ran above (a failed pong
+            // write) - safe to call twice.
+            mark_dead();
+            response_str = "Error: remote tool did not respond in time.";
         }
     }
 

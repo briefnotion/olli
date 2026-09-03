@@ -5,6 +5,8 @@
 #include <mutex>
 #include <atomic>
 
+#include <ncursesw/curses.h>
+
 // A single shared mutex guarding every ollama_system instance's COMMS.
 //
 // This MUST be an 'inline' variable (C++17), not 'static' - same reasoning
@@ -50,6 +52,24 @@ class COMMS
         std::string INPUT_FROM_LLM = "";
         std::string INPUT_FROM_THINKING = "";
         std::string INPUT_FROM_SYSTEM = "";
+
+        // ncurses attribute value (e.g. COLOR_PAIR(n) | A_DIM) for each
+        // buffer above when it's rendered to the chat panel - same type
+        // NCURSES_TEXT_PANEL::append()'s own attr parameter takes
+        // (user_io.h). Not wired into display_with_ncurses() yet (user_io.cpp
+        // still uses its own local PAIR_USER_INPUT_GREY|A_DIM for
+        // INPUT_FROM_USER and a bare 0 for INPUT_FROM_LLM) - just the
+        // storage for now, defaulted to match what's rendered there today.
+        //
+        // Pair index 1 below duplicates user_io.cpp's own PAIR_USER_INPUT_
+        // GREY (still private to that file) rather than sharing one
+        // definition - deliberate for now, scope kept to this class only.
+        // Relies on user_io.cpp's existing init_pair(1, COLOR_WHITE, -1)
+        // call actually having run (guarded by ncurses_colors_available) -
+        // if colors aren't available there, ncurses harmlessly ignores an
+        // uninitialized pair index and this just renders unstyled.
+        int INPUT_FROM_LLM_COLOR = 0;                    // plain/undecorated - terminal's own default (white on most themes)
+        int INPUT_FROM_USER_COLOR = COLOR_PAIR(1) | A_DIM; // dimmed white - reads as grey
         // --------------------------------------------------------------
 
         // --------------------------------------------------------------

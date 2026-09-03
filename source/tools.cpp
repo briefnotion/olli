@@ -350,6 +350,18 @@ void TOOL_DELEGATOR::handle_tool(IO_WORKER_CLASS& io_worker, ollama_system& chat
     // actually go do something under its persona's judgment, not just talk
     // about it.
     auto [instance, instance_comms] = chat.spawn_background_task();
+
+    // Bright, distinct from both the main chat's white/grey and the
+    // task-runner's cyan/yellow (comms.h's own defaults, and TOOL_TASK_
+    // RUNNER::handle_tool() above) - pair indices 4/5 duplicated from
+    // user_io.cpp's own PAIR_DELEGATOR_LLM/PAIR_DELEGATOR_USER (private to
+    // that file), same "duplicated index, kept simple" tradeoff as the
+    // task-runner's own colors make. Relies on user_io.cpp's matching
+    // init_pair(4, COLOR_MAGENTA, -1)/init_pair(5, COLOR_GREEN, -1) calls
+    // having actually run (guarded by ncurses_colors_available).
+    instance_comms.INPUT_FROM_LLM_COLOR = COLOR_PAIR(4) | A_BOLD;  // bright magenta
+    instance_comms.INPUT_FROM_USER_COLOR = COLOR_PAIR(5) | A_BOLD; // bright green
+
     instance.debug_label = "delegator:" + specialty;
     DEBUG_LOG_CLASS::instance().log_event(instance.debug_label, "instance created");
 
@@ -377,11 +389,14 @@ void TOOL_DELEGATOR::handle_tool(IO_WORKER_CLASS& io_worker, ollama_system& chat
     // Set after open(), not before - the open(tools_list, Properties)
     // overload does PROPS = Properties first thing, so anything set on
     // instance.PROPS beforehand gets overwritten by chat.PROPS's own value.
-    // Deliberately false: integrate_tool_result() always narrates the raw
-    // result back to the user afterward anyway, so streaming this instance's
-    // own generation live just shows the same content twice - once live,
-    // once again word-for-word when the main persona reports it.
-    instance.PROPS.stream_output = false;
+    // Back on (was false) - integrate_tool_result() still narrates the raw
+    // result back to the user afterward regardless, so this content does
+    // show up twice, but now in two visually distinct colors (this
+    // instance's own magenta/green vs. the main persona's white/grey) -
+    // the live stream reads as "watch the specialist work," the final
+    // narration as "here's the polished answer," rather than looking like
+    // an accidental repeat the way it did when both were the same color.
+    instance.PROPS.stream_output = true;
 
     instance_comms.INPUT_FROM_USER = "Generate response.";
 
@@ -540,6 +555,17 @@ void TOOL_TASK_RUNNER::handle_tool(IO_WORKER_CLASS& io_worker, ollama_system& ch
         // instance_comms is that instance's own real, persistent COMMS -
         // paired with it in chat's own background_tasks, not a throwaway.
         auto [instance, instance_comms] = chat.spawn_background_task();
+
+        // Bright, distinct from the main chat's white/grey (comms.h's own
+        // defaults) - pair indices 2/3 duplicated from user_io.cpp's own
+        // PAIR_TASK_RUNNER_LLM/PAIR_TASK_RUNNER_USER (private to that file),
+        // same "duplicated index, kept simple" tradeoff as comms.h's own
+        // defaults make for pair 1. Relies on user_io.cpp's matching
+        // init_pair(2, COLOR_CYAN, -1)/init_pair(3, COLOR_YELLOW, -1) calls
+        // having actually run (guarded by ncurses_colors_available).
+        instance_comms.INPUT_FROM_LLM_COLOR = COLOR_PAIR(2) | A_BOLD;  // bright cyan
+        instance_comms.INPUT_FROM_USER_COLOR = COLOR_PAIR(3) | A_BOLD; // bright yellow
+
         instance.debug_label = "task-runner:" + intent_phrase;
         DEBUG_LOG_CLASS::instance().log_event(instance.debug_label, "instance created");
 

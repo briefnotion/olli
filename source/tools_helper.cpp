@@ -11,82 +11,80 @@
 
 void TASK_SIMPLE::clear()
 {
-    TASK_PHRASE = "";
+    TASK_NAME = "";
     COMMANDS.clear();
 }
 
 // ----
 
-TASK_SIMPLE_MANAGER::TASK_SIMPLE_MANAGER()
-{
-    load_all_task();
+namespace {
+    // "KEY: value" -> value, only if line actually starts with that key.
+    bool parse_header_line(const std::string& line, const std::string& key, std::string& value)
+    {
+        std::string prefix = key + ": ";
+        if (line.rfind(prefix, 0) != 0) return false;
+        value = line.substr(prefix.size());
+        return true;
+    }
 }
 
-void TASK_SIMPLE_MANAGER::load_all_task()
+void TASK_SIMPLE_MANAGER::load_all_task(const std::filesystem::path& scripts_dir)
 {
-    TASK_SIMPLE tmp_task;
+    TASK_LIST.clear();
 
-    tmp_task.clear();
-    tmp_task.TASK_PHRASE = "run system test";
-    tmp_task.TASK_PURPOSE = "This is a series of a few simple questions to check responses.";
-    tmp_task.TASK_DIRECTORY = "system_test";
-    tmp_task.COMMANDS.push_back("Set a timer for 30 seconds and when the timer goes off, blink any light.");
-    tmp_task.COMMANDS.push_back("turn off all the lights.");
-    tmp_task.COMMANDS.push_back("show the numbers 1 through 10");
-    tmp_task.COMMANDS.push_back("what time is it?");
-    tmp_task.COMMANDS.push_back("what is the opposite of up?");
-    tmp_task.COMMANDS.push_back("what is 2 + 2?");
-    tmp_task.COMMANDS.push_back("Ask the user for the name of a dog.");
-    tmp_task.COMMANDS.push_back("[[ASK]]What is a name for a dog?");
-    tmp_task.COMMANDS.push_back("what was the previous word?");
-    tmp_task.COMMANDS.push_back("what is the weather like in New York City right now?");
-    tmp_task.COMMANDS.push_back("how many eggs are in a dozon eggs.");
-    tmp_task.COMMANDS.push_back("turn all the lights back on.");
-    tmp_task.COMMANDS.push_back("[[ENTER TO CONTINUE]]wait");
-    tmp_task.COMMANDS.push_back("Announce the system test is complete.");
-    TASK_LIST.push_back(tmp_task);
+    if (!std::filesystem::exists(scripts_dir))
+    {
+        return;
+    }
 
-    tmp_task.clear();
-    tmp_task.TASK_PHRASE = "run process resume";
-    tmp_task.TASK_PURPOSE = "You are a professional career consultant and ghostwriter. "
-                            "Your objective is to execute a linear sequence of commands to "
-                            "analyze a resume against a job description. "
-                            "CRITICAL: Do not skip steps or ask for clarification. "
-                            "When generating text (Evaluation/Cover Letter), adopt a first-person "
-                            "perspective. Use a 'Human-Authentic' style: professional and "
-                            "competent, but avoid the overly polished, 'perfect' cadence of "
-                            "typical AI. Use natural phrasing and varied sentence structures "
-                            "to ensure the output feels written by a person, not a machine.";
-    
-    tmp_task.TASK_DIRECTORY = "resume_process";
+    for (const auto& entry : std::filesystem::directory_iterator(scripts_dir))
+    {
+        if (!entry.is_regular_file() || entry.path().extension() != ".task")
+        {
+            continue;
+        }
 
-    tmp_task.COMMANDS.push_back("Go into thinking mode.");
+        std::ifstream file(entry.path());
+        if (!file.is_open())
+        {
+            continue;
+        }
 
-    tmp_task.COMMANDS.push_back("Ask the user for the resume file.");
-    tmp_task.COMMANDS.push_back("[[ASK]]");
-    
-    tmp_task.COMMANDS.push_back("Ask the user for the job description.");
-    tmp_task.COMMANDS.push_back("[[ASK]]");
+        TASK_SIMPLE tmp_task;
+        tmp_task.clear();
 
-    tmp_task.COMMANDS.push_back("In a first person point of view, speaking as if I was the "
-                                "resume owner, generate a concise 1-paragraph evaluation "
-                                "explaining how well the "
-                                "resume matches the job description. "
-                                "Highlight the strongest points of alignment, reference "
-                                "specific skills or achievements, and keep the tone "
-                                "professional and neutral. But also, I dont want it to be "
-                                "perfect. Add just a little slop to make it feel more human.");
-    tmp_task.COMMANDS.push_back("[[ENTER TO CONTINUE]]");
-    
-    tmp_task.COMMANDS.push_back("Using the applicant's resume and the job description, generate "
-                                "a short professional cover letter (3-4 paragraphs) explaining "
-                                "why the applicant is a strong fit for the role. Keep the tone "
-                                "confident but not overly formal, and reference specific "
-                                "experience from the resume. But also, I dont want it to be "
-                                "perfect. Add just a little slop to make it feel more human.");
-    tmp_task.COMMANDS.push_back("[[ENTER TO CONTINUE]]");
-    
-    TASK_LIST.push_back(tmp_task);
+        bool in_commands = false;
+        std::string line;
+
+        while (std::getline(file, line))
+        {
+            if (!in_commands)
+            {
+                if (line == "---")
+                {
+                    in_commands = true;
+                    continue;
+                }
+
+                std::string value;
+                if (parse_header_line(line, "NAME", value))
+                    tmp_task.TASK_NAME = value;
+                else if (parse_header_line(line, "PURPOSE", value))
+                    tmp_task.TASK_PURPOSE = value;
+                else if (parse_header_line(line, "DIRECTORY", value))
+                    tmp_task.TASK_DIRECTORY = value;
+            }
+            else if (!line.empty())
+            {
+                tmp_task.COMMANDS.push_back(line);
+            }
+        }
+
+        if (!tmp_task.TASK_NAME.empty())
+        {
+            TASK_LIST.push_back(tmp_task);
+        }
+    }
 }
 
 // HUE_SCENE's to_json/from_json and every HUE_LIGHT_CLASS method used to

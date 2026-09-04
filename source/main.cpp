@@ -176,6 +176,17 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         // the one place the full, original wording survives afterward.
         DEBUG_LOG_CLASS::instance().reset(settings_path / "debug_full_history.txt");
 
+        // Wiped fresh on every startup too, same reasoning as
+        // debug_full_history.txt above - chat.open() (below) loads this via
+        // loadHistoryFromJson() if it's still there, carrying forward old
+        // conversation turns (including any baked-in canned responses the
+        // model repeated enough times to start imitating on its own).
+        // Removing it (not truncating) is deliberate: loadHistoryFromJson()
+        // already treats a missing file as "start fresh" via its own
+        // !file.is_open() check, with no exception/stderr noise, whereas an
+        // empty-but-present file would hit its catch block instead.
+        std::filesystem::remove(settings_path / "history.json");
+
         // Flat-text, human-readable transcript (speaker labels, "Olli: " for
         // the assistant) kept independent of history.json's own structured,
         // periodically-rewritten persistence - see

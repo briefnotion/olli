@@ -482,9 +482,138 @@ void TOOL_DELEGATOR::monitor_tool(ollama_system&, CLASS_SYSTEM*, std::vector<std
 
 // ----
 
+namespace {
+    enum class SCRIPT_STATE
+    {
+        GET_COMMAND,    // pull the next line, classify it
+        EXECUTE_COMMAND,// hand a line to the LLM
+        WAIT_RESPONSE,  // drain the LLM's turn (incl. any tool calls) to completion
+        WAIT_ENTER,     // [PAUSE] - pure local pause, no LLM involved
+        WAIT_ASK,       // [ASK] - same wait, but the typed answer becomes the next input
+        DONE
+    };
+
+    // One step of TOOL_TASK_RUNNER::handle_tool()'s script-driving state
+    // machine - pulled out of that function so the switch can grow new
+    // command types without handle_tool() itself bloating further. A free
+    // function, not a TOOL_TASK_RUNNER member, so it has no implicit access
+    // to anything (chat, comms, tc_id, io_worker, task_manager,
+    // OLLI_DIRECTORY) beyond exactly what's passed in below.
+    void advance_script_state(SCRIPT_STATE& state, size_t& i, std::string& current_input, const TASK_SIMPLE& found_task, ollama_system& instance, COMMS& instance_comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list)
+    {
+        switch (state)
+        {
+            case SCRIPT_STATE::GET_COMMAND:
+            {
+                if (i >= found_task.COMMANDS.size())
+                {
+                    state = SCRIPT_STATE::DONE;
+                    break;
+                }
+
+                const std::string& command = found_task.COMMANDS[i];
+
+                if (starts_with(command, "[PAUSE]"))
+                {
+                    instance_comms.INPUT_FROM_LLM = "--------------------------\nPRESS ENTER TO CONTINUE\n";
+                    state = SCRIPT_STATE::WAIT_ENTER;
+                }
+                else if (starts_with(command, "[ASK]"))
+                {
+                    instance_comms.INPUT_FROM_LLM = "--------------------------\nREQUEST: " + command.substr(5) + "\n";
+                    state = SCRIPT_STATE::WAIT_ASK;
+                }
+                else if (starts_with(command, "[PRINT]"))
+                {
+                    instance_comms.INPUT_FROM_LLM = command.substr(7) + "\n";
+                    ++i;
+                }
+                else
+                {
+                    current_input = command;
+                    state = SCRIPT_STATE::EXECUTE_COMMAND;
+                }
+                break;
+            }
+
+            case SCRIPT_STATE::WAIT_ENTER:
+            {
+                if (instance_comms.ENTER_PRESSED)
+                {
+                    instance_comms.ENTER_PRESSED = false;
+                    ++i;
+                    state = SCRIPT_STATE::GET_COMMAND;
+                }
+                break;
+            }
+
+            case SCRIPT_STATE::WAIT_ASK:
+            {
+                if (instance_comms.ENTER_PRESSED)
+                {
+                    instance_comms.ENTER_PRESSED = false;
+                    current_input = instance_comms.INPUT_FROM_USER;
+                    state = SCRIPT_STATE::EXECUTE_COMMAND;
+                }
+                break;
+            }
+
+            case SCRIPT_STATE::EXECUTE_COMMAND:
+            {
+                instance_comms.INPUT_FROM_LLM = "--------------------------\nINPUT: " + current_input + "\n";
+                instance_comms.INPUT_FROM_USER = current_input;
+
+                // Run send() on its own thread instead of calling it
+                // directly here - it's a blocking HTTP call, so calling
+                // it inline would freeze this loop's own
+                // io_worker.exchange() below for the whole request,
+                // preventing anything from streaming to screen until it
+                // returned. Same pattern as ollama_system::input()
+                // (olla.cpp) and sidetrack.cpp's own
+                // start_second_guess_call().
+                instance.status.interrupt_signal = false;
+                instance.is_processing = true;
+                if (instance.chat_thread.joinable()) instance.chat_thread.join();
+                instance.chat_thread = std::thread([&instance, &instance_comms, &tools_list]()
+                {
+                    instance.send(tools_list, instance_comms, "user");
+                    instance.is_processing = false;
+                });
+
+                state = SCRIPT_STATE::WAIT_RESPONSE;
+                break;
+            }
+
+            case SCRIPT_STATE::WAIT_RESPONSE:
+            {
+                if (!instance.is_processing && instance.chat_thread.joinable())
+                {
+                    instance.chat_thread.join();
+                }
+
+                bool response_finished = !instance.is_processing &&
+                                          instance.last_received.complete &&
+                                          instance.last_received.tool_calls.empty();
+
+                if (response_finished)
+                {
+                    instance.last_received.complete = false;
+                    ++i;
+                    state = SCRIPT_STATE::GET_COMMAND;
+                }
+                break;
+            }
+
+            case SCRIPT_STATE::DONE:
+                break;
+        }
+    }
+}
+
 // No per-instance setup needed - part of the common tool interface (see the note in tools.h).
 void TOOL_TASK_RUNNER::configure(ollama_system& chat) {
     OLLI_DIRECTORY = chat.PROPS.OLLI_DIRECTORY;
+    task_manager.load_all_task(OLLI_DIRECTORY / "scripts");
 }
 
 bool TOOL_TASK_RUNNER::iequals(const std::string& a, const std::string& b) {
@@ -499,12 +628,30 @@ void TOOL_TASK_RUNNER::register_tool(ollama_system&, json& tools)
 {
     tool_functions.clear();
 
+    // Reloaded here too (not just in handle_tool()) so the name list built
+    // below reflects a newly added/edited/removed .task file on the very
+    // next request - not just the next automation attempt.
+    task_manager.load_all_task(OLLI_DIRECTORY / "scripts");
+
+    // Baked directly into the schema despite the token cost of resending it
+    // on every request regardless of relevance - deliberate tradeoff for
+    // now, revisit if the number of saved tasks ever grows large enough for
+    // that to matter (see handle_tool()'s error path, which repeats this
+    // same list on a miss - useful independently of scale).
+    std::string available_names;
+    for (const auto& task : task_manager.TASK_LIST)
+    {
+        if (!available_names.empty()) available_names += "', '";
+        available_names += task.TASK_NAME;
+    }
+
     json task_params = {
         {"type", "object"},
         {"properties", {
             {"intent_phrase", {
                 {"type", "string"},
-                {"description", "The specific phrase or intent identified (e.g.,  'run system test', 'run process resume')."}
+                {"description", "The bare name of the task to run, with no leading verb like "
+                                "'run' or 'start'. Available: '" + available_names + "'."}
             }}
         }},
         {"required", {"intent_phrase"}}
@@ -512,8 +659,10 @@ void TOOL_TASK_RUNNER::register_tool(ollama_system&, json& tools)
 
     tool_functions.push_back("run_automation_task");
     add_tool(tools, "run_automation_task",
-        "Use this tool when the user expresses an intent that matches a home automation macro. "
-        "This retrieves a sequence of internal system commands that you must then execute.",
+        "Call this tool whenever the user asks to run, start, do, or perform a named task, "
+        "routine, or process - even if you're not sure the exact phrase matches a saved one. "
+        "A non-matching guess is safe: it returns the list of valid task names so you can "
+        "immediately retry with the right one.",
         task_params);
 }
 
@@ -529,6 +678,11 @@ void TOOL_TASK_RUNNER::handle_tool(IO_WORKER_CLASS& io_worker, ollama_system& ch
 
     std::string intent_phrase = args["intent_phrase"];
 
+    // Reloaded fresh on every call (not just once in configure()) so an
+    // edited/added/removed .task file takes effect on the very next
+    // "run automation task" without needing an olli restart.
+    task_manager.load_all_task(OLLI_DIRECTORY / "scripts");
+
     comms.INPUT_FROM_SYSTEM = "[TaskRunner] Searching for automation matching: \"" + intent_phrase + "\"\n";
     io_worker.exchange(comms, tools_list);
 
@@ -536,7 +690,7 @@ void TOOL_TASK_RUNNER::handle_tool(IO_WORKER_CLASS& io_worker, ollama_system& ch
         task_manager.TASK_LIST.begin(),
         task_manager.TASK_LIST.end(),
         [this, &intent_phrase](const TASK_SIMPLE& task) {
-            return iequals(task.TASK_PHRASE, intent_phrase);
+            return iequals(task.TASK_NAME, intent_phrase);
         }
     );
 
@@ -599,16 +753,6 @@ void TOOL_TASK_RUNNER::handle_tool(IO_WORKER_CLASS& io_worker, ollama_system& ch
         chat.send_tool_result(tc_id, success_log);
 
 
-        enum class SCRIPT_STATE
-        {
-            GET_COMMAND,    // pull the next line, classify it
-            EXECUTE_COMMAND,// hand a line to the LLM
-            WAIT_RESPONSE,  // drain the LLM's turn (incl. any tool calls) to completion
-            WAIT_ENTER,     // [[ENTER TO CONTINUE]] - pure local pause, no LLM involved
-            WAIT_ASK,       // [[ASK]] - same wait, but the typed answer becomes the next input
-            DONE
-        };
-
         SCRIPT_STATE state = SCRIPT_STATE::GET_COMMAND;
         size_t i = 0;
         std::string current_input;
@@ -619,7 +763,7 @@ void TOOL_TASK_RUNNER::handle_tool(IO_WORKER_CLASS& io_worker, ollama_system& ch
         // io_worker.exchange() each run exactly once per tick no matter
         // what state we're in, so the instance's own tools/timers keep
         // ticking and the screen stays live even while paused on
-        // [[ENTER TO CONTINUE]]/[[ASK]] - instead of three separate nested
+        // [PAUSE]/[ASK] - instead of three separate nested
         // while-loops each spinning their own exchange() calls.
         while (state != SCRIPT_STATE::DONE)
         {
@@ -629,107 +773,7 @@ void TOOL_TASK_RUNNER::handle_tool(IO_WORKER_CLASS& io_worker, ollama_system& ch
             // comment in tools.h).
             instance.process(io_worker, nullptr, tools_list, instance_comms);
 
-            switch (state)
-            {
-                case SCRIPT_STATE::GET_COMMAND:
-                {
-                    if (i >= found_task.COMMANDS.size())
-                    {
-                        state = SCRIPT_STATE::DONE;
-                        break;
-                    }
-
-                    const std::string& command = found_task.COMMANDS[i];
-
-                    if (starts_with(command, "[[ENTER TO CONTINUE]]"))
-                    {
-                        instance_comms.INPUT_FROM_LLM = "--------------------------\nPRESS ENTER TO CONTINUE\n";
-                        state = SCRIPT_STATE::WAIT_ENTER;
-                    }
-                    else if (starts_with(command, "[[ASK]]"))
-                    {
-                        instance_comms.INPUT_FROM_LLM = "--------------------------\nREQUEST: " + command + "\n";
-                        state = SCRIPT_STATE::WAIT_ASK;
-                    }
-                    else
-                    {
-                        instance_comms.INPUT_FROM_LLM = "--------------------------\nINPUT: " + command + "\n";
-                        current_input = command;
-                        state = SCRIPT_STATE::EXECUTE_COMMAND;
-                    }
-                    break;
-                }
-
-                case SCRIPT_STATE::WAIT_ENTER:
-                {
-                    if (instance_comms.ENTER_PRESSED)
-                    {
-                        instance_comms.ENTER_PRESSED = false;
-                        ++i;
-                        state = SCRIPT_STATE::GET_COMMAND;
-                    }
-                    break;
-                }
-
-                case SCRIPT_STATE::WAIT_ASK:
-                {
-                    if (instance_comms.ENTER_PRESSED)
-                    {
-                        instance_comms.ENTER_PRESSED = false;
-                        current_input = instance_comms.INPUT_FROM_USER;
-                        state = SCRIPT_STATE::EXECUTE_COMMAND;
-                    }
-                    break;
-                }
-
-                case SCRIPT_STATE::EXECUTE_COMMAND:
-                {
-                    instance_comms.INPUT_FROM_USER = current_input;
-
-                    // Run send() on its own thread instead of calling it
-                    // directly here - it's a blocking HTTP call, so calling
-                    // it inline would freeze this loop's own
-                    // io_worker.exchange() below for the whole request,
-                    // preventing anything from streaming to screen until it
-                    // returned. Same pattern as ollama_system::input()
-                    // (olla.cpp) and sidetrack.cpp's own
-                    // start_second_guess_call().
-                    instance.status.interrupt_signal = false;
-                    instance.is_processing = true;
-                    if (instance.chat_thread.joinable()) instance.chat_thread.join();
-                    instance.chat_thread = std::thread([&instance, &instance_comms, &tools_list]()
-                    {
-                        instance.send(tools_list, instance_comms, "user");
-                        instance.is_processing = false;
-                    });
-
-                    state = SCRIPT_STATE::WAIT_RESPONSE;
-                    break;
-                }
-
-                case SCRIPT_STATE::WAIT_RESPONSE:
-                {
-                    if (!instance.is_processing && instance.chat_thread.joinable())
-                    {
-                        instance.chat_thread.join();
-                    }
-
-                    bool response_finished = !instance.is_processing &&
-                                              instance.last_received.complete &&
-                                              instance.last_received.tool_calls.empty();
-
-                    if (response_finished)
-                    {
-                        instance.last_received.complete = false;
-                        ++i;
-                        state = SCRIPT_STATE::GET_COMMAND;
-                    }
-                    break;
-                }
-
-                case SCRIPT_STATE::DONE:
-                    break;
-            }
+            advance_script_state(state, i, current_input, found_task, instance, instance_comms, tools_list);
 
             io_worker.exchange(instance_comms, tools_list);
         }
@@ -773,7 +817,20 @@ void TOOL_TASK_RUNNER::handle_tool(IO_WORKER_CLASS& io_worker, ollama_system& ch
     }
     else
     {
-        std::string error_msg = "ERROR: No automation found for '" + intent_phrase + "'.";
+        // Also listed in register_tool()'s intent_phrase description, but
+        // repeated here on the miss itself too - a bad guess gets the valid
+        // list put right back in front of the model at the exact point it
+        // needs it, instead of relying on it having been read carefully
+        // further back in the same request's tool schema.
+        std::string available;
+        for (const auto& task : task_manager.TASK_LIST)
+        {
+            if (!available.empty()) available += "', '";
+            available += task.TASK_NAME;
+        }
+
+        std::string error_msg = "ERROR: No automation found for '" + intent_phrase + "'. "
+                                 "Available automations: '" + available + "'.";
 
         chat.send_tool_result(tc_id, error_msg);
         chat.integrate_tool_result(tools_list, comms, "", error_msg);

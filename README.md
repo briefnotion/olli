@@ -219,11 +219,38 @@ is the model, thinking mode, and persona (`OLLAMA_OPENING`).
 
 ### Automations (Task Runner)
 
-`run_automation_task` matches a spoken intent to a pre-defined command sequence
-in `tools_helper.cpp` (`TASK_SIMPLE_MANAGER::load_all_task`). Two ship by
-default: `run system test` (a smoke test of several tools) and `run process
-resume` (a résumé-vs-job-description writing workflow). Sequences can pause for
-input (`[[ASK]]`) or a keypress (`[[ENTER TO CONTINUE]]`).
+`run_automation_task` matches a spoken intent to a named script loaded from
+disk. Scripts are plain `.task` files under a profile's own
+`scripts/` directory (`~/olli_files_<name>/scripts/*.task`,
+`TASK_SIMPLE_MANAGER::load_all_task` in `tools_helper.cpp`) - reloaded fresh
+on every `run_automation_task` call, so adding, editing, or removing a
+`.task` file takes effect immediately, no restart needed.
+
+A `.task` file looks like:
+
+```
+NAME: system test
+PURPOSE: This is a series of a few simple questions to check responses.
+DIRECTORY: system_test
+---
+what time is it?
+[ASK]What is a name for a dog?
+[PAUSE]
+Announce the system test is complete.
+```
+
+Three header lines (`NAME:`/`PURPOSE:`/`DIRECTORY:`), a `---` separator, then
+one command per line, sent to a background instance in order. Special
+line-prefixes: `[ASK]<text>` pauses and shows `<text>` as a request, then
+feeds whatever the user types back in as the next line; `[PAUSE]` just waits
+for Enter, no LLM involved; `[PRINT]<text>` displays `<text>` verbatim with
+no LLM call and immediately continues (handy for several lines of narration
+back to back, with nothing printed between them).
+
+Sample scripts (`system test`, `process resume`, `print test`, and an
+original creative one, `fitter status`) live under `sample_scripts/` in this
+repo - copy whichever ones you want into a profile's own `scripts/`
+directory to use them.
 
 ---
 

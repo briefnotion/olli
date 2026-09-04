@@ -315,6 +315,33 @@ not needed elsewhere.
     `crash_log.txt` in the profile's `olli_files_<name>/` directory directly
     - durable regardless of terminal/screen state or OS crash-reporting
     config, which core dumps and `std::cerr` messages both are not.
+- **Found and fixed 2026-09-04: `qwen3:8b` silently refusing to call
+  `run_automation_task` for an unfamiliar task name.** After adding a new
+  `.task` file (`print test`) to a profile's `scripts/` directory, saying
+  "run print test" produced a generic in-persona non-answer instead of the
+  automation running - looked at first like a matching bug in
+  `TOOL_TASK_RUNNER::handle_tool()`, but `debug_full_history.txt` showed
+  the model never even emitted a `[tool_calls: run_automation_task(...)]`
+  entry for that phrase, while the exact same session's "run system test"
+  produced one immediately. Root cause: `register_tool()`'s schema
+  described the tool as being for "a home automation macro" and named
+  only the two original task phrases as examples - a task named "print
+  test" doesn't sound like home automation, so the model decided up front
+  not to try the tool at all, rather than attempting it and getting it
+  wrong. Fixed alongside the `TASK_PHRASE`→`TASK_NAME` rename above -
+  see that entry (under "Display / OUTPUT_CLASS") for the actual code
+  change. Separately, also noticed the model's own canned confused
+  response ("you lost the signal, ghost. try again. what do you want?")
+  had accumulated 6 verbatim repeats in one profile's `history.json`
+  across sessions, and appeared to be reinforcing itself (the model
+  reproducing its own past non-answer rather than reasoning fresh) - fixed
+  by having `main.cpp` delete the profile's `history.json` at every
+  startup (`std::filesystem::remove`, right next to the existing
+  `DEBUG_LOG_CLASS::instance().reset()` call for `debug_full_history.txt`,
+  same "wipe fresh every launch" reasoning). Deliberate tradeoff, not a
+  bug: this profile no longer remembers anything across a restart at all
+  - acceptable per the user's own call, since a long-running session still
+  gets independent persistence through sidetrack's consolidation path.
 
 ## Display / OUTPUT_CLASS
 
@@ -379,6 +406,96 @@ not needed elsewhere.
   driving `comms`/`io_worker.exchange()` like everything else, with no
   local `KEYBOARD_INPUT` or raw `cout` left at all. See the task-runner
   rewrite entry under "Session & model behavior" for full detail.
+- **Done 2026-09-04: task runner scripting overhaul - disk-loaded `.task`
+  files, `[PAUSE]`/`[ASK]`/`[PRINT]`, dynamic tool description.**
+  `TASK_SIMPLE_MANAGER::load_all_task()` (`tools_helper.cpp`) no longer
+  hardcodes tasks in C++ - it reads every `*.task` file directly under a
+  `scripts_dir` path instead, parsing `NAME:`/`PURPOSE:`/`DIRECTORY:`
+  header lines up to a literal `---` separator, then treating every
+  remaining non-empty line as one `COMMANDS` entry, verbatim (including
+  any `[...]` marker prefix). `TASK_SIMPLE::TASK_PHRASE` renamed to
+  `TASK_NAME` throughout (`tools_helper.h`/`.cpp`, `tools.cpp`) to match:
+  the file's `NAME:` field is meant to hold the task's bare name with no
+  leading verb ("system test", not "run system test") - the earlier
+  phrase-based matching required the model to also guess whether to keep
+  or drop the verb, which turned out to be a real source of match
+  failures (see "Session & model behavior" below).
+  - **Loading moved out of the constructor.** `TASK_SIMPLE_MANAGER` used
+    to load its (then-hardcoded) list from its own constructor. That
+    doesn't work for a real directory path: `TOOL_TASK_RUNNER` (which
+    owns a `task_manager` member) gets constructed in
+    `populate_default_tools()` (`olla.cpp`), called from `main.cpp`
+    *before* `main.cpp` ever sets `chat.PROPS.OLLI_DIRECTORY` - a
+    constructor has nothing to read from yet. Fixed by dropping the
+    constructor entirely, giving `load_all_task()` a `scripts_dir`
+    parameter, and calling it from `TOOL_TASK_RUNNER::configure()`
+    (`tools.cpp`) right after `OLLI_DIRECTORY` is set - `configure()` is
+    already the existing per-tool hook that runs once `OLLI_DIRECTORY` is
+    known (`ollama_system::open()`), so no changes to `main.cpp`'s call
+    ordering were needed. Any other tool needing something set up between
+    construction and `chat.open()` has the same trap - hook into
+    `configure()`, don't rely on a constructor.
+  - **Hot reload.** `handle_tool()` also calls `task_manager.load_all_task()`
+    fresh at the top of every `run_automation_task` call (not just once at
+    startup), and `register_tool()` reloads it too before building the
+    tool's JSON schema - an edited/added/removed `.task` file takes effect
+    on the very next request, no olli restart needed, whether or not that
+    request even mentions automation.
+  - **`SCRIPT_STATE`'s switch pulled out of `handle_tool()`** into a free
+    function `advance_script_state()` (anonymous namespace, `tools.cpp`),
+    taking only `state`/`i`/`current_input`/`found_task`/`instance`/
+    `instance_comms`/`tools_list` by reference. Deliberately a free
+    function, not a `TOOL_TASK_RUNNER` member - it structurally can't
+    reach `chat`/`comms`/`tc_id`/`io_worker`/`task_manager`/
+    `OLLI_DIRECTORY` even by accident, so the switch can keep growing new
+    command types without `handle_tool()` itself bloating or picking up
+    coupling it doesn't need. `SCRIPT_STATE` itself moved to the same
+    anonymous namespace (was previously declared inside `handle_tool()`)
+    so it can appear in the function's signature.
+  - **Markers renamed and one added.** `[[ENTER TO CONTINUE]]`/`[[ASK]]`
+    (double-bracket, inconsistent single-word-vs-phrase style) became
+    `[PAUSE]`/`[ASK]` (single-bracket, both single keywords). New:
+    `[PRINT]<text>` - displays `<text>` verbatim (no separator bar, no
+    label, so many `[PRINT]` lines in a row read cleanly with nothing
+    between them) and immediately advances to the next command - no LLM
+    call, no waiting. Structurally different from `[PAUSE]`/`[ASK]`: those
+    hand off to a `WAIT_*` state that increments `i` once the wait
+    resolves, but `[PRINT]` has nothing to wait for, so it increments `i`
+    itself right inside the `GET_COMMAND` branch instead.
+  - **Two display bugs fixed along the way.** `[ASK]`'s `REQUEST:` line
+    used to include the literal `"[ASK]"` marker text in what got shown
+    on screen (`"REQUEST: " + command`, with `command` still carrying the
+    unstripped prefix) - fixed with `command.substr(5)`. Separately, the
+    `"INPUT: ..."` display line moved from `GET_COMMAND`'s plain-command
+    branch to `EXECUTE_COMMAND` (built from `current_input`, not
+    `command`) - it now uniformly shows whatever's actually about to be
+    sent to the LLM, whether that's a plain script line or a typed
+    `[ASK]` answer, where previously a typed `[ASK]` answer was sent with
+    no display at all.
+  - **`register_tool()`'s schema stopped hardcoding examples.** It used
+    to describe `run_automation_task` as being for "a home automation
+    macro" and list the two original task names as its only examples -
+    directly caused the model to refuse even attempting the tool for a
+    new task whose name didn't resemble either example or "home
+    automation" (confirmed via `debug_full_history.txt`: no
+    `[tool_calls: run_automation_task(...)]` entry at all for the
+    refused attempts, vs. a clean one for a phrase matching an example).
+    Description is now generic and explicitly tells the model to attempt
+    the call even on an uncertain guess, since a miss is safe; separately,
+    `intent_phrase`'s own parameter description is now built at
+    `register_tool()` time from the live `task_manager.TASK_LIST`, so the
+    model sees the real current task names without those names being
+    hardcoded anywhere - deliberately *not* done by dumping the full list
+    into the always-present top-level tool description too, since that
+    cost would scale with however many tasks exist regardless of
+    relevance; instead `handle_tool()`'s "no automation found" error
+    result also echoes the same live list, so that cost only applies on
+    an actual miss.
+  - Sample `.task` files (`system test`, `process resume`, `print test`,
+    plus an original creative one, `fitter status`) now live under
+    `sample_scripts/` in the repo - copy into a profile's own `scripts/`
+    directory to use them; `load_all_task()` only ever reads from a
+    profile's `scripts/`, never from `sample_scripts/` directly.
 - **Filter tool calls and other non-conversational text out of the chat
   log** - `OUTPUT_CLASS::append_to_chat_log()` (user_io.cpp) just logs
   whatever flows through `chat_response`, same as the screen shows. Seen
@@ -572,11 +689,23 @@ This time it actually moved.
      `exchange()` call.
    - Sidetrack's own generated text no longer reaches the screen (its
      `pull_output()`'s only caller, in `thread_main()`, was removed).
+     **Done 2026-09-04 (found already resolved during a later audit)**:
+     resolved as a side effect of `run_second_guess()` (sidetrack.cpp,
+     2026-08-30) deliberately reusing the main chat's own real `comms`
+     instead of an isolated one - its thinking/response text now reaches
+     the screen (and TTS) for free via the existing `exchange()`/display
+     path, same as the main chat's own output, with no dedicated wiring
+     needed. See `run_second_guess()`'s own entry below for the reasoning.
    - `IO_WORKER_CLASS::exchange()` still takes an `ollama_system& chat_ref`
      parameter as a placeholder, purely because `TOOL_BASE::register_tool
      (ollama_system&, json&)` (every `TOOL_*` class, `tools.h`/
      `remote_tools.h`) hard-requires one for building the tools-panel's
      `tool_names` - untangling that is part of the move below.
+     **Done 2026-09-04 (found already resolved during a later audit)**:
+     `IO_WORKER_CLASS::exchange()` (io_worker.cpp) now takes only
+     `(COMMS&, std::vector<std::unique_ptr<TOOL_BASE>>&)` - the
+     `ollama_system& chat_ref` placeholder is gone, exactly as the
+     COMMS-ownership-move entry below (Done 2026-08-29) describes.
    - Everything above got to a clean `-Wall -Wextra -Werror` build (verified
      2026-08-28) - but only static analysis, not real usage, beyond a quick
      smoke-test session that surfaced and fixed an unrelated pre-existing
@@ -631,14 +760,24 @@ Two-part plan, in order:
      (output_buffer_mutex); comms.INPUT_FROM_SYSTEM += text; }`, locked
      since `log()` could in principle be called from `chat_thread` (inside
      `send()`) as well as the main thread.
-2. **Rewrite sidetrack from scratch** against this now-real COMMS-ownership
-   shape, instead of retrofitting the pre-rework design described in [the
-   background sidetrack thread section of README.md](README.md) - re-wire
-   its own TTS path (likely `IO_WORKER_CLASS::speak()` directly, since
-   `comms_buffer_audio` is main-chat-only) and its screen output at the
-   same time. `sidetrack.h`/`.cpp` are currently wrapped in `#if 0` (kept
-   for reference, not compiled) rather than updated to match the COMMS
-   move, since they're being thrown away anyway.
+2. **Done 2026-09-04 (found already resolved during a later audit, not
+   fixed in response to this entry): sidetrack rewritten from scratch**
+   against the real COMMS-ownership shape, rather than retrofitting the
+   pre-rework design described in [the background sidetrack thread section
+   of README.md](README.md). `sidetrack.h`/`.cpp` are no longer wrapped in
+   `#if 0` - `SIDETRACK_CLASS` is a real, working class (no background
+   thread; `check()` is called once per tick from `main.cpp`'s main loop,
+   non-blocking except for the deliberately-deferred synchronous
+   consolidation call noted below), with `run_consolidation()`/
+   `run_second_guess()`/`run_clear_context()`/`persistent_time_checks()`
+   all implemented - see the two Done entries just below (2026-08-30) for
+   the detail on the two biggest pieces. Its screen output and TTS path
+   both got re-wired as part of that same work: `run_second_guess()`
+   deliberately reuses the main chat's own real `comms` rather than an
+   isolated one (see its own entry below), so sidetrack's thinking/response
+   text now reaches both the screen and TTS for free via
+   `IO_WORKER_CLASS::exchange()`'s normal drain of that shared `comms` -
+   no separate `IO_WORKER_CLASS::speak()` wiring needed after all.
 3. **Done 2026-08-30: `run_consolidation()` (sidetrack.cpp) implemented and
    working**, tested against a real Ollama server via a standalone harness
    (`../olli_consolidation_test/`, outside the real build - see its own

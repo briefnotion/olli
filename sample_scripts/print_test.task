@@ -1,0 +1,14 @@
+NAME: print test
+PURPOSE: A quick check that consecutive [PRINT] lines display cleanly with no separators between them.
+DIRECTORY: print_test
+---
+[PRINT]Starting print test.
+[PRINT]Line 1: no separators between these.
+[PRINT]Line 2: still no separators.
+[PRINT]Line 3: just plain text, one after another.
+[PRINT]Line 4: nothing sent to the LLM for any of these.
+[PRINT]Line 5: nothing waited on either.
+[PRINT]Line 6: should all appear back to back.
+[PRINT]Line 7: almost done.
+[PRINT]Print test complete.
+[PAUSE]

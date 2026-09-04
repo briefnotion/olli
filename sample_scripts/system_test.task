@@ -1,0 +1,18 @@
+NAME: system test
+PURPOSE: This is a series of a few simple questions to check responses.
+DIRECTORY: system_test
+---
+turn off all the lights.
+Set a timer for 30 seconds and when the timer goes off, blink any light.
+turn all the lights back on.
+show the numbers 1 through 10
+what time is it?
+what is the opposite of up?
+what is 2 + 2?
+Ask the user for the name of a dog.
+[ASK]What is a name for a dog?
+what was the previous word?
+what is the weather like in New York City right now?
+how many eggs are in a dozon eggs.
+[PAUSE]wait
+Announce the system test is complete.

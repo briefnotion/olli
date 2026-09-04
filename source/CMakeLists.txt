@@ -187,3 +187,9 @@ endif()
 
 # 6. Link libraries
 target_link_libraries(olli PRIVATE Threads::Threads CURL::libcurl whisper PkgConfig::PORTAUDIO ${NCURSES_PANEL_LIBRARY} ${NCURSES_LIBRARY})
+
+# fitter (an experimental, separate program that reads a profile's chat_logs/
+# and writes scripts/fitter_status.task) used to build here as a second
+# target - moved out to ../../fitter (its own standalone CMakeLists.txt)
+# since it's paused/still being worked on and shouldn't be tied to olli's
+# own build until it's further along. See ../../fitter/main.cpp.

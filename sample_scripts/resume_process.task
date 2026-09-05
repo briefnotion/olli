@@ -3,11 +3,11 @@ PURPOSE: You are a professional career consultant and ghostwriter. Your objectiv
 DIRECTORY: resume_process
 ---
 Go into thinking mode.
-Ask the user for the resume file.
-[ASK]
-Ask the user for the job description.
-[ASK]
-In a first person point of view, speaking as if I was the resume owner, generate a concise 1-paragraph evaluation explaining how well the resume matches the job description. Highlight the strongest points of alignment, reference specific skills or achievements, and keep the tone professional and neutral. But also, I dont want it to be perfect. Add just a little slop to make it feel more human.
+[FILE_IN:resume.txt]
+[FILE_IN:job_description.txt]
+In a first person point of view, speaking as if I was the resume owner, generate a concise evaluation explaining how well the resume matches the job description, formatted into 2-3 short paragraphs with clear breaks between them. Highlight the strongest points of alignment, reference specific skills or achievements, and keep the tone professional and neutral. But also, I dont want it to be perfect. Add just a little slop to make it feel more human.
+[FILE_APPEND:evaluation.txt]
 [PAUSE]
-Using the applicant's resume and the job description, generate a short professional cover letter (3-4 paragraphs) explaining why the applicant is a strong fit for the role. Keep the tone confident but not overly formal, and reference specific experience from the resume. But also, I dont want it to be perfect. Add just a little slop to make it feel more human.
+Using the applicant's resume and the job description, generate a short professional cover letter (3-4 paragraphs, with clear breaks between them) explaining why the applicant is a strong fit for the role. Keep the tone confident but not overly formal, and reference specific experience from the resume. But also, I dont want it to be perfect. Add just a little slop to make it feel more human.
+[FILE_APPEND:cover_letter.txt]
 [PAUSE]

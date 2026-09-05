@@ -21,6 +21,24 @@ void simulateTyping(const std::string& text) {
     std::cout << std::endl; // Final break after the message is "typed"
 }
 
+bool read_file(const std::filesystem::path& path, std::string& out) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file.is_open()) return false;
+
+    std::ostringstream ss;
+    ss << file.rdbuf();
+    out = ss.str();
+    return true;
+}
+
+bool write_file(const std::filesystem::path& path, const std::string& text, bool append) {
+    std::ofstream file(path, std::ios::binary | (append ? std::ios::app : std::ios::trunc));
+    if (!file.is_open()) return false;
+
+    file << text;
+    return file.good();
+}
+
 std::string timestamp_prefix() {
     std::time_t now = std::time(nullptr);
     std::tm local_tm{};

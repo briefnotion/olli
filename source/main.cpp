@@ -130,6 +130,15 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         // Set once, as early as possible, before anything else can touch a
         // socket. Re-done on every restart since a fresh exec()'d process
         // starts with default signal dispositions again.
+        // Printed first thing, before any other startup output, so it's
+        // always visible in scrollback regardless of which profile or mode
+        // follows - this is the __DATE__/__TIME__ of whenever main.cpp
+        // itself was last compiled, which is enough to tell two builds
+        // apart (e.g. ~/olli's installed build vs. one just rebuilt in
+        // build/) without needing a real version number or git-hash
+        // plumbing through CMake.
+        std::cout << "olli build: " << __DATE__ << " " << __TIME__ << "\n";
+
         std::signal(SIGPIPE, SIG_IGN);
 
         // TOOL_WEB_SEARCH (tools.cpp) calls curl_easy_init() directly
@@ -284,7 +293,14 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
                 // naturally rather than needing its own separate trigger.
                 remote_tool->send_identity(system.user.name, system.user.full_name, system.user.about);
 
-                tools_list.push_back(std::move(remote_tool));
+                // tools_list_mutex (olla.h) - a push_back can reallocate the
+                // vector's storage, which would yank it out from under
+                // ollama_system::send()'s register_tool loop if that's
+                // concurrently iterating it on some instance's chat_thread.
+                {
+                    std::lock_guard<std::mutex> lock(tools_list_mutex);
+                    tools_list.push_back(std::move(remote_tool));
+                }
             }
 
             // Keyboard, voice, and screen drawing all happen entirely on

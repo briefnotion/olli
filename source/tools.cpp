@@ -493,13 +493,46 @@ namespace {
         DONE
     };
 
+    // Confines a task-authored name to a single path segment - used both for
+    // a task's own files_dir (TASK_DIRECTORY or TASK_NAME, TOOL_TASK_RUNNER::
+    // handle_tool()) and for a [FILE_IN:.../FILE_APPEND:...] argument
+    // (advance_script_state() below), which is why this lives as a free
+    // function here rather than a TOOL_TASK_RUNNER private method - the
+    // latter couldn't be reached from this free function. '/' and '\\'
+    // stripped outright so the result can never create or escape into a
+    // subdirectory; spaces become underscores per request. Never applied to
+    // OLLI_DIRECTORY itself - that's program-controlled, not task-authored
+    // free text, so it's already trusted.
+    std::string sanitize_path_segment(const std::string& raw)
+    {
+        std::string result;
+        result.reserve(raw.size());
+        for (char c : raw)
+        {
+            if (c == '/' || c == '\\') continue;
+            result += (c == ' ') ? '_' : c;
+        }
+
+        // With '/' gone, only an exact ".."/"." match still means anything
+        // special to the filesystem - anything else containing dots (e.g.
+        // "..evil") is just a literal, harmless name.
+        if (result.empty() || result == ".." || result == ".") result = "_";
+
+        return result;
+    }
+
     // One step of TOOL_TASK_RUNNER::handle_tool()'s script-driving state
     // machine - pulled out of that function so the switch can grow new
     // command types without handle_tool() itself bloating further. A free
     // function, not a TOOL_TASK_RUNNER member, so it has no implicit access
     // to anything (chat, comms, tc_id, io_worker, task_manager,
-    // OLLI_DIRECTORY) beyond exactly what's passed in below.
-    void advance_script_state(SCRIPT_STATE& state, size_t& i, std::string& current_input, const TASK_SIMPLE& found_task, ollama_system& instance, COMMS& instance_comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list)
+    // OLLI_DIRECTORY) beyond exactly what's passed in below. files_dir is
+    // OLLI_DIRECTORY/files/<sanitized TASK_DIRECTORY or TASK_NAME> (see
+    // handle_tool()) - a plain local there, not working_dir, and not
+    // cleaned up when handle_tool() returns: unlike working_dir's own
+    // scratch space, whatever FILE_IN/FILE_APPEND leaves in files_dir is
+    // meant to persist indefinitely.
+    void advance_script_state(SCRIPT_STATE& state, size_t& i, std::string& current_input, const TASK_SIMPLE& found_task, ollama_system& instance, COMMS& instance_comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, const std::filesystem::path& files_dir)
     {
         switch (state)
         {
@@ -526,6 +559,44 @@ namespace {
                 else if (starts_with(command, "[PRINT]"))
                 {
                     instance_comms.INPUT_FROM_LLM = command.substr(7) + "\n";
+                    ++i;
+                }
+                else if (starts_with(command, "[FILE_IN:") && command.back() == ']')
+                {
+                    // "[FILE_IN:" is 9 chars; the trailing "]" is 1 more.
+                    std::string raw_name = command.substr(9, command.size() - 9 - 1);
+                    std::filesystem::path file_path = files_dir / sanitize_path_segment(raw_name);
+
+                    std::string file_content;
+                    if (read_file(file_path, file_content))
+                    {
+                        current_input = file_content;
+                        state = SCRIPT_STATE::EXECUTE_COMMAND;
+                    }
+                    else
+                    {
+                        // Falls back to the same WAIT_ASK state [ASK] uses -
+                        // pause, show a request, take whatever the user
+                        // types/pastes as current_input, then continue the
+                        // script normally (i still advances via
+                        // WAIT_RESPONSE below, same as any other line) -
+                        // rather than aborting the whole automation over one
+                        // missing file.
+                        instance_comms.INPUT_FROM_LLM = "--------------------------\nCould not find '" + raw_name + "'. Please paste it here:\n";
+                        state = SCRIPT_STATE::WAIT_ASK;
+                    }
+                }
+                else if (starts_with(command, "[FILE_APPEND:") && command.back() == ']')
+                {
+                    // "[FILE_APPEND:" is 13 chars; the trailing "]" is 1 more.
+                    std::string raw_name = command.substr(13, command.size() - 13 - 1);
+                    std::filesystem::path file_path = files_dir / sanitize_path_segment(raw_name);
+
+                    // Keep it simple for now: plain concatenation of
+                    // whatever the previous line's response was, no
+                    // separator between entries.
+                    std::filesystem::create_directories(files_dir);
+                    write_file(file_path, instance.last_received.response, /*append=*/true);
                     ++i;
                 }
                 else
@@ -744,10 +815,20 @@ void TOOL_TASK_RUNNER::handle_tool(IO_WORKER_CLASS& io_worker, ollama_system& ch
         // once the automation finishes.
         if (found_task.TASK_DIRECTORY != "")
         {
-            working_dir = OLLI_DIRECTORY / (found_task.TASK_DIRECTORY + "_" + tc_id);
+            working_dir = OLLI_DIRECTORY / (found_task.TASK_DIRECTORY);
             std::filesystem::create_directories(working_dir);
             running_directory = true;
         }
+
+        // Separate from working_dir above, and separate from working_dir's
+        // own lifetime too - a plain local, never remove_all()'d, so
+        // whatever FILE_IN/FILE_APPEND (advance_script_state()) leaves here
+        // persists indefinitely after this function returns. Always
+        // computed, regardless of whether TASK_DIRECTORY is set - falls
+        // back to TASK_NAME (also run through sanitize_path_segment()) when
+        // it isn't.
+        std::filesystem::path files_dir = OLLI_DIRECTORY / "files" /
+            sanitize_path_segment(found_task.TASK_DIRECTORY.empty() ? found_task.TASK_NAME : found_task.TASK_DIRECTORY);
 
         std::string success_log = "SUCCESS: Automation found. Sequence loading...";
         chat.send_tool_result(tc_id, success_log);
@@ -773,7 +854,7 @@ void TOOL_TASK_RUNNER::handle_tool(IO_WORKER_CLASS& io_worker, ollama_system& ch
             // comment in tools.h).
             instance.process(io_worker, nullptr, tools_list, instance_comms);
 
-            advance_script_state(state, i, current_input, found_task, instance, instance_comms, tools_list);
+            advance_script_state(state, i, current_input, found_task, instance, instance_comms, tools_list, files_dir);
 
             io_worker.exchange(instance_comms, tools_list);
         }

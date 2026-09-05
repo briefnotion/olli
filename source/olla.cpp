@@ -335,8 +335,16 @@ void ollama_system::send(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, CO
     // - a remote tool connecting mid-session - shows up on the very next
     // request instead of never.
     tools = json::array();
-    for (auto& tool : tools_list)
-        tool->register_tool(*this, tools);
+    {
+        // tools_list_mutex (olla.h) - this loop runs on whatever thread is
+        // driving this instance's own chat_thread, concurrently with
+        // process()'s erase of a dead TOOL_REMOTE (below) on the main
+        // thread. See tools_list_mutex's own comment for the crash this
+        // closes.
+        std::lock_guard<std::mutex> lock(tools_list_mutex);
+        for (auto& tool : tools_list)
+            tool->register_tool(*this, tools);
+    }
 
     // Ollama's own streaming API is what makes either channel show up live
     // at all - needed whenever EITHER comms.INPUT_FROM_LLM (stream_output)
@@ -981,7 +989,14 @@ void ollama_system::process(IO_WORKER_CLASS& io_worker, CLASS_SYSTEM* system, st
     // tools.h) so it stops showing up in the tools array sent to Ollama.
     // monitor_tool() above is what actually notices a closed connection and
     // flips is_alive() to false; this is just where that gets acted on.
+    //
+    // tools_list_mutex (olla.h) guards just this erase, not the
+    // monitor_tool() loop above - monitor_tool() can recurse back into
+    // send() on this same thread (a pushed event -> integrate_tool_result()
+    // -> send()), which takes the same lock itself, and both only ever run
+    // on the main thread anyway so they were never racing each other.
     {
+        std::lock_guard<std::mutex> lock(tools_list_mutex);
         size_t before = tools_list.size();
         tools_list.erase(
             std::remove_if(tools_list.begin(), tools_list.end(),

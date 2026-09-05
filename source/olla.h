@@ -487,6 +487,22 @@ inline std::mutex history_mutex;
 // above - kept separate from history_mutex there too, so locking one doesn't block
 // the other.
 
+// Same 'inline' reasoning again, this time for main.cpp's one real
+// tools_list (std::vector<std::unique_ptr<TOOL_BASE>>, passed around by
+// reference everywhere rather than living on this class - see
+// populate_default_tools()'s comment above). Confirmed by a live crash:
+// ollama_system::send() (olla.cpp) rebuilds the tools schema by iterating
+// tools_list on whatever thread is driving that instance's own chat_thread,
+// while process() (olla.cpp) can concurrently erase a disconnected
+// TOOL_REMOTE from the very same vector on the main thread - caught with
+// gdb as a null unique_ptr dereference mid-iteration. Only guards the
+// mutation sites (send()'s register_tool loop, process()'s erase, and
+// main.cpp's push_back when a new remote tool connects) - NOT
+// monitor_tool()'s own loop, which can recurse back into send() (a pushed
+// event -> integrate_tool_result() -> send()) on the same thread and would
+// self-deadlock against a lock held across that whole loop.
+inline std::mutex tools_list_mutex;
+
 // The text-to-speech output hook used to live here as a single process-wide
 // global (g_audio_control), then later as a per-instance COMMS::audio
 // pointer. Neither exists anymore - IO_WORKER_CLASS::exchange() now fans

@@ -9,6 +9,7 @@
 #include <atomic>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <ctime>
 #include <cstdio>
 #include <mutex>
@@ -25,6 +26,17 @@ void simulateTyping(const std::string& text);
 // timestamped file names, see e.g. OUTPUT_CLASS::close_chat_log()
 // (user_io.cpp).
 std::string timestamp_prefix();
+
+// Reads path's whole content into out. Returns false (out left untouched)
+// if the file can't be opened.
+bool read_file(const std::filesystem::path& path, std::string& out);
+
+// Writes text to path, creating the file if it doesn't exist (but not any
+// missing parent directory - callers that need one made are responsible for
+// their own create_directories() first). append selects overwrite (false,
+// the default) vs. append (true) mode, so one function covers both instead
+// of needing a second near-identical one.
+bool write_file(const std::filesystem::path& path, const std::string& text, bool append = false);
 
 // ----
 

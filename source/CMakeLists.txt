@@ -126,6 +126,20 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(whisper_cpp)
 
+# 2b. Version header (source/version.h.in -> <build>/version.h), regenerated
+#     on every build via GenerateVersionHeader.cmake - see that script and
+#     version.h.in for why this isn't just an execute_process() call
+#     directly here. Written into the build tree, not the source tree, so
+#     the generated header never ends up tracked in git.
+add_custom_target(olli_version ALL
+    COMMAND ${CMAKE_COMMAND}
+        -DSRC_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+        -DOUT_FILE=${CMAKE_CURRENT_BINARY_DIR}/version.h
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/GenerateVersionHeader.cmake
+    BYPRODUCTS ${CMAKE_CURRENT_BINARY_DIR}/version.h
+    COMMENT "Checking olli's git version"
+)
+
 # 3. Define the executable
 add_executable(olli
     ../source/main.cpp
@@ -153,6 +167,11 @@ target_include_directories(olli SYSTEM PRIVATE
     ${whisper_cpp_SOURCE_DIR}/ggml/include
     ${NCURSES_INCLUDE_DIR}
 )
+
+# Not marked SYSTEM - it's our own generated header, still subject to the
+# strict warning flags below like any other olli source.
+target_include_directories(olli PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+add_dependencies(olli olli_version)
 
 # 5. Compiler-specific strict warning flags
 if(MSVC)

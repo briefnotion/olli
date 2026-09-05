@@ -245,7 +245,27 @@ line-prefixes: `[ASK]<text>` pauses and shows `<text>` as a request, then
 feeds whatever the user types back in as the next line; `[PAUSE]` just waits
 for Enter, no LLM involved; `[PRINT]<text>` displays `<text>` verbatim with
 no LLM call and immediately continues (handy for several lines of narration
-back to back, with nothing printed between them).
+back to back, with nothing printed between them); `[FILE_IN:name]` reads
+`name` in from the task's own files folder (see below) and feeds its
+contents in as the next line, same as a typed line would be; `[FILE_APPEND:name]`
+appends whatever the *previous* line's response was to `name` in that same
+folder (creating it if needed) and continues immediately, no LLM call.
+
+Every task gets its own folder under the profile's `files/` directory -
+`~/olli_files_<name>/files/<dir>/`, where `<dir>` is the `.task` file's own
+`DIRECTORY:` name if it set one, or its `NAME:` otherwise (either way, run
+through a sanitizer that strips `/`/`\` and swaps spaces for underscores, so
+it can never point outside that folder). `FILE_IN`/`FILE_APPEND`'s own
+`name` argument gets the same treatment - both commands only ever read or
+write flat filenames confined to that one folder, nothing else on disk is
+reachable from a script. Unlike the task's other scratch directory (created
+only when `DIRECTORY:` is set, and deleted once the script finishes), this
+one is never cleaned up - anything a script writes there via `FILE_APPEND`
+stays for as long as you want it to, across runs.
+
+If `FILE_IN` can't find/read `name`, it doesn't abort the script - it falls
+back to the same pause-and-prompt behavior as `[ASK]`, so you can paste the
+content in by hand and the script continues from there.
 
 Sample scripts (`system test`, `process resume`, `print test`, and an
 original creative one, `fitter status`) live under `sample_scripts/` in this

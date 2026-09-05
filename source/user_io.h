@@ -375,9 +375,13 @@ class OUTPUT_CLASS
         // last wrapped at (this lazy check is also the resize-recovery
         // mechanism - see the .cpp comment). start_row/content_col leave room
         // for a header (used by win_tools' "Tools:" label); paneled selects
-        // ncurses_commit_panels() (win_chat) vs a plain wrefresh().
+        // ncurses_commit_panels() (win_chat) vs a plain wrefresh(). footer, if
+        // non-empty, reserves win's own last row (shrinking the scrollable
+        // viewport by one) and draws it there instead of scrollable content -
+        // used by win_tools for the build version (see display_with_ncurses()).
         void ncurses_render_panel(WINDOW* win, NCURSES_TEXT_PANEL& panel, int start_row,
-                                   bool paneled, const std::string& header = "", int content_col = 0);
+                                   bool paneled, const std::string& header = "", int content_col = 0,
+                                   const std::string& footer = "");
 
         // Word-wraps the live-typed line, grows/shrinks win_input (and
         // correspondingly win_chat) only when the needed row count actually

@@ -76,6 +76,21 @@ void TASK_SIMPLE_MANAGER::load_all_task(const std::filesystem::path& scripts_dir
             }
             else if (!line.empty())
             {
+#if 0
+                // Draft, not yet implemented - sketched 2026-09-06 alongside
+                // a few new tools.cpp command markers (see
+                // advance_script_state()'s own #if 0 block). This one
+                // belongs here, not there: a "#" comment line is a
+                // parse-time filter (skip it, never add it to COMMANDS at
+                // all), not something the running script ever sees or
+                // executes, so it has nothing to do with the switch in
+                // advance_script_state(). Self-contained - no new
+                // parameters needed anywhere.
+                if (line[0] == '#')
+                {
+                    continue;
+                }
+#endif
                 tmp_task.COMMANDS.push_back(line);
             }
         }

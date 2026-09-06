@@ -144,17 +144,43 @@ namespace {
     // its cursor column is derived from the wrapped text's own length, and
     // word_wrap() silently drops a trailing space at a wrap point, which
     // makes the cursor fail to advance on a space keystroke.
+    //
+    // Splits on '\n' first (an explicit newline - see KEYBOARD_INPUT's own
+    // Ctrl+K/N/O/Alt+Enter handling in user_io.cpp - always starts a fresh
+    // row, the same as overflowing width does), then fixed-width-chunks
+    // each newline-delimited segment exactly as before. The '\n' itself is
+    // consumed as a row separator, not kept in the returned text, the same
+    // way width-overflow doesn't leave any marker behind either.
     std::vector<std::string> hard_wrap(const std::string& text, int width)
     {
         if (width <= 0) return { text };
         if (text.empty()) return { std::string() };
 
         std::vector<std::string> lines;
-        for (size_t i = 0; i < text.size(); i += static_cast<size_t>(width))
+        size_t start = 0;
+        while (true)
         {
-            lines.push_back(text.substr(i, static_cast<size_t>(width)));
+            size_t newline_pos = text.find('\n', start);
+            std::string segment = (newline_pos == std::string::npos)
+                ? text.substr(start)
+                : text.substr(start, newline_pos - start);
+
+            if (segment.empty())
+            {
+                lines.push_back(std::string());
+            }
+            else
+            {
+                for (size_t i = 0; i < segment.size(); i += static_cast<size_t>(width))
+                {
+                    lines.push_back(segment.substr(i, static_cast<size_t>(width)));
+                }
+                if (lines.back().size() == static_cast<size_t>(width)) lines.push_back(std::string());
+            }
+
+            if (newline_pos == std::string::npos) break;
+            start = newline_pos + 1;
         }
-        if (lines.back().size() == static_cast<size_t>(width)) lines.push_back(std::string());
         return lines;
     }
 }
@@ -376,6 +402,23 @@ void KEYBOARD_INPUT::keyboard_input()
                     ENTER_PRESSED = true;
                 }
             }
+            else if (ch == 11 || ch == 14 || ch == 15) // Ctrl+K/N/O - insert a
+                                // literal newline without submitting, same
+                                // as the Alt+Enter case below (ch == 27).
+                                // Three bindings instead of one since which
+                                // combos a given terminal/environment lets
+                                // through varies - plain Ctrl+<letter> is
+                                // about as safe as it gets (terminal
+                                // emulators essentially never intercept it,
+                                // unlike Alt+Enter/Shift+Enter/Ctrl+Enter),
+                                // but which of these three specifically
+                                // isn't already claimed by something else
+                                // (tmux, a screen reader, etc.) still varies.
+            {
+                LINE += '\n';
+                if (PROPS.RAW_ECHO) std::cout << "\r\n" << std::flush;
+                INTERRUPTED = true;
+            }
             else if ((ch == 127 || ch == 8))
             {
                 if (!LINE.empty())
@@ -392,30 +435,52 @@ void KEYBOARD_INPUT::keyboard_input()
             {
                 FOCUS_CYCLE_REQUESTED = true;
             }
-            else if (ch == 27) // ESC - possible CSI escape sequence; only
-                                // Page Up/Down (ESC [ 5/6 ~) are recognized
-                                // - see SCROLL_REQUEST's comment in user_io.h
+            else if (ch == 27) // ESC - possible CSI escape sequence (Page Up/
+                                // Down) or Alt+<key>: terminals send ESC
+                                // immediately followed by the key's own byte
+                                // for Alt-modified keys - a much older, far
+                                // more broadly-supported convention than
+                                // trying to detect Shift+Enter, which most
+                                // terminals don't report as distinct from
+                                // plain Enter at all. See SCROLL_REQUEST's
+                                // comment in user_io.h for the CSI half.
             {
                 char seq0 = 0, code = 0, tilde = 0;
-                if (read(STDIN_FILENO, &seq0, 1) > 0 && seq0 == '[' &&
-                    read(STDIN_FILENO, &code, 1) > 0)
+                if (read(STDIN_FILENO, &seq0, 1) > 0)
                 {
-                    if (code == '5' || code == '6')
+                    if (seq0 == '[' && read(STDIN_FILENO, &code, 1) > 0)
                     {
-                        read(STDIN_FILENO, &tilde, 1); // consume trailing '~'
-                        SCROLL_REQUEST = (code == '5') ? SCROLL_KEY::PAGE_UP : SCROLL_KEY::PAGE_DOWN;
+                        if (code == '5' || code == '6')
+                        {
+                            read(STDIN_FILENO, &tilde, 1); // consume trailing '~'
+                            SCROLL_REQUEST = (code == '5') ? SCROLL_KEY::PAGE_UP : SCROLL_KEY::PAGE_DOWN;
+                        }
+                        // any other CSI code (arrow keys, Home/End, ...) -
+                        // recognized as "not plain text" and discarded; no
+                        // handling defined for those yet
                     }
-                    // any other CSI code (arrow keys, Home/End, ...) -
-                    // recognized as "not plain text" and discarded; no
-                    // handling defined for those yet
+                    else if (seq0 == 10 || seq0 == 13 || seq0 == '\r')
+                    {
+                        // Alt+Enter - inserts a literal newline instead of
+                        // submitting, unlike plain Enter below (which always
+                        // flags ENTER_PRESSED). INTERRUPTED set the same way
+                        // a plain typed character sets it further down -
+                        // this is functionally "add to LINE", not "submit".
+                        LINE += '\n';
+                        if (PROPS.RAW_ECHO) std::cout << "\r\n" << std::flush;
+                        INTERRUPTED = true;
+                    }
+                    // any other ESC-prefixed byte (Alt+<other key>, a lone/
+                    // stray ESC, ...) - discarded, same as an unrecognized
+                    // CSI code; no handling defined for those yet
                 }
                 // Every byte read above (seq0/code/tilde) - and the ESC
                 // itself - is consumed here either way, never reaching
-                // LINE, so an incomplete/unrecognized sequence can't
-                // corrupt typed text. The nested read()s reuse the same
-                // non-blocking (VMIN=0/VTIME=0) fd as the outer loop, so
-                // this can't hang even when fewer bytes are available than
-                // expected.
+                // LINE via the plain-character branch below, so an
+                // incomplete/unrecognized sequence can't corrupt typed
+                // text. The nested read()s reuse the same non-blocking
+                // (VMIN=0/VTIME=0) fd as the outer loop, so this can't hang
+                // even when fewer bytes are available than expected.
             }
             else
             {

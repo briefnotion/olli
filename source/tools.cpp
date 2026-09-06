@@ -599,6 +599,141 @@ namespace {
                     write_file(file_path, instance.last_received.response, /*append=*/true);
                     ++i;
                 }
+#if 0
+                // Draft, not yet implemented - sketched 2026-09-06 during a
+                // "what commands are worth adding" discussion, deliberately
+                // left inert until actually being built. Each one below notes
+                // what it would additionally need beyond what's already
+                // threaded through this function's own parameter list.
+
+                else if (starts_with(command, "[WAIT:") && command.back() == ']')
+                {
+                    // Pure timed pause - no Enter needed, unlike [PAUSE].
+                    // Would need a new SCRIPT_STATE::WAIT_TIMER value and a
+                    // deadline to check on later ticks - meaning a new
+                    // std::chrono::steady_clock::time_point& parameter
+                    // threaded in from handle_tool()'s while loop the same
+                    // way i/current_input already are, since this function
+                    // has no state of its own between calls.
+                    std::string seconds_text = command.substr(6, command.size() - 6 - 1);
+                    double seconds = std::stod(seconds_text);
+                    // wait_until = std::chrono::steady_clock::now() +
+                    //     std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                    //         std::chrono::duration<double>(seconds));
+                    (void)seconds;
+                    // state = SCRIPT_STATE::WAIT_TIMER;
+                }
+                else if (starts_with(command, "[SET:") && command.back() == ']')
+                {
+                    // Captures the most recent answer/response under a name
+                    // so later lines can reference it - e.g. [ASK]What's your
+                    // name? ... [SET:name] ... three lines later,
+                    // [PRINT]thanks, {name}. Needs a
+                    // std::map<std::string, std::string>& variables parameter
+                    // threaded through (another new argument), AND a
+                    // substitution pass applied wherever text is currently
+                    // used verbatim - [PRINT], [ASK]'s REQUEST text, and the
+                    // plain-command branch's current_input would all need to
+                    // run their text through a small
+                    // substitute_variables(text, variables) helper first. Not
+                    // a single self-contained case the way the others are -
+                    // touches multiple existing branches.
+                    std::string var_name = command.substr(5, command.size() - 5 - 1);
+                    // variables[var_name] = instance.last_received.response;
+                    (void)var_name;
+                    ++i;
+                }
+                else if (starts_with(command, "[RANDOM:") && command.back() == ']')
+                {
+                    // Picks one of several '|'-separated options at random,
+                    // then treats the chosen one exactly like a plain command
+                    // line. Self-contained - no new parameters needed, just a
+                    // <random> include and a static/thread_local RNG (this is
+                    // a free function with no member state to keep one on).
+                    std::string options_text = command.substr(8, command.size() - 8 - 1);
+                    std::vector<std::string> options;
+                    // split options_text on '|' into options...
+                    // static std::mt19937 rng(std::random_device{}());
+                    // std::uniform_int_distribution<size_t> dist(0, options.size() - 1);
+                    // current_input = options[dist(rng)];
+                    (void)options;
+                    // state = SCRIPT_STATE::EXECUTE_COMMAND;
+                }
+                else if (starts_with(command, "[RUN:") && command.back() == ']')
+                {
+                    // Invokes another named task from inside this one, so
+                    // scripts can compose instead of duplicating commands.
+                    // The hardest of the four to actually wire up: this
+                    // function only ever sees found_task.COMMANDS, a fixed
+                    // const reference into the already-matched task from
+                    // handle_tool() - there's no access to
+                    // task_manager.TASK_LIST here to look another task up by
+                    // name at all (deliberately not threaded through - see
+                    // this function's own top comment on why it can't reach
+                    // OLLI_DIRECTORY/task_manager/chat). Splicing in another
+                    // task's commands would also mean found_task/i can no
+                    // longer just index one fixed COMMANDS vector - needs
+                    // something like a small call stack of (task, index)
+                    // pairs so a sub-task can finish and control returns to
+                    // the right place in the caller.
+                    std::string sub_task_name = command.substr(5, command.size() - 5 - 1);
+                    (void)sub_task_name;
+                }
+#endif
+#if 0
+                // Draft, not yet implemented - sketched 2026-09-06 for the
+                // "timer callback lands mid-[ASK]" race (a remote tool's
+                // event - e.g. a timer expiring - can interleave with a
+                // script's own EXECUTE_COMMAND/WAIT_ASK turns today, since
+                // neither pending_tool_calls' drain (tools.cpp,
+                // handle_instance_tools()) nor integrate_tool_result()'s
+                // direct, unconditional send() (called from
+                // TOOL_REMOTE::monitor_tool() via remote_tools.cpp) know or
+                // care what SCRIPT_STATE a running automation is in).
+                //
+                // The idea: while a script is running, redirect BOTH of
+                // those capture points into one FIFO queue on the instance
+                // (a real queue, not a single pending slot - confirmed
+                // multiple queued interrupts should just be handled one by
+                // one, in order, not batched) instead of acting immediately.
+                // A new [FLUSH_INTERRUPTS] marker, placed by the script
+                // author wherever they judge it safe (not hardcoded to
+                // "only at the very end" - that would also delay the timer's
+                // real action, e.g. the light actually blinking, not just
+                // its narration), drains the queue at that point.
+                //
+                // Real hookup would need, beyond what's sketched here:
+                //   1. A queue member on the instance - something like
+                //      struct PENDING_INTERRUPT { std::string narration;
+                //      bool has_action; ToolCall action; }; plus a
+                //      std::queue<PENDING_INTERRUPT>. Where exactly it lives
+                //      (ollama_system itself vs. threaded through as a new
+                //      advance_script_state() parameter) is still open.
+                //   2. remote_tools.cpp's event handler (~line 339-356)
+                //      redirecting into that queue instead of calling
+                //      integrate_tool_result()/pushing pending_tool_calls
+                //      directly, gated on "a script is currently running" -
+                //      not sketched here at all, lives in a different file.
+                //   3. Draining one queued item at a time can't happen in a
+                //      single GET_COMMAND tick the way the cases above do -
+                //      each queued item's own narration is itself an async
+                //      send() that needs its own WAIT_RESPONSE-style wait.
+                //      Needs its own new SCRIPT_STATE (e.g. FLUSHING_
+                //      INTERRUPTS) that pops and dispatches one item, waits
+                //      for it to finish, then loops back for the next item
+                //      until the queue's empty, only then advancing i.
+                else if (command == "[FLUSH_INTERRUPTS]")
+                {
+                    // if (interrupt_bucket.empty())
+                    // {
+                    //     ++i;
+                    // }
+                    // else
+                    // {
+                    //     state = SCRIPT_STATE::FLUSHING_INTERRUPTS;
+                    // }
+                }
+#endif
                 else
                 {
                     current_input = command;

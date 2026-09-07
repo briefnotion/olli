@@ -347,6 +347,14 @@ saved on the way out either way. (Raw-mode input disables the terminal's own
 signal generation, so Ctrl+C is handled explicitly rather than arriving as a
 real `SIGINT` — see `KEYBOARD_INPUT::EXIT_REQUESTED` in `user_io.h`.)
 
+**Web links:** whenever `web_search`/`fetch_website_content` (see Tools below)
+surface a link, a short `[Links: [1] title, ...]` notice appears under the
+response - press **Ctrl+L** to open the full list as real, clickable links.
+Links aren't rendered inline in the chat transcript itself: ncurses'
+own text-drawing routines strip out the escape codes a clickable terminal
+link needs, showing garbled text instead, so Ctrl+L's popup briefly drops
+out of ncurses to print real links directly, then returns.
+
 ---
 
 ## Display

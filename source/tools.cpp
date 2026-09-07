@@ -112,12 +112,7 @@ std::string TOOL_WEB_SEARCH::strip_html_tags(std::string html) {
     return html;
 }
 
-// OSC 8 terminal hyperlink escape sequence: ESC ] 8 ; ; URL ESC-backslash TEXT ESC ] 8 ; ; ESC-backslash
-std::string TOOL_WEB_SEARCH::make_clickable(const std::string& url, const std::string& text) {
-    return "\x1B]8;;" + url + "\x1B\\" + text + "\x1B]8;;\x1B\\";
-}
-
-std::string TOOL_WEB_SEARCH::perform_actual_search(const std::string& query) {
+std::string TOOL_WEB_SEARCH::perform_actual_search(const std::string& query, COMMS& comms) {
     CURL* curl;
     CURLcode res;
     std::string readBuffer;
@@ -164,6 +159,12 @@ std::string TOOL_WEB_SEARCH::perform_actual_search(const std::string& query) {
                     summary += "[TITLE]: " + title + "\n";
                     summary += "[SNIPPET]: " + item.value("snippet", "No description") + "\n";
                     summary += "[SOURCE_URL]: " + link + "\n\n";
+
+                    if (!link.empty())
+                    {
+                        std::lock_guard<std::mutex> lock(output_buffer_mutex);
+                        comms.WEB_LINKS.emplace_back(title, link);
+                    }
                 }
             } else {
                 summary = "No specific snippets found.";
@@ -177,7 +178,7 @@ std::string TOOL_WEB_SEARCH::perform_actual_search(const std::string& query) {
     return "Error: Could not initialize libcurl.";
 }
 
-std::string TOOL_WEB_SEARCH::fetch_url_content(const std::string& url) {
+std::string TOOL_WEB_SEARCH::fetch_url_content(const std::string& url, COMMS& comms) {
     CURL* curl;
     CURLcode res;
     std::string readBuffer;
@@ -196,6 +197,11 @@ std::string TOOL_WEB_SEARCH::fetch_url_content(const std::string& url) {
 
         if (res != CURLE_OK) return "Error fetching content.";
 
+        {
+            std::lock_guard<std::mutex> lock(output_buffer_mutex);
+            comms.WEB_LINKS.emplace_back(url, url);
+        }
+
         // Strip HTML noise so the model isn't parsing markup as content
         std::string cleanText = strip_html_tags(readBuffer);
 
@@ -208,9 +214,12 @@ std::string TOOL_WEB_SEARCH::fetch_url_content(const std::string& url) {
 void TOOL_WEB_SEARCH::register_tool(ollama_system&, json& tools) {
     tool_functions.clear();
 
-    // Told to the model via each tool's description so its final answer uses
-    // our clickable-link format instead of Markdown, which the terminal can't render.
-    std::string link_instruction = " When providing links in your final answer, do NOT use standard Markdown. Instead, use the format: CLICKABLE_LINK(url, text). The system will convert this to a clickable terminal link.";
+    // Told to the model via each tool's description so its final answer
+    // doesn't dump a raw URL into the chat text - every link from this
+    // tool is already surfaced separately (see COMMS::WEB_LINKS, comms.h)
+    // and shown/opened through its own UI, not through anything the model
+    // writes.
+    std::string link_instruction = " Do not include the raw URL in your final answer - links are shown to the user separately. Refer to a source by name instead (e.g. \"according to weather.com\").";
 
     json search_params = {
         {"type", "object"},
@@ -242,7 +251,7 @@ void TOOL_WEB_SEARCH::handle_tool(ollama_system& chat, std::vector<std::unique_p
             return;
         }
         std::string query = args.at("query").get<std::string>();
-        std::string result = perform_actual_search(query);
+        std::string result = perform_actual_search(query, comms);
 
         chat.send_tool_result(tc_id, result);
         chat.integrate_tool_result(tools_list, comms, "", "Search results for '" + query + "': " + result);
@@ -255,7 +264,7 @@ void TOOL_WEB_SEARCH::handle_tool(ollama_system& chat, std::vector<std::unique_p
             return;
         }
         std::string url = args.at("url").get<std::string>();
-        std::string result = fetch_url_content(url);
+        std::string result = fetch_url_content(url, comms);
 
         chat.send_tool_result(tc_id, "Cleaned Page Content from " + url + ":\n" + result);
         chat.integrate_tool_result(tools_list, comms, "", "I have fetched and processed the content from " + url + ". Here is the information retrieved: " + result);

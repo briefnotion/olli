@@ -4,6 +4,8 @@
 #include <string>
 #include <mutex>
 #include <atomic>
+#include <vector>
+#include <utility>
 
 #include <ncursesw/curses.h>
 
@@ -111,6 +113,31 @@ class COMMS
         // --------------------------------------------------------------
         bool ENABLE_KEYBOARD_INPUT = true;
         bool ENABLE_TTS_OUTPUT = true;
+        // --------------------------------------------------------------
+
+        // --------------------------------------------------------------
+        // (title, url) pairs surfaced by a tool call - currently only
+        // TOOL_WEB_SEARCH (tools.cpp), pushed here directly from the raw
+        // search/fetch result rather than parsed back out of the model's
+        // own rewritten response text (which may paraphrase or drop them
+        // entirely). Accumulate-then-drain, same shape as INPUT_FROM_LLM
+        // above: appended under output_buffer_mutex by whatever thread's
+        // running the tool call, relayed on by IO_WORKER_CLASS::exchange()
+        // (io_worker.cpp), which clears this copy once copied.
+        //
+        // Deliberately NOT rendered inline as a real clickable link in the
+        // chat panel - confirmed by a standalone test that ncurses'
+        // waddstr()/addstr() sanitizes the OSC 8 escape bytes into visible
+        // caret-notation garbage instead of passing them to the terminal,
+        // worse the longer the URL. Instead: OUTPUT_CLASS shows a short
+        // "[Links: ...]" notice near the response (display_with_ncurses(),
+        // user_io.cpp) and Ctrl+L (KEYBOARD_INPUT::SHOW_LINKS_REQUESTED)
+        // opens a full list via OUTPUT_CLASS::show_web_links_panel(),
+        // which drops out of curses mode (endwin()) and writes the OSC 8
+        // sequence with a raw std::cout instead - confirmed working
+        // (real clickable link, terminal opened it) once ncurses is out of
+        // the way.
+        std::vector<std::pair<std::string, std::string>> WEB_LINKS;
         // --------------------------------------------------------------
 
         // Opposite direction from the block above: set by main.cpp (main

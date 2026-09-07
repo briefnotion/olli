@@ -963,6 +963,8 @@ void IO_WORKER_CLASS::thread_main()
             key_input.SCROLL_REQUEST = SCROLL_KEY::NONE;
             focus_cycle_requested = key_input.FOCUS_CYCLE_REQUESTED;
             key_input.FOCUS_CYCLE_REQUESTED = false;
+            show_links_requested = key_input.SHOW_LINKS_REQUESTED;
+            key_input.SHOW_LINKS_REQUESTED = false;
 
             // 3. Ctrl+C - checked early, same priority it had in main.cpp's
             // old loop (wins over anything else this tick).
@@ -1069,6 +1071,17 @@ void IO_WORKER_CLASS::thread_main()
             // drain for TTS over the same source text. Still under
             // output_buffer_mutex (get_response()'s own lock).
             output.get_response(comms_buffer);
+
+            // 9.5. Web-links popup - Ctrl+L. Handled right here, after
+            // get_response() just above has drained comms_buffer.WEB_LINKS
+            // into output.web_links, so the popup always sees whatever
+            // arrived this same tick. A no-op (inside the function itself)
+            // if there's nothing to show yet.
+            if (show_links_requested)
+            {
+                output.show_web_links_panel();
+            }
+
             // chat.pull_background_output(output) used to run here too -
             // dropped along with chat's removal from this class; task
             // runner is expected to go through comms instead once it's
@@ -1155,6 +1168,12 @@ void IO_WORKER_CLASS::exchange(COMMS& comms, std::vector<std::unique_ptr<TOOL_BA
             comms_buffer.INPUT_FROM_LLM += comms.INPUT_FROM_LLM;
             comms_buffer_audio.INPUT_FROM_LLM += comms.INPUT_FROM_LLM;
             comms.INPUT_FROM_LLM.clear();
+        }
+
+        if (!comms.WEB_LINKS.empty())
+        {
+            comms_buffer.WEB_LINKS.insert(comms_buffer.WEB_LINKS.end(), comms.WEB_LINKS.begin(), comms.WEB_LINKS.end());
+            comms.WEB_LINKS.clear();
         }
 
         if (!comms.INPUT_FROM_THINKING.empty())

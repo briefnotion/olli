@@ -116,10 +116,9 @@ class TOOL_WEB_SEARCH : public TOOL_BASE
     private:
 
         std::string strip_html_tags(std::string html);
-        std::string make_clickable(const std::string& url, const std::string& text);
 
-        std::string perform_actual_search(const std::string& query);
-        std::string fetch_url_content(const std::string& url);
+        std::string perform_actual_search(const std::string& query, COMMS& comms);
+        std::string fetch_url_content(const std::string& url, COMMS& comms);
 
         void handle_tool(ollama_system& chat, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms, const std::string& name, const json& args, const std::string& tc_id);
 

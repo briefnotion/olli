@@ -102,6 +102,13 @@ class KEYBOARD_INPUT
         // SCROLL_REQUEST.
         bool FOCUS_CYCLE_REQUESTED = false;
 
+        // Set by Ctrl+L (byte 12) - requests OUTPUT_CLASS::show_web_links_
+        // panel() (user_io.cpp), the non-ncurses popup listing whatever's
+        // in COMMS::WEB_LINKS as real, clickable OSC 8 links. Same read-
+        // and-cleared-by-caller contract as SCROLL_REQUEST/FOCUS_CYCLE_
+        // REQUESTED above.
+        bool SHOW_LINKS_REQUESTED = false;
+
         KEYBOARD_INPUT();
         ~KEYBOARD_INPUT();
 
@@ -414,6 +421,16 @@ class OUTPUT_CLASS
         std::string chat_response = "";
         std::string chat_thinking = "";
 
+        // Drained from comms.WEB_LINKS by get_response(), same as the four
+        // string buckets above - never cleared afterward (unlike those),
+        // since these need to stick around for show_web_links_panel() to
+        // list at any later point, not just the one tick they arrived on.
+        // web_links_shown_count tracks how many of these display_with_
+        // ncurses() has already announced with a "[Links: ...]" notice, so
+        // that notice only ever mentions newly-arrived entries.
+        std::vector<std::pair<std::string, std::string>> web_links;
+        size_t web_links_shown_count = 0;
+
         // Set once by main.cpp (alongside ollama_system::PROPS.OLLI_DIRECTORY
         // - same profile directory, see Settings::get_settings_path()) right
         // after settings load. Left empty (the default) disables the chat
@@ -489,6 +506,20 @@ class OUTPUT_CLASS
         void display_with_ncurses(const std::string& input_from_user_echo, const COMMS& comms,
                                    const std::vector<std::string>& tool_names,
                                    SCROLL_KEY scroll_request, bool focus_cycle_requested);
+
+        // Ctrl+L (KEYBOARD_INPUT::SHOW_LINKS_REQUESTED). Drops out of
+        // curses mode (def_prog_mode()+endwin()), lists web_links as real
+        // OSC 8 clickable links via a raw std::cout - ncurses' own
+        // waddstr()/addstr() sanitizes those escape bytes into visible
+        // garbage instead of passing them to the terminal (confirmed by a
+        // standalone test), so this bypasses ncurses entirely for the one
+        // screen that needs a working link. Blocks (polling the same raw,
+        // non-blocking stdin read the rest of input handling uses) until
+        // any key is pressed, then resumes curses (reset_prog_mode()) and
+        // forces a full redraw (clearok(curscr, TRUE)) to recover from
+        // whatever the raw prints did to the physical screen. A no-op if
+        // web_links is empty.
+        void show_web_links_panel();
 };
 
 #endif

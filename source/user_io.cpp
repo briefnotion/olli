@@ -59,6 +59,11 @@ namespace {
     constexpr int PAIR_DELEGATOR_LLM = 4;
     constexpr int PAIR_DELEGATOR_USER = 5;
 
+    // The "[Links: ...]" notice display_with_ncurses() appends after a
+    // response that surfaced web links - distinct from plain chat_response
+    // text so it reads as a UI hint, not part of the assistant's answer.
+    constexpr int PAIR_WEB_LINKS_NOTICE = 6;
+
     // How long the thinking box lingers after in_thinking_block drops
     // before it actually closes - see ncurses_thinking_closing's comment
     // in user_io.h.
@@ -433,6 +438,11 @@ void KEYBOARD_INPUT::keyboard_input()
                     if (PROPS.RAW_ECHO) std::cout << "\b \b" << std::flush;
                 }
             }
+            else if (ch == 12) // Ctrl+L - request the web-links popup (see
+                                // SHOW_LINKS_REQUESTED's comment, user_io.h)
+            {
+                SHOW_LINKS_REQUESTED = true;
+            }
             else if (ch == 9) // Tab - focus-cycle, repurposed away from
                                // literal-tab insertion the same way Ctrl+C
                                // above is repurposed away from literal
@@ -549,6 +559,8 @@ void OUTPUT_CLASS::get_response(COMMS& comms)
     comms.INPUT_FROM_THINKING.clear();
     system_message += comms.INPUT_FROM_SYSTEM;
     comms.INPUT_FROM_SYSTEM.clear();
+    web_links.insert(web_links.end(), comms.WEB_LINKS.begin(), comms.WEB_LINKS.end());
+    comms.WEB_LINKS.clear();
 }
 
 void OUTPUT_CLASS::append_to_chat_log(bool is_user, const std::string& text)
@@ -1146,6 +1158,7 @@ void OUTPUT_CLASS::display_with_ncurses(const std::string& input_from_user_echo,
             init_pair(PAIR_TASK_RUNNER_USER, COLOR_YELLOW, -1);
             init_pair(PAIR_DELEGATOR_LLM, COLOR_MAGENTA, -1);
             init_pair(PAIR_DELEGATOR_USER, COLOR_GREEN, -1);
+            init_pair(PAIR_WEB_LINKS_NOTICE, COLOR_BLUE, -1);
         }
 
         std::signal(SIGWINCH, handle_sigwinch);
@@ -1333,6 +1346,25 @@ void OUTPUT_CLASS::display_with_ncurses(const std::string& input_from_user_echo,
         chat_response.clear();
     }
 
+    // Web links notice - only whatever's arrived since the last one was
+    // shown (see web_links_shown_count's comment, user_io.h), so a link
+    // never gets announced twice. Plain text, not a real link (see
+    // COMMS::WEB_LINKS's comment, comms.h for why) - Ctrl+L opens the full,
+    // actually-clickable list.
+    if (web_links.size() > web_links_shown_count)
+    {
+        std::string links_notice = "[Links: ";
+        for (size_t i = web_links_shown_count; i < web_links.size(); ++i)
+        {
+            if (i > web_links_shown_count) links_notice += ", ";
+            links_notice += "[" + std::to_string(i + 1) + "] " + web_links[i].first;
+        }
+        links_notice += " - Ctrl+L to open]\n";
+        int links_notice_attr = ncurses_colors_available ? COLOR_PAIR(PAIR_WEB_LINKS_NOTICE) : 0;
+        chat_panel.append(links_notice, links_notice_attr, ncurses_main_w);
+        web_links_shown_count = web_links.size();
+    }
+
     // Renders once per tick regardless of whether either bucket above had
     // anything new - this is also what makes a scroll-only tick (no new
     // text) redraw correctly for free, and what recovers a resize (see this
@@ -1352,6 +1384,48 @@ void OUTPUT_CLASS::display_with_ncurses(const std::string& input_from_user_echo,
         tools_panel.rebuild_from(tool_names, win_w - 2);
         ncurses_render_panel(win_tools, tools_panel, 2, false, "Tools:", 1, TOOLS_PANEL_VERSION_FOOTER);
     }
+}
+
+// OSC 8 terminal hyperlink escape sequence: ESC ] 8 ; ; URL ESC-backslash
+// TEXT ESC ] 8 ; ; ESC-backslash. Local to this file, not shared with
+// TOOL_WEB_SEARCH (tools.cpp) - keeps this file independent of tools.h for
+// one line of formatting.
+static std::string make_clickable_link(const std::string& url, const std::string& text) {
+    return "\x1B]8;;" + url + "\x1B\\" + text + "\x1B]8;;\x1B\\";
+}
+
+void OUTPUT_CLASS::show_web_links_panel()
+{
+    if (web_links.empty() || !ncurses_started) return;
+
+    def_prog_mode(); // save curses' idea of terminal modes
+    endwin();        // actually leave curses mode - see this function's own
+                      // comment (user_io.h) for why
+
+    std::cout << "\x1B[2J\x1B[H" << std::flush; // clear screen, home cursor - raw ANSI, ncurses isn't involved
+
+    std::cout << "Web Links (press any key to return)\n";
+    std::cout << "-------------------------------------\n\n";
+    for (size_t i = 0; i < web_links.size(); ++i)
+    {
+        std::cout << (i + 1) << ". " << make_clickable_link(web_links[i].second, web_links[i].first) << "\n";
+    }
+    std::cout << std::flush;
+
+    // Same raw non-blocking read KEYBOARD_INPUT's own loop uses (VMIN=0/
+    // VTIME=0) - poll until a byte shows up rather than switching the fd
+    // back to a blocking read.
+    char ch = 0;
+    while (read(STDIN_FILENO, &ch, 1) <= 0)
+    {
+        usleep(20000);
+    }
+
+    reset_prog_mode();     // restore curses' terminal modes
+    clearok(curscr, TRUE); // force the next refresh to redraw everything -
+                            // curses has no idea the raw prints above ever
+                            // happened, so a diff-only refresh would leave
+                            // stale content on screen
 }
 
 #endif

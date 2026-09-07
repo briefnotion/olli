@@ -348,6 +348,12 @@ class IO_WORKER_CLASS
         SCROLL_KEY scroll_request = SCROLL_KEY::NONE;
         bool focus_cycle_requested = false;
 
+        // Live mirror of key_input.SHOW_LINKS_REQUESTED, same read-and-
+        // cleared-each-tick contract as the two above - acted on later in
+        // the same tick, after get_response() has drained comms_buffer.
+        // WEB_LINKS into output.web_links (see thread_main()).
+        bool show_links_requested = false;
+
         // Owns text-to-speech (via TextToSpeech) and speech-to-text (via
         // Voca) in-process, and coordinates them: while TTS is speaking,
         // Voca is paused so it doesn't hear olli's own voice; once speech

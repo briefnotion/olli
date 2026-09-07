@@ -1375,6 +1375,73 @@ it can actually act under its persona's judgment, not just talk about it.
     off for the whole run, TTS off for just the first section, `#` comments
     explaining why. Live end-to-end test confirmed working.
 
+### Web-search links: suppressed a stray `std::cout`, then a real clickable-link popup (2026-09-07)
+
+- **Bug: `TOOL_WEB_SEARCH` bypassing the comms channel.**
+  `perform_actual_search()` (`tools.cpp`) had a leftover
+  `std::cout << "[System] Result Found: " << make_clickable(link, title)`
+  for each organic search result - a raw write straight to the terminal
+  while ncurses owns the screen, invisible to `COMMS`/`OUTPUT_CLASS`
+  entirely, corrupting the display. Removed outright: the same title/
+  link/snippet already flows back to the model through the function's own
+  `summary` return value, so nothing was lost. `make_clickable()` (the
+  OSC 8 escape-sequence formatter it called) became dead code as a result
+  and was removed too - a fresh copy was written locally in `user_io.cpp`
+  for the popup below instead of sharing the old one, so that file doesn't
+  need to depend on `tools.h`.
+
+- **Investigated: can a link render as clickable straight in the ncurses
+  chat panel?** A standalone test program (outside the repo) confirmed
+  no - `waddstr()`/`addstr()` sanitizes unprintable control bytes
+  (including the OSC 8 sequence's own ESC bytes) into visible caret
+  notation instead of passing them to the terminal, so an inline link
+  just shows as garbled escape text, worse the longer the URL. Plain bare
+  URLs (relying on the terminal's own auto-linking of a `https://...`
+  substring) were also ruled out for the same reason a raw
+  `perform_actual_search` URL from a real API is long (query strings,
+  session tokens) - inline, it breaks up the response text badly. The
+  same standalone test then confirmed a fix: dropping out of curses mode
+  entirely (`def_prog_mode()`+`endwin()`) and writing the OSC 8 sequence
+  with a raw `std::cout` *does* render as a real, working clickable link
+  (confirmed live - clicked it, it opened the page) - ncurses just never
+  gets a chance to sanitize bytes it never sees.
+
+- **The feature: `COMMS::WEB_LINKS` + Ctrl+L popup.** New
+  `std::vector<std::pair<std::string, std::string>> WEB_LINKS` on `COMMS`
+  (title, url pairs) - accumulate-then-drain, same shape as
+  `INPUT_FROM_LLM`: `TOOL_WEB_SEARCH::perform_actual_search()`/
+  `fetch_url_content()` (now taking `COMMS&`) push directly from the raw
+  search/fetch result under `output_buffer_mutex`, not parsed back out of
+  the model's own rewritten response text (which may paraphrase or drop
+  them). Relayed on by `IO_WORKER_CLASS::exchange()` exactly like every
+  other field there - a plain pass-through, no gating. The model's own
+  tool description no longer tells it to emit a `CLICKABLE_LINK(url,
+  text)` marker (the old, never-actually-converted format) - it's told to
+  just refer to a source by name instead, since the real link is already
+  shown separately.
+  - `OUTPUT_CLASS::get_response()` drains `comms.WEB_LINKS` into a new
+    `web_links` member - unlike the four string buckets it also drains,
+    this one is never cleared afterward, since it needs to still be there
+    whenever the popup opens, not just the tick it arrived on.
+  - `display_with_ncurses()` appends a short `"[Links: [1] title, [2]
+    title - Ctrl+L to open]"` notice right after the response text that
+    surfaced them, in a new dedicated color (`PAIR_WEB_LINKS_NOTICE`,
+    blue) so it reads as a UI hint rather than part of the assistant's
+    answer. `web_links_shown_count` tracks how many entries have already
+    been announced, so a link is never mentioned twice across ticks.
+  - New `KEYBOARD_INPUT::SHOW_LINKS_REQUESTED`, set by Ctrl+L (byte 12,
+    previously unused) the same read-and-cleared-by-caller way `Tab`/Page
+    Up/Down already work. `IO_WORKER_CLASS::thread_main()` acts on it
+    right after `get_response()` (so the popup always sees whatever just
+    arrived that tick), calling the new
+    `OUTPUT_CLASS::show_web_links_panel()`: drops out of curses mode,
+    lists every `web_links` entry as a real OSC 8 link via raw
+    `std::cout`, polls the same raw non-blocking stdin read the rest of
+    input handling uses until a key is pressed, then resumes curses and
+    forces a full redraw (`clearok(curscr, TRUE)`) to recover from
+    whatever the raw prints did to the physical screen. Confirmed working
+    live, colored notice included.
+
 ## Voice (Voca)
 
 - Wake word is "olli" (`findWakeWord()`/`findSleepTrigger()`, now in

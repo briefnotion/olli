@@ -943,6 +943,11 @@ void IO_WORKER_CLASS::thread_main()
             }
 
             // 1. Keyboard - non-blocking, drains whatever's available.
+            // Synced from comms_buffer right before reading, so
+            // keyboard_input() actually reflects whatever exchange() last
+            // relayed in from the real comms - previously nothing set this,
+            // so it stayed stuck at its default true regardless of the flag.
+            key_input.PROPS.CHAT_INPUT_ENABLED = comms_buffer.ENABLE_KEYBOARD_INPUT;
             key_input.keyboard_input();
 
             // 2. Mirror key_input's own live state. IS_TYPING goes into
@@ -982,7 +987,11 @@ void IO_WORKER_CLASS::thread_main()
             // ever appends to it), so no separate buffer is needed.
             if (tts && !tts->isSpeaking() && !comms_buffer_audio.INPUT_FROM_LLM.empty())
             {
-                tts->speakAsync(comms_buffer_audio.INPUT_FROM_LLM);
+                // Drained either way so disabled speech doesn't just pile up
+                // and dump out once re-enabled - comms_buffer.ENABLE_TTS_
+                // OUTPUT (copied in by exchange(), same as ENABLE_KEYBOARD_
+                // INPUT) only gates whether it's actually spoken.
+                if (comms_buffer.ENABLE_TTS_OUTPUT) tts->speakAsync(comms_buffer_audio.INPUT_FROM_LLM);
                 comms_buffer_audio.INPUT_FROM_LLM.clear();
             }
 
@@ -1167,6 +1176,8 @@ void IO_WORKER_CLASS::exchange(COMMS& comms, std::vector<std::unique_ptr<TOOL_BA
         // there's nothing to clear on the source side either.
         comms_buffer.INPUT_FROM_LLM_COLOR = comms.INPUT_FROM_LLM_COLOR;
         comms_buffer.INPUT_FROM_USER_COLOR = comms.INPUT_FROM_USER_COLOR;
+        comms_buffer.ENABLE_KEYBOARD_INPUT = comms.ENABLE_KEYBOARD_INPUT;
+        comms_buffer.ENABLE_TTS_OUTPUT = comms.ENABLE_TTS_OUTPUT;
     }
 
     // Same direction as the block above (comms -> comms_buffer), just

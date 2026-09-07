@@ -240,16 +240,28 @@ Announce the system test is complete.
 ```
 
 Three header lines (`NAME:`/`PURPOSE:`/`DIRECTORY:`), a `---` separator, then
-one command per line, sent to a background instance in order. Special
-line-prefixes: `[ASK]<text>` pauses and shows `<text>` as a request, then
-feeds whatever the user types back in as the next line; `[PAUSE]` just waits
-for Enter, no LLM involved; `[PRINT]<text>` displays `<text>` verbatim with
-no LLM call and immediately continues (handy for several lines of narration
-back to back, with nothing printed between them); `[FILE_IN:name]` reads
-`name` in from the task's own files folder (see below) and feeds its
-contents in as the next line, same as a typed line would be; `[FILE_APPEND:name]`
-appends whatever the *previous* line's response was to `name` in that same
-folder (creating it if needed) and continues immediately, no LLM call.
+one command per line, sent to a background instance in order. A line
+starting with `#` is a comment - skipped entirely when the script loads, so
+it never runs and never counts as a command. Special line-prefixes:
+`[ASK]<text>` pauses and shows `<text>` as a request, then feeds whatever
+the user types back in as the next line; `[PAUSE]` just waits for Enter, no
+LLM involved; `[PRINT]<text>` displays `<text>` verbatim with no LLM call
+and immediately continues (handy for several lines of narration back to
+back, with nothing printed between them); `[FILE_IN:name]` reads `name` in
+from the task's own files folder (see below) and feeds its contents in as
+the next line, same as a typed line would be; `[FILE_APPEND:name]` appends
+whatever the *previous* line's response was to `name` in that same folder
+(creating it if needed) and continues immediately, no LLM call;
+`[KEYBOARD_INPUT:on]`/`[KEYBOARD_INPUT:off]` and `[TTS_OUTPUT:on]`/
+`[TTS_OUTPUT:off]` turn typed input and spoken responses on or off for the
+rest of the script (or until toggled again) - handy for a run that
+shouldn't be interrupted by a stray keystroke, or one that shouldn't talk
+over itself. `[ASK]` and `[PAUSE]` each save whatever `[KEYBOARD_INPUT]` is
+set to, force it on for themselves (they inherently need a keypress no
+matter the current setting), then restore the saved value once done - so a
+script only needs one `[KEYBOARD_INPUT:off]` near the top, not one around
+every command that needs input. `[TTS_OUTPUT]` has no such auto-restore;
+turn it back on explicitly wherever the script should start talking again.
 
 Every task gets its own folder under the profile's `files/` directory -
 `~/olli_files_<name>/files/<dir>/`, where `<dir>` is the `.task` file's own

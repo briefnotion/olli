@@ -91,6 +91,28 @@ class COMMS
         bool EXIT_REQUESTED = false;   // Ctrl+C - shut olli down
         // --------------------------------------------------------------
 
+        // --------------------------------------------------------------
+        // Simple on/off toggles. Deliberately NOT checked by
+        // IO_WORKER_CLASS::exchange() (io_worker.cpp) - that function is a
+        // plain pass-through in both directions, no policy decisions. The
+        // actual gating lives wherever each thing is produced/captured
+        // instead: ncurses_update_input_box() (user_io.cpp) dims the input
+        // box when ENABLE_KEYBOARD_INPUT is false, KEYBOARD_INPUT::
+        // keyboard_input()'s own PROPS.CHAT_INPUT_ENABLED (synced from this
+        // each tick in IO_WORKER_CLASS::thread_main()) skips its
+        // content-building keys, and thread_main()'s TTS-speaking step
+        // checks ENABLE_TTS_OUTPUT directly before calling speakAsync().
+        // Default true on both, matching the always-on behavior before
+        // either was wired in. Settable from a running .task script via
+        // [KEYBOARD_INPUT:on/off] and [TTS_OUTPUT:on/off]
+        // (tools_task_script.cpp) - [ASK]/[PAUSE] save and restore
+        // ENABLE_KEYBOARD_INPUT automatically around themselves, since they
+        // inherently need a human to press a key regardless of this flag.
+        // --------------------------------------------------------------
+        bool ENABLE_KEYBOARD_INPUT = true;
+        bool ENABLE_TTS_OUTPUT = true;
+        // --------------------------------------------------------------
+
         // Opposite direction from the block above: set by main.cpp (main
         // thread) when sidetrack's context-clear routine fires mid-loop,
         // consumed by IO_WORKER_CLASS::thread_main() (its own thread),

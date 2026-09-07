@@ -394,12 +394,15 @@ void KEYBOARD_INPUT::keyboard_input()
             }
             else if (ch == 10 || ch == 13 || ch == '\r')
             {
-                LINE += '\n';
-                if (PROPS.RAW_ECHO) std::cout << "\r\n" << std::flush;
-                if (gap_time > 0.1)
+                if (PROPS.CHAT_INPUT_ENABLED)
                 {
-                    INTERRUPTED = true;
-                    ENTER_PRESSED = true;
+                    LINE += '\n';
+                    if (PROPS.RAW_ECHO) std::cout << "\r\n" << std::flush;
+                    if (gap_time > 0.1)
+                    {
+                        INTERRUPTED = true;
+                        ENTER_PRESSED = true;
+                    }
                 }
             }
             else if (ch == 11 || ch == 14 || ch == 15) // Ctrl+K/N/O - insert a
@@ -415,13 +418,16 @@ void KEYBOARD_INPUT::keyboard_input()
                                 // isn't already claimed by something else
                                 // (tmux, a screen reader, etc.) still varies.
             {
-                LINE += '\n';
-                if (PROPS.RAW_ECHO) std::cout << "\r\n" << std::flush;
-                INTERRUPTED = true;
+                if (PROPS.CHAT_INPUT_ENABLED)
+                {
+                    LINE += '\n';
+                    if (PROPS.RAW_ECHO) std::cout << "\r\n" << std::flush;
+                    INTERRUPTED = true;
+                }
             }
             else if ((ch == 127 || ch == 8))
             {
-                if (!LINE.empty())
+                if (PROPS.CHAT_INPUT_ENABLED && !LINE.empty())
                 {
                     LINE.pop_back();
                     if (PROPS.RAW_ECHO) std::cout << "\b \b" << std::flush;
@@ -466,9 +472,12 @@ void KEYBOARD_INPUT::keyboard_input()
                         // flags ENTER_PRESSED). INTERRUPTED set the same way
                         // a plain typed character sets it further down -
                         // this is functionally "add to LINE", not "submit".
-                        LINE += '\n';
-                        if (PROPS.RAW_ECHO) std::cout << "\r\n" << std::flush;
-                        INTERRUPTED = true;
+                        if (PROPS.CHAT_INPUT_ENABLED)
+                        {
+                            LINE += '\n';
+                            if (PROPS.RAW_ECHO) std::cout << "\r\n" << std::flush;
+                            INTERRUPTED = true;
+                        }
                     }
                     // any other ESC-prefixed byte (Alt+<other key>, a lone/
                     // stray ESC, ...) - discarded, same as an unrecognized
@@ -482,7 +491,7 @@ void KEYBOARD_INPUT::keyboard_input()
                 // (VMIN=0/VTIME=0) fd as the outer loop, so this can't hang
                 // even when fewer bytes are available than expected.
             }
-            else
+            else if (PROPS.CHAT_INPUT_ENABLED)
             {
                 LINE += ch;
                 if (PROPS.RAW_ECHO) std::cout << ch << std::flush;
@@ -1026,7 +1035,7 @@ void OUTPUT_CLASS::ncurses_render_panel(WINDOW* win, NCURSES_TEXT_PANEL& panel, 
 // head: LINE only ever grows/shrinks at its end (no mid-line editing - see
 // its own comment in user_io.h), so tail-clipping keeps the cursor always
 // visible at the cost of hiding the start of a very long line.
-void OUTPUT_CLASS::ncurses_update_input_box(const std::string& input_from_user_echo)
+void OUTPUT_CLASS::ncurses_update_input_box(const std::string& input_from_user_echo, bool input_enabled)
 {
     if (win_input == nullptr || win_chat == nullptr) return;
 
@@ -1070,6 +1079,13 @@ void OUTPUT_CLASS::ncurses_update_input_box(const std::string& input_from_user_e
     int start = (total > ncurses_input_rows) ? (total - ncurses_input_rows) : 0;
 
     werase(win_input);
+
+    // Ghosted/inactive look when input's disabled - dims the whole box
+    // (prefix, typed text, and the cursor stand-in below) rather than
+    // changing its shape or content, so it's visually clear at a glance
+    // without the box appearing to lose or hide anything.
+    if (!input_enabled) wattron(win_input, A_DIM);
+
     int row = 0;
     for (int i = start; i < total; ++i)
     {
@@ -1085,6 +1101,8 @@ void OUTPUT_CLASS::ncurses_update_input_box(const std::string& input_from_user_e
     waddch(win_input, ' ');
     wattroff(win_input, A_REVERSE);
 
+    if (!input_enabled) wattroff(win_input, A_DIM);
+
     wrefresh(win_input);
 }
 
@@ -1092,8 +1110,6 @@ void OUTPUT_CLASS::display_with_ncurses(const std::string& input_from_user_echo,
                                          const std::vector<std::string>& tool_names,
                                          SCROLL_KEY scroll_request, bool focus_cycle_requested)
 {
-    (void)comms; // not read yet - passed through for future use, see io_worker.h's own comment
-
     if (!ncurses_started)
     {
         setlocale(LC_ALL, ""); // required before initscr() for wide/UTF-8 output
@@ -1231,7 +1247,7 @@ void OUTPUT_CLASS::display_with_ncurses(const std::string& input_from_user_echo,
     // Input box first - it may resize win_chat (see ncurses_update_input_box()),
     // so the chat render below this uses win_chat's final geometry for the
     // tick rather than a stale size from before an in-tick input growth.
-    ncurses_update_input_box(input_from_user_echo);
+    ncurses_update_input_box(input_from_user_echo, comms.ENABLE_KEYBOARD_INPUT);
 
     // Page Up/Down - applies to whichever panel currently has focus.
     if (scroll_request != SCROLL_KEY::NONE)

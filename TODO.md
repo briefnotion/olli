@@ -1302,6 +1302,79 @@ it can actually act under its persona's judgment, not just talk about it.
     one continuous conversation. Not an olli bug, but worth knowing this
     class of task is prone to it.
 
+### Task-runner readability split; `#` comments; `[KEYBOARD_INPUT]`/`[TTS_OUTPUT]` toggles with auto save/restore (2026-09-07)
+
+- **`tools_task_script.h`/`.cpp` split off from `tools.cpp`.** Purely a
+  readability move, no behavior change: `advance_script_state()` and every
+  `command_*()` function it dispatches to (`command_pause`, `command_ask`,
+  `command_print`, `command_file_in`, `command_file_append`,
+  `command_keyboard_input`, `command_tts_output`, `command_plain`,
+  `command_get_command`, `command_wait_enter`, `command_wait_ask`,
+  `command_execute_command`, `command_wait_response`) moved out to their own
+  header/source pair as free functions (not `TOOL_TASK_RUNNER` methods -
+  each takes exactly the references it needs, deliberately isolated from
+  `chat`/`comms`/`task_manager`/`OLLI_DIRECTORY`), so the state machine's
+  cases can be read and followed on their own instead of scrolling through
+  `TOOL_TASK_RUNNER::handle_tool()`'s other ~1000 lines. `CMakeLists.txt`
+  gained the new `.cpp` in `add_executable(olli ...)`.
+
+- **`#` comment lines.** A parse-time filter in
+  `TASK_SIMPLE_MANAGER::load_all_task()` (`tools_helper.cpp`): any line
+  starting with `#` is skipped before it's ever pushed into `COMMANDS`, so a
+  running script has no idea the comment ever existed - `advance_script_state()`
+  needed no changes at all.
+
+- **`[KEYBOARD_INPUT:on/off]` / `[TTS_OUTPUT:on/off]`.** New `COMMS` fields
+  `ENABLE_KEYBOARD_INPUT`/`ENABLE_TTS_OUTPUT` (`comms.h`, both default
+  `true`), set by the two new `command_keyboard_input()`/`command_tts_output()`
+  functions parsing a plain `"on"`/`"off"` value off the command string.
+  Deliberately **not** gated inside `IO_WORKER_CLASS::exchange()`
+  (`io_worker.cpp`) - that function stays a complete, policy-free pass
+  through in both directions; the two flags are just plain-copied from
+  `comms` to `comms_buffer` there, same shape as the existing color-field
+  copies right above them. The actual gating lives at the point each thing
+  is produced/captured instead:
+  - `thread_main()` syncs `key_input.PROPS.CHAT_INPUT_ENABLED` from
+    `comms_buffer.ENABLE_KEYBOARD_INPUT` every tick, right before calling
+    `keyboard_input()`. New plain `bool CHAT_INPUT_ENABLED = true` on
+    `KEYBOARD_INPUT_PROPERTIES` (`user_io.h` - not atomic, unlike the
+    existing `ENABLED`, since only the worker thread ever touches it).
+    Inside `keyboard_input()` (`user_io.cpp`), every content-building branch
+    (Enter, Ctrl+K/N/O, backspace, Alt+Enter, plain chars) is gated behind
+    `PROPS.CHAT_INPUT_ENABLED`, and `INTERRUPTED = true` sits *nested inside*
+    those same four guards rather than firing unconditionally - a full
+    lockout by design, so a stray keypress while keyboard is off can't
+    break a running script's cycle (confirmed: this was the one point of
+    miscommunication while building it - first pass let `INTERRUPTED` fire
+    regardless of the flag, corrected after clarifying the intent was total
+    lockout, not just suppressing typed content). Ctrl+C/Tab/ESC-CSI parsing
+    stay always-active regardless of the flag.
+  - `ncurses_update_input_box()` (`user_io.h`/`.cpp`) takes a new
+    `bool input_enabled` parameter and dims the input box under `A_DIM` when
+    false, so a disabled keyboard is visually obvious ("ghosted") rather
+    than silently inert. Called with `comms.ENABLE_KEYBOARD_INPUT` from
+    `display_with_ncurses()`.
+  - `thread_main()`'s TTS step checks `comms_buffer.ENABLE_TTS_OUTPUT`
+    before calling `speakAsync()` - the text buffer itself is still always
+    cleared either way, only the speaking is skipped.
+  - **Auto save/restore around `[ASK]`/`[PAUSE]`.** Both inherently need a
+    human to press a key regardless of the current keyboard setting, so
+    rather than requiring a script to manually toggle `[KEYBOARD_INPUT]` on
+    around every input-requiring command, `command_pause()`/`command_ask()`
+    save the current `ENABLE_KEYBOARD_INPUT` value into a new
+    `bool& keyboard_was_enabled` (threaded through `advance_script_state()`
+    and every `command_*()` signature down from `TOOL_TASK_RUNNER::
+    handle_tool()`'s local), force it on for themselves, and
+    `command_wait_enter()`/`command_wait_ask()` restore the saved value once
+    the wait completes. `command_file_in()`'s own `WAIT_ASK` fallback (when
+    the file can't be read) does the same. Net effect: a script only needs
+    one `[KEYBOARD_INPUT:off]` near the top; `[TTS_OUTPUT]` has no such
+    auto-restore, since nothing about `[ASK]`/`[PAUSE]` inherently needs
+    audio.
+  - `sample_scripts/system_test.task` updated to demonstrate both: keyboard
+    off for the whole run, TTS off for just the first section, `#` comments
+    explaining why. Live end-to-end test confirmed working.
+
 ## Voice (Voca)
 
 - Wake word is "olli" (`findWakeWord()`/`findSleepTrigger()`, now in

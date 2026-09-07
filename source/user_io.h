@@ -48,6 +48,16 @@ class KEYBOARD_INPUT_PROPERTIES
     // since plain display() doesn't render typed-but-unsubmitted text at
     // all - the raw echo is the only thing showing it.
     bool RAW_ECHO = true;
+
+    // Distinct from ENABLED above - that one gates whether keyboard_input()
+    // reads stdin at all; this one is checked inside keyboard_input() itself
+    // (user_io.cpp) once it's already reading, to skip only the
+    // content-building keys (typed characters, Enter, Ctrl+K/N/O, Alt+Enter,
+    // backspace). Ctrl+C/Tab/Page Up/Down still work regardless - those are
+    // program-level controls, not chat content, so disabling chat input
+    // shouldn't also disable quitting or scrolling. Plain bool, not atomic
+    // like ENABLED - nothing sets this cross-thread (yet).
+    bool CHAT_INPUT_ENABLED = true;
 };
 
 class KEYBOARD_INPUT
@@ -386,8 +396,11 @@ class OUTPUT_CLASS
         // Word-wraps the live-typed line, grows/shrinks win_input (and
         // correspondingly win_chat) only when the needed row count actually
         // changes, and draws it. Replaces display_with_ncurses()'s old
-        // fixed-one-row input block.
-        void ncurses_update_input_box(const std::string& input_from_user_echo);
+        // fixed-one-row input block. input_enabled only affects how the box
+        // is drawn (dimmed when false, to read as ghosted/inactive) - it
+        // doesn't stop keystrokes from reaching LINE itself, that's a
+        // separate concern elsewhere.
+        void ncurses_update_input_box(const std::string& input_from_user_echo, bool input_enabled);
 
         // Bolds whichever separator segment (the hline above win_system/
         // win_chat, or the vline left of win_tools) matches ncurses_focus,

@@ -17,9 +17,26 @@ not needed elsewhere.
 - **Tool-help tool** - a way to ask olli what tools it has and what they do,
   loading/displaying that info at runtime. Could be built on top of the text
   file tool above (help text stored as plain files) rather than hardcoded.
-- **RAG support** - retrieval-augmented generation over some corpus (notes?
-  history? both?). Probably a big task. `nomic-embed-text` is already pulled
-  in Ollama, so the embedding side has a natural starting point.
+- **RAG support - first working version done (2026-09-08).** Three programs
+  under [`tools/rag/`](tools/rag) (see [`tools/rag/README.md`](tools/rag/README.md)
+  for the full design): `rag_db`, a shared SQLite storage/embedding/chunking
+  library; `rag_admin`, a standalone menu-driven maintenance program
+  (create collections, import files, delete, test search); `rag_tool`, a
+  remote tool ([`tools/PROTOCOL.md`](tools/PROTOCOL.md)) registering
+  `rag_list_collections`/`rag_search` with a live olli. Embeddings via
+  Ollama's already-pulled `nomic-embed-text`. Verified end-to-end against a
+  real running olli session, not just compiled - that live testing caught
+  and fixed two retrieval-quality problems worth knowing about before
+  touching this code: `nomic-embed-text` needs its `search_document:`/
+  `search_query:` prefix convention (dropping it measurably hurt ranking),
+  and the original 400-word chunk size was diluting embeddings on
+  jargon-dense documents by merging multiple subsections into one chunk
+  (dropped to 150 words). Not yet built: a chat_log-aware importer (the
+  "conversations" collection is manual-export-then-import for now), olli
+  auto-importing its own conversations, and identity-driven per-profile
+  database switching (`rag_tool`'s db path is a fixed default/argument, not
+  derived from the `identity` message the way `clock.cpp`'s per-user state
+  is).
 - **Tools rework - mostly done now** (started 2026-08-21). Pulled every
   `TOOL_*` class out of `olla.h`/`olla.cpp` into their own `tools.h`/
   `tools.cpp`; gave every tool the same `configure`/`register_tool`/`check`/

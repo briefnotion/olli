@@ -20,23 +20,93 @@ not needed elsewhere.
 - **RAG support - first working version done (2026-09-08).** Three programs
   under [`tools/rag/`](tools/rag) (see [`tools/rag/README.md`](tools/rag/README.md)
   for the full design): `rag_db`, a shared SQLite storage/embedding/chunking
-  library; `rag_admin`, a standalone menu-driven maintenance program
-  (create collections, import files, delete, test search); `rag_tool`, a
-  remote tool ([`tools/PROTOCOL.md`](tools/PROTOCOL.md)) registering
-  `rag_list_collections`/`rag_search` with a live olli. Embeddings via
-  Ollama's already-pulled `nomic-embed-text`. Verified end-to-end against a
-  real running olli session, not just compiled - that live testing caught
-  and fixed two retrieval-quality problems worth knowing about before
-  touching this code: `nomic-embed-text` needs its `search_document:`/
-  `search_query:` prefix convention (dropping it measurably hurt ranking),
-  and the original 400-word chunk size was diluting embeddings on
-  jargon-dense documents by merging multiple subsections into one chunk
-  (dropped to 150 words). Not yet built: a chat_log-aware importer (the
-  "conversations" collection is manual-export-then-import for now), olli
-  auto-importing its own conversations, and identity-driven per-profile
-  database switching (`rag_tool`'s db path is a fixed default/argument, not
-  derived from the `identity` message the way `clock.cpp`'s per-user state
-  is).
+  library; `rag_admin`, a standalone menu-driven maintenance program;
+  `rag_tool`, a remote tool ([`tools/PROTOCOL.md`](tools/PROTOCOL.md))
+  registering `rag_list_collections`/`rag_search` with a live olli.
+  Embeddings via Ollama's already-pulled `nomic-embed-text`. Verified
+  end-to-end against a real running olli session, not just compiled - that
+  live testing caught and fixed two retrieval-quality problems worth
+  knowing about before touching this code: `nomic-embed-text` needs its
+  `search_document:`/`search_query:` prefix convention (dropping it
+  measurably hurt ranking), and the original 400-word chunk size was
+  diluting embeddings on jargon-dense documents by merging multiple
+  subsections into one chunk (dropped to 150 words). Not yet built: a
+  chat_log-aware importer (the "conversations" collection is
+  manual-export-then-import for now) and olli auto-importing its own
+  conversations.
+  - **Done 2026-09-09: profile-aware database + folder-based sync.**
+    `rag_tool` now follows olli's `identity` message the way
+    `clock.cpp`/`presence` follow it for their own per-profile state -
+    starts on the shared `~/olli_files/rag.db`, switches to
+    `~/olli_files_<name>/rag.db` on `identity`, switches back on
+    disconnect; an explicit CLI argument still overrides this permanently
+    for testing. `rag_admin` takes a bare profile name the same way. Bigger
+    change: `rag_admin` no longer imports an arbitrary file path - each
+    collection now owns a folder (`~/olli_files_<profile>/collection/<name>/`,
+    `profile_collection_dir()` in `rag_db.hpp`), and "Update database" does
+    a real three-way sync against it (new file -> import, unchanged content
+    -> skip via a stored `content_hash`, changed content -> delete and
+    reimport, source file gone -> delete the document) - safe to run
+    repeatedly. Verified all four cases live.
+  - **Done 2026-09-09: fixed a real truncation bug, added
+    rag_search_documents/rag_get_document.** Live testing with real notes
+    (calipers/M2-screws-style "I know it's in there somewhere" scenario)
+    found `rag_tool`'s `handle_search()` was truncating every chunk to 300
+    characters before handing it to the model - a 150-word chunk runs
+    600-900+ characters, so the model was routinely told "not found" for
+    content that had, in fact, been retrieved correctly, just cut off
+    before the relevant part. Fixed by sending full chunk text (chunks are
+    already bounded by `chunk_text()`, so no new cap needed). Also added
+    two tools once that scenario was thought through fully:
+    `rag_search_documents` (same ranking as `rag_search`, deduplicated to
+    one result per *document* instead of per chunk - "what do I have on
+    this topic" survey, not "find the passage") and `rag_get_document`
+    (fetch one document's complete original content by title+collection,
+    once identified from either search). Needed a new `documents.content`
+    column storing the full original text verbatim - reconstructing it
+    from overlapping chunks would have been lossy/duplicated at chunk
+    boundaries. Deliberately did *not* build search pagination/exclusion
+    ("show me the next 5") - `rag_search_documents` covers the same need
+    by surveying everything relevant in one call instead. Verified all of
+    this against a scripted fake-olli (not just a live model, which can't
+    be trusted to pick exact test arguments) - registration, both search
+    tools' ranking/dedup, full-document fetch, and both error paths all
+    confirmed.
+  - **Done 2026-09-09: case/extension-tolerant name matching.** A real
+    live test showed `rag_list_collections` telling the model a collection
+    was named "Notes," then every follow-up call using "notes" instead and
+    failing a plain case-sensitive match, every time, even though the
+    collection was right there. `collections.name` and `documents.title`
+    are now `COLLATE NOCASE`; `find_document_by_title()` also falls back
+    to comparing both sides with any file extension stripped, since a
+    model asked for a document by name tends to drop the extension it was
+    shown too ("misc_notes" for a document titled "misc_notes.txt").
+    Deliberately didn't rename stored titles to drop extensions outright -
+    that would risk two same-name-different-extension files colliding.
+    Verified against a real scripted rag_tool connection (not a live
+    model - needed a test harness robust to a stray already-running
+    `clock` tool racing for the same port, which is what falsely looked
+    like a failure on the first two attempts).
+  - **Done 2026-09-09: rag_admin menu caught up with everything above.**
+    Removed "Delete a document" - now actively counterproductive under the
+    folder-sync model (deleting just the DB row while its source file is
+    still on disk just gets it reimported on the next "Update database").
+    Added "Delete collection" (DB-only via the same cascading delete a
+    document already used, folder/files deliberately left untouched -
+    verified live: deleted, confirmed files survived, recreated + resynced,
+    got all 6 documents back exactly), "Edit collection description", and
+    two menu options mirroring rag_tool's newer search_documents/
+    get_document so both can be sanity-checked without olli.
+  - **Done 2026-09-09: nudged rag_search/rag_search_documents's
+    descriptions to cover tool help/documentation.** A real live test
+    asked "help on the clock tool" and got the current time back instead
+    - nothing hinted the model toward treating "help on X" as a search
+    request rather than a request to actually call tool X. Both
+    descriptions now explicitly say they cover help/documentation about
+    olli's own tools too, and that a help request about a tool by name
+    shouldn't be read as a request to call that tool. This is a
+    description nudge, not a guaranteed fix - still a judgment call the
+    model makes each time between two plausible readings.
 - **Tools rework - mostly done now** (started 2026-08-21). Pulled every
   `TOOL_*` class out of `olla.h`/`olla.cpp` into their own `tools.h`/
   `tools.cpp`; gave every tool the same `configure`/`register_tool`/`check`/

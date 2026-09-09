@@ -40,7 +40,7 @@ int main()
         "Chunks are embedded using a local embedding model, so nothing about "
         "this system depends on an external API.";
 
-    int document_id = db.add_document(collection_id, "Test note about RAG", "manual entry");
+    int document_id = db.add_document(collection_id, "Test note about RAG", "manual entry", sample_text, hash_content(sample_text));
     if (document_id < 0) {
         std::cerr << "FAIL: could not add document: " << db.last_error() << "\n";
         return 1;

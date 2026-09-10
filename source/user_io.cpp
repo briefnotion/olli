@@ -20,6 +20,9 @@
 // gone.
 #include "helper_olli.h"
 #include "version.h"
+#include "document_viewer.h"
+
+#include <cstdlib>
 
 // Only pulled in here - see the forward-declared WINDOW/PANEL in user_io.h
 // for why.
@@ -559,8 +562,8 @@ void OUTPUT_CLASS::get_response(COMMS& comms)
     comms.INPUT_FROM_THINKING.clear();
     system_message += comms.INPUT_FROM_SYSTEM;
     comms.INPUT_FROM_SYSTEM.clear();
-    web_links.insert(web_links.end(), comms.WEB_LINKS.begin(), comms.WEB_LINKS.end());
-    comms.WEB_LINKS.clear();
+    web_links.insert(web_links.end(), comms.TOOL_ATTACHMENTS.begin(), comms.TOOL_ATTACHMENTS.end());
+    comms.TOOL_ATTACHMENTS.clear();
 }
 
 void OUTPUT_CLASS::append_to_chat_log(bool is_user, const std::string& text)
@@ -1349,15 +1352,18 @@ void OUTPUT_CLASS::display_with_ncurses(const std::string& input_from_user_echo,
     // Web links notice - only whatever's arrived since the last one was
     // shown (see web_links_shown_count's comment, user_io.h), so a link
     // never gets announced twice. Plain text, not a real link (see
-    // COMMS::WEB_LINKS's comment, comms.h for why) - Ctrl+L opens the full,
-    // actually-clickable list.
+    // COMMS::TOOL_ATTACHMENTS's comment, comms.h for why) - Ctrl+L opens
+    // the full, actually-clickable list. Every entry here is still
+    // type=="link" as of this comment (see user_io.h's own note on
+    // web_links) - unconditionally treated as one, same as before
+    // TOOL_ATTACHMENTS existed.
     if (web_links.size() > web_links_shown_count)
     {
         std::string links_notice = "[Links: ";
         for (size_t i = web_links_shown_count; i < web_links.size(); ++i)
         {
             if (i > web_links_shown_count) links_notice += ", ";
-            links_notice += "[" + std::to_string(i + 1) + "] " + web_links[i].first;
+            links_notice += "[" + std::to_string(i + 1) + "] " + web_links[i].label;
         }
         links_notice += " - Ctrl+L to open]\n";
         int links_notice_attr = ncurses_colors_available ? COLOR_PAIR(PAIR_WEB_LINKS_NOTICE) : 0;
@@ -1404,28 +1410,93 @@ void OUTPUT_CLASS::show_web_links_panel()
 
     std::cout << "\x1B[2J\x1B[H" << std::flush; // clear screen, home cursor - raw ANSI, ncurses isn't involved
 
-    std::cout << "Web Links (press any key to return)\n";
-    std::cout << "-------------------------------------\n\n";
+    std::cout << "Attachments (type a number then Enter to view, or just Enter to return)\n";
+    std::cout << "-------------------------------------------------------------------------\n\n";
     for (size_t i = 0; i < web_links.size(); ++i)
     {
-        std::cout << (i + 1) << ". " << make_clickable_link(web_links[i].second, web_links[i].first) << "\n";
+        std::cout << (i + 1) << ". " << make_clickable_link(web_links[i].content, web_links[i].label) << "\n";
     }
-    std::cout << std::flush;
+    std::cout << "\n> " << std::flush;
 
     // Same raw non-blocking read KEYBOARD_INPUT's own loop uses (VMIN=0/
     // VTIME=0) - poll until a byte shows up rather than switching the fd
-    // back to a blocking read.
-    char ch = 0;
-    while (read(STDIN_FILENO, &ch, 1) <= 0)
+    // back to a blocking read. Echoed manually since stdin echo is off in
+    // olli's raw mode - see KEYBOARD_INPUT's constructor (user_io.h).
+    std::string input;
+    bool entered = false;
+    while (!entered)
     {
-        usleep(20000);
+        char ch = 0;
+        if (read(STDIN_FILENO, &ch, 1) <= 0)
+        {
+            usleep(20000);
+            continue;
+        }
+
+        if (ch == '\n' || ch == '\r')
+        {
+            entered = true;
+        }
+        else if ((ch == 127 || ch == 8) && !input.empty()) // backspace
+        {
+            input.pop_back();
+            std::cout << "\b \b" << std::flush;
+        }
+        else if (ch >= '0' && ch <= '9')
+        {
+            input += ch;
+            std::cout << ch << std::flush;
+        }
+    }
+    std::cout << "\n" << std::flush;
+
+    if (!input.empty())
+    {
+        size_t selection = static_cast<size_t>(std::atoi(input.c_str()));
+
+        if (selection >= 1 && selection <= web_links.size())
+        {
+            const TOOL_ATTACHMENT& chosen = web_links[selection - 1];
+
+            if (chosen.type == "link")
+            {
+                // The list above only ever shows the label as visible text
+                // (make_clickable_link()'s OSC 8 escape hides the URL itself
+                // inside the escape sequence) - print the raw URL here so
+                // there's always a plain-text way to see/copy it.
+                std::cout << "\n" << chosen.content << "\n\n(press any key to return)" << std::flush;
+
+                char dismiss = 0;
+                while (read(STDIN_FILENO, &dismiss, 1) <= 0)
+                {
+                    usleep(20000);
+                }
+            }
+            else
+            {
+                DOCUMENT_VIEWER::show(stdscr, chosen.label, chosen.content);
+            }
+        }
     }
 
     reset_prog_mode();     // restore curses' terminal modes
-    clearok(curscr, TRUE); // force the next refresh to redraw everything -
-                            // curses has no idea the raw prints above ever
-                            // happened, so a diff-only refresh would leave
-                            // stale content on screen
+    clearok(curscr, TRUE); // force the next refresh to redraw everything
+
+    // clearok() alone isn't enough: win_system/win_chat/win_input/win_tools
+    // each get freshly recomposited on the very next tick regardless (so
+    // any of their own content is already fine right after this returns),
+    // but the separator lines - drawn directly onto stdscr by
+    // ncurses_draw_focus_indicators(), not into any of those windows (see
+    // ncurses_layout()'s own "erase(); // stdscr - just the separator
+    // lines live directly on it" comment) - are a gap none of those
+    // windows' own refresh ever touches. Anything drawn over them here
+    // (the raw prints above, or DOCUMENT_VIEWER's own drawing, which
+    // covers the whole screen) stays stuck there until something happens
+    // to call ncurses_draw_focus_indicators() again on its own (found
+    // live: a stray row survived indefinitely, until the next real chat
+    // message coincidentally moved the input box and triggered one) -
+    // calling it here directly fixes that right now instead of eventually.
+    ncurses_draw_focus_indicators();
 }
 
 #endif

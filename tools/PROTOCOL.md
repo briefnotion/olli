@@ -258,6 +258,44 @@ or, on failure:
   discussion this spec came out of). `TOOL_REMOTE` doesn't change that
   convention, it just receives the string over a socket instead of computing
   it in-process.
+- Optional `special_instruction` (2026-09-10) - replaces the generic
+  "be concise, no jargon" framing `ollama_system::integrate_tool_result()`
+  (`source/olla.cpp`) uses when narrating a result back to the user, with a
+  custom instruction for this one result instead - e.g.
+  `tools/rag/rag_tool/rag_tool.cpp`'s `rag_get_document` sets one asking
+  the model to relay a full document's content verbatim rather than
+  summarize it. Omit for the default framing, same as every remote tool
+  got before this field existed. A nudge to the model, not a guarantee of
+  exactness - see that tool's own comment for why a genuine guarantee
+  needs a different mechanism entirely (a side channel bypassing narration,
+  not yet built).
+
+  ```json
+  {"type": "result", "call_id": "abc123", "result": "...", "special_instruction": "Relay this in full, verbatim - do not summarize."}
+  ```
+
+- Optional `attachment` (2026-09-10) - this is the genuine guarantee
+  `special_instruction` above can't provide: exact data that reaches
+  olli's `COMMS::TOOL_ATTACHMENTS` (`source/comms.h`) directly, bypassing
+  the model's own narration/generation entirely, unlike `result` and
+  `special_instruction`. An object with `type`/`label`/`content` -
+  `type` is a plain string, not a fixed enum, so a new kind never needs
+  a wire-format change to exist, only wherever actually *reads* type
+  needs to learn the new value (same spirit as a remote tool's own name
+  never needing olli-side code to exist). `"document"` (label = a
+  title, content = the full text) is the one real producer so far
+  (`rag_get_document`). Omit for a result with nothing to attach, same
+  as every remote tool got before this field existed. As of this field's
+  introduction, olli's display side (`source/user_io.cpp`) only actually
+  renders the `"link"` type (from `TOOL_WEB_SEARCH`, not a remote tool at
+  all) - a `"document"` attachment reaches `COMMS::TOOL_ATTACHMENTS`
+  correctly but doesn't yet render as anything sensible; that's separate,
+  not-yet-built display work (see `TODO.md`'s Display / OUTPUT_CLASS
+  section), not a reason to hold off setting this field now.
+
+  ```json
+  {"type": "result", "call_id": "abc123", "result": "...", "attachment": {"type": "document", "label": "Notes / gardening.txt", "content": "Tomato plants need..."}}
+  ```
 
 ### `event` (tool -> olli, unsolicited - not a response to any `call`)
 

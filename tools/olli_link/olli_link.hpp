@@ -23,6 +23,20 @@
 
 #include <netinet/in.h>
 
+// One piece of exact data to attach to a result, alongside whatever gets
+// narrated - see ../PROTOCOL.md's `result` message shape. Mirrors
+// source/comms.h's TOOL_ATTACHMENT wire-shape (type/label/content), but is
+// its own, separate type - tools/ deliberately doesn't share headers with
+// source/ (see ../PROTOCOL.md's "Repo / build layout" section), only the
+// JSON shape that crosses the wire needs to agree between them. type
+// empty means "no attachment" - send_result() below only adds this to the
+// wire message when it's set to something.
+struct OLLI_ATTACHMENT {
+    std::string type;
+    std::string label;
+    std::string content;
+};
+
 class OLLI_LINK {
     public:
         // host_display is what shows up in status text ("...at 127.0.0.1");
@@ -62,7 +76,21 @@ class OLLI_LINK {
         // the connection actually dropped.
         bool consume_disconnected();
 
-        void send_result(const std::string& call_id, const std::string& result);
+        // special_instruction: optional, see ../PROTOCOL.md's `result`
+        // message shape - replaces olli's default "be concise, no jargon"
+        // framing for this one result with a custom instruction for how
+        // the model should relay it (e.g. "relay this in full, verbatim -
+        // do not summarize"). Omit for the default framing, same as every
+        // remote tool got before this parameter existed.
+        //
+        // attachment: optional, see OLLI_ATTACHMENT above - exact data
+        // (e.g. a full document's real text) that reaches olli's
+        // COMMS::TOOL_ATTACHMENTS directly, bypassing the model's own
+        // narration entirely, unlike everything else in `result`. Omit
+        // (default-constructed, type empty) for a result with nothing to
+        // attach, same as every remote tool got before this parameter
+        // existed.
+        void send_result(const std::string& call_id, const std::string& result, const std::string& special_instruction = "", const OLLI_ATTACHMENT& attachment = {});
         void send_error(const std::string& call_id, const std::string& error);
         // action: the optional real tool-call payload described in
         // ../PROTOCOL.md's `event` message shape - omit for narration-only.

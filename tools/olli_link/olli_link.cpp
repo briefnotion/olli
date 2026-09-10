@@ -248,10 +248,15 @@ bool OLLI_LINK::consume_disconnected()
     return was;
 }
 
-void OLLI_LINK::send_result(const std::string& call_id, const std::string& result)
+void OLLI_LINK::send_result(const std::string& call_id, const std::string& result, const std::string& special_instruction, const OLLI_ATTACHMENT& attachment)
 {
     if (sock_fd < 0) return;
-    send_line(sock_fd, json{{"type", "result"}, {"call_id", call_id}, {"result", result}}.dump());
+    json msg{{"type", "result"}, {"call_id", call_id}, {"result", result}};
+    if (!special_instruction.empty()) msg["special_instruction"] = special_instruction;
+    if (!attachment.type.empty()) {
+        msg["attachment"] = {{"type", attachment.type}, {"label", attachment.label}, {"content", attachment.content}};
+    }
+    send_line(sock_fd, msg.dump());
     // Counts as "we sent something" for heartbeat purposes, same as a ping
     // or pong - see PROTOCOL.md's ping/pong section ("either message
     // counts as proof of life either way") and service()'s own

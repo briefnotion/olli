@@ -351,7 +351,7 @@ class IO_WORKER_CLASS
         // Live mirror of key_input.SHOW_LINKS_REQUESTED, same read-and-
         // cleared-each-tick contract as the two above - acted on later in
         // the same tick, after get_response() has drained comms_buffer.
-        // WEB_LINKS into output.web_links (see thread_main()).
+        // TOOL_ATTACHMENTS into output.web_links (see thread_main()).
         bool show_links_requested = false;
 
         // Owns text-to-speech (via TextToSpeech) and speech-to-text (via

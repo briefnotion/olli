@@ -274,6 +274,7 @@ bool TOOL_REMOTE::check(IO_WORKER_CLASS&, ollama_system& chat, CLASS_SYSTEM*, st
     };
 
     std::string response_str;
+    std::string special_instruction; // see tools/PROTOCOL.md's `result` message shape
 
     if (fd < 0) {
         response_str = "Error: remote tool connection is down.";
@@ -320,6 +321,23 @@ bool TOOL_REMOTE::check(IO_WORKER_CLASS&, ollama_system& chat, CLASS_SYSTEM*, st
                     response_str = "Error: " + msg.value("error", "unknown remote error");
                 } else {
                     response_str = msg.value("result", "");
+                    special_instruction = msg.value("special_instruction", "");
+
+                    // Optional attachment (see tools/PROTOCOL.md's `result`
+                    // shape) - exact data that bypasses narration entirely,
+                    // pushed straight into comms.TOOL_ATTACHMENTS the same
+                    // way TOOL_WEB_SEARCH's own links do (tools.cpp), same
+                    // lock for the same reason (a concurrent
+                    // IO_WORKER_CLASS::exchange() drain on another thread).
+                    if (msg.contains("attachment") && msg["attachment"].is_object()) {
+                        std::string attachment_type = msg["attachment"].value("type", "");
+                        if (!attachment_type.empty()) {
+                            std::string attachment_label = msg["attachment"].value("label", "");
+                            std::string attachment_content = msg["attachment"].value("content", "");
+                            std::lock_guard<std::mutex> lock(output_buffer_mutex);
+                            comms.TOOL_ATTACHMENTS.emplace_back(attachment_type, attachment_label, attachment_content);
+                        }
+                    }
                 }
                 got_result = true;
             }
@@ -376,7 +394,7 @@ bool TOOL_REMOTE::check(IO_WORKER_CLASS&, ollama_system& chat, CLASS_SYSTEM*, st
     }
 
     chat.send_tool_result(tc.id, response_str);
-    chat.integrate_tool_result(tools_list, comms, "", response_str);
+    chat.integrate_tool_result(tools_list, comms, special_instruction, response_str);
 
     return true;
 }

@@ -1,0 +1,88 @@
+OLLI - GETTING RUNNING FROM SCRATCH
+====================================
+
+This describes how to take a fresh machine (or a fresh build) all the
+way to a persistent tmux session running olli and its tools.
+
+1. INSTALL TMUX
+----------------
+    sudo apt update && sudo apt install -y tmux
+
+2. INSTALL TMUX PLUGIN MANAGER (TPM)
+-------------------------------------
+    git clone https://github.com/tmux-plugins/tpm ~/.tmux/plugins/tpm
+
+3. CREATE ~/.tmux.conf
+------------------------
+Put the following in ~/.tmux.conf:
+
+    # Plugins
+    set -g @plugin 'tmux-plugins/tpm'
+    set -g @plugin 'tmux-plugins/tmux-resurrect'
+    set -g @plugin 'tmux-plugins/tmux-continuum'
+
+    # tmux-continuum: autosave every 15 min and auto-restore on tmux start
+    set -g @continuum-restore 'on'
+    set -g @continuum-save-interval '15'
+
+    # tmux-resurrect: also relaunch these programs on restore, not just the shell
+    set -g @resurrect-processes 'btop ~olli ~hue ~presence ~clock'
+
+    # Initialize TPM (keep this line at the very bottom of the file)
+    run '~/.tmux/plugins/tpm/tpm'
+
+Note the "~" prefix on olli/hue/presence/clock in @resurrect-processes.
+These programs are launched as "./olli" etc, and tmux-resurrect only
+matches exact command starts unless you use "~" for substring matching.
+Without the "~" prefix, "./olli" will not match a whitelist entry of
+just "olli", and the pane will restore as an empty shell instead of
+relaunching the program.
+
+4. INSTALL THE PLUGINS
+------------------------
+Start tmux, then reload the config and install the plugins:
+
+    tmux
+    tmux source-file ~/.tmux.conf
+    ~/.tmux/plugins/tpm/scripts/install_plugins.sh
+
+5. DEPLOY THE OLLI BUILD
+---------------------------
+From the build directory, run:
+
+    ./install_to_home.sh
+
+This copies the olli binary, its tools (hue, clock, presence),
+start_session.sh, and this SETUP.txt file into ~/olli/.
+
+6. LAY OUT YOUR SESSION
+--------------------------
+Inside tmux, create a session named "olli" with whatever pane
+layout/splits you want, and in each pane start the program you want
+that pane running (btop, ./olli, ./hue, ./presence, ./clock, or a
+plain shell). From ~/olli/ that looks like:
+
+    cd ~/olli
+    tmux new -s olli
+    (split panes with Ctrl+b % / Ctrl+b ", launch each program)
+
+7. SAVE THE LAYOUT
+---------------------
+Once everything is arranged and running, save it:
+
+    Ctrl+b Ctrl+s
+
+This is what tmux-resurrect/continuum will restore from later,
+including relaunching the whitelisted programs.
+
+8. DAILY USE FROM HERE ON
+----------------------------
+    ~/olli/start_session.sh
+
+This attaches to the "olli" session if it's already running. If the
+tmux server isn't up (rebooted, killed, etc), it starts tmux fresh,
+which triggers continuum's auto-restore: the saved layout and all
+whitelisted programs come back automatically.
+
+Re-save (Ctrl+b Ctrl+s) any time you change the pane layout, so the
+next restore reflects the new arrangement.

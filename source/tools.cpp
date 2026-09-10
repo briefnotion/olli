@@ -163,7 +163,7 @@ std::string TOOL_WEB_SEARCH::perform_actual_search(const std::string& query, COM
                     if (!link.empty())
                     {
                         std::lock_guard<std::mutex> lock(output_buffer_mutex);
-                        comms.WEB_LINKS.emplace_back(title, link);
+                        comms.TOOL_ATTACHMENTS.emplace_back("link", title, link);
                     }
                 }
             } else {
@@ -199,7 +199,7 @@ std::string TOOL_WEB_SEARCH::fetch_url_content(const std::string& url, COMMS& co
 
         {
             std::lock_guard<std::mutex> lock(output_buffer_mutex);
-            comms.WEB_LINKS.emplace_back(url, url);
+            comms.TOOL_ATTACHMENTS.emplace_back("link", url, url);
         }
 
         // Strip HTML noise so the model isn't parsing markup as content
@@ -216,9 +216,9 @@ void TOOL_WEB_SEARCH::register_tool(ollama_system&, json& tools) {
 
     // Told to the model via each tool's description so its final answer
     // doesn't dump a raw URL into the chat text - every link from this
-    // tool is already surfaced separately (see COMMS::WEB_LINKS, comms.h)
-    // and shown/opened through its own UI, not through anything the model
-    // writes.
+    // tool is already surfaced separately (see COMMS::TOOL_ATTACHMENTS,
+    // comms.h) and shown/opened through its own UI, not through anything
+    // the model writes.
     std::string link_instruction = " Do not include the raw URL in your final answer - links are shown to the user separately. Refer to a source by name instead (e.g. \"according to weather.com\").";
 
     json search_params = {

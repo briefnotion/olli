@@ -38,6 +38,16 @@ std::string profile_db_path(const std::string& profile_name);
 // effect of merely computing where it would go.
 std::string profile_collection_dir(const std::string& profile_name, const std::string& collection_name);
 
+// Where a profile's own chat_log files already live -
+// `~/olli_files_<profile_name>/chat_logs/` (or `~/olli_files/chat_logs/`
+// when empty) - olli itself creates and writes to this directory, not
+// rag_admin. This is the "folder" for the special, auto-created
+// "conversations" collection (see rag_admin's do_update_database()) -
+// unlike a normal collection's folder, nothing ever copies chat logs into
+// a separate collection/ subdirectory; the sync points straight at where
+// they already are.
+std::string profile_chat_logs_dir(const std::string& profile_name);
+
 // A fast, non-cryptographic content hash (FNV-1a, 64-bit, hex string) -
 // purely for "has this file changed since it was imported", not security.
 // Used to give a re-run of rag_admin's "Update database" a cheap way to

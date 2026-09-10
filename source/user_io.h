@@ -104,8 +104,8 @@ class KEYBOARD_INPUT
 
         // Set by Ctrl+L (byte 12) - requests OUTPUT_CLASS::show_web_links_
         // panel() (user_io.cpp), the non-ncurses popup listing whatever's
-        // in COMMS::WEB_LINKS as real, clickable OSC 8 links. Same read-
-        // and-cleared-by-caller contract as SCROLL_REQUEST/FOCUS_CYCLE_
+        // in COMMS::TOOL_ATTACHMENTS as real, clickable OSC 8 links. Same
+        // read-and-cleared-by-caller contract as SCROLL_REQUEST/FOCUS_CYCLE_
         // REQUESTED above.
         bool SHOW_LINKS_REQUESTED = false;
 
@@ -421,14 +421,25 @@ class OUTPUT_CLASS
         std::string chat_response = "";
         std::string chat_thinking = "";
 
-        // Drained from comms.WEB_LINKS by get_response(), same as the four
-        // string buckets above - never cleared afterward (unlike those),
-        // since these need to stick around for show_web_links_panel() to
-        // list at any later point, not just the one tick they arrived on.
-        // web_links_shown_count tracks how many of these display_with_
-        // ncurses() has already announced with a "[Links: ...]" notice, so
-        // that notice only ever mentions newly-arrived entries.
-        std::vector<std::pair<std::string, std::string>> web_links;
+        // Drained from comms.TOOL_ATTACHMENTS by get_response(), same as
+        // the four string buckets above - never cleared afterward (unlike
+        // those), since these need to stick around for
+        // show_web_links_panel() to list at any later point, not just the
+        // one tick they arrived on. web_links_shown_count tracks how many
+        // of these display_with_ncurses() has already announced with a
+        // "[Links: ...]" notice, so that notice only ever mentions
+        // newly-arrived entries.
+        //
+        // Retyped from vector<pair<string,string>> to vector<TOOL_ATTACHMENT>
+        // 2026-09-10 (comms.h) - kept the name "web_links" for now rather
+        // than renaming, since every entry that actually reaches here is
+        // still type=="link" today (only TOOL_WEB_SEARCH populates
+        // COMMS::TOOL_ATTACHMENTS so far); the rendering below is
+        // similarly unchanged, still unconditionally treating every entry
+        // as a link. A real "document" entry type-checking correctly
+        // through here (and this member's name/rendering catching up to
+        // that) is later, separate work, not part of this change.
+        std::vector<TOOL_ATTACHMENT> web_links;
         size_t web_links_shown_count = 0;
 
         // Set once by main.cpp (alongside ollama_system::PROPS.OLLI_DIRECTORY

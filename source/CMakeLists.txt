@@ -151,6 +151,7 @@ add_executable(olli
     ../source/remote_tools.cpp
     ../source/helper_olli.cpp
     ../source/user_io.cpp
+    ../source/document_viewer.cpp
     ../source/tools_helper.cpp
     ../source/stringthings.cpp
     ../source/sidetrack.cpp

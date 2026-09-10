@@ -1073,10 +1073,10 @@ void IO_WORKER_CLASS::thread_main()
             output.get_response(comms_buffer);
 
             // 9.5. Web-links popup - Ctrl+L. Handled right here, after
-            // get_response() just above has drained comms_buffer.WEB_LINKS
-            // into output.web_links, so the popup always sees whatever
-            // arrived this same tick. A no-op (inside the function itself)
-            // if there's nothing to show yet.
+            // get_response() just above has drained comms_buffer.
+            // TOOL_ATTACHMENTS into output.web_links, so the popup always
+            // sees whatever arrived this same tick. A no-op (inside the
+            // function itself) if there's nothing to show yet.
             if (show_links_requested)
             {
                 output.show_web_links_panel();
@@ -1170,10 +1170,10 @@ void IO_WORKER_CLASS::exchange(COMMS& comms, std::vector<std::unique_ptr<TOOL_BA
             comms.INPUT_FROM_LLM.clear();
         }
 
-        if (!comms.WEB_LINKS.empty())
+        if (!comms.TOOL_ATTACHMENTS.empty())
         {
-            comms_buffer.WEB_LINKS.insert(comms_buffer.WEB_LINKS.end(), comms.WEB_LINKS.begin(), comms.WEB_LINKS.end());
-            comms.WEB_LINKS.clear();
+            comms_buffer.TOOL_ATTACHMENTS.insert(comms_buffer.TOOL_ATTACHMENTS.end(), comms.TOOL_ATTACHMENTS.begin(), comms.TOOL_ATTACHMENTS.end());
+            comms.TOOL_ATTACHMENTS.clear();
         }
 
         if (!comms.INPUT_FROM_THINKING.empty())

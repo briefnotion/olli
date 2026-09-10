@@ -25,6 +25,30 @@
 // themselves are per-instance.
 inline std::mutex output_buffer_mutex;
 
+// One piece of exact data a tool result carries alongside whatever the
+// model narrates about it - the generalized form of what used to be just
+// (title, url) web-search links (see COMMS::TOOL_ATTACHMENTS below).
+// "type" is a plain string, not an enum, so a new kind (e.g. a future
+// remote tool's screen-grab) never needs a header-wide change to add -
+// only wherever actually reads type needs to learn a new value, same
+// spirit as a remote tool's name never needing olli-side code to exist
+// (see TOOL_REMOTE, remote_tools.h). "link" (label=title, content=url)
+// and "document" (label=title, content=full text) are the two kinds that
+// exist right now.
+struct TOOL_ATTACHMENT {
+    std::string type;
+    std::string label;
+    std::string content;
+
+    TOOL_ATTACHMENT() = default;
+    // Explicit (not aggregate) so vector::emplace_back(type, label,
+    // content) keeps working under C++17 - parenthesized aggregate init
+    // is a C++20 feature, and this codebase targets C++17 (Makefile/
+    // CMakeLists.txt).
+    TOOL_ATTACHMENT(std::string type_, std::string label_, std::string content_)
+        : type(std::move(type_)), label(std::move(label_)), content(std::move(content_)) {}
+};
+
 /**
  * COMMS
  * Bundles what an ollama_system instance uses to hand output to whatever's
@@ -116,17 +140,28 @@ class COMMS
         // --------------------------------------------------------------
 
         // --------------------------------------------------------------
-        // (title, url) pairs surfaced by a tool call - currently only
-        // TOOL_WEB_SEARCH (tools.cpp), pushed here directly from the raw
-        // search/fetch result rather than parsed back out of the model's
-        // own rewritten response text (which may paraphrase or drop them
-        // entirely). Accumulate-then-drain, same shape as INPUT_FROM_LLM
-        // above: appended under output_buffer_mutex by whatever thread's
-        // running the tool call, relayed on by IO_WORKER_CLASS::exchange()
-        // (io_worker.cpp), which clears this copy once copied.
+        // Exact-data attachments surfaced by a tool call - e.g.
+        // TOOL_WEB_SEARCH's (tools.cpp) links, pushed here directly from
+        // the raw search/fetch result rather than parsed back out of the
+        // model's own rewritten response text (which may paraphrase or
+        // drop them entirely). Accumulate-then-drain, same shape as
+        // INPUT_FROM_LLM above: appended under output_buffer_mutex by
+        // whatever thread's running the tool call, relayed on by
+        // IO_WORKER_CLASS::exchange() (io_worker.cpp), which clears this
+        // copy once copied.
         //
-        // Deliberately NOT rendered inline as a real clickable link in the
-        // chat panel - confirmed by a standalone test that ncurses'
+        // Was WEB_LINKS (a plain vector<pair<string,string>>, links only)
+        // until 2026-09-10 - generalized to TOOL_ATTACHMENT's tagged shape
+        // so a future remote tool's own exact-data result (e.g. a
+        // document's full text) can travel the same path instead of
+        // needing a second, parallel mechanism. Display side
+        // (OUTPUT_CLASS, user_io.cpp/.h) still only actually renders the
+        // "link" type as of this change - see its own comments for the
+        // "type"-branching work that's still pending before a "document"
+        // entry displays as anything other than a mis-rendered link.
+        //
+        // Links deliberately NOT rendered inline as a real clickable link
+        // in the chat panel - confirmed by a standalone test that ncurses'
         // waddstr()/addstr() sanitizes the OSC 8 escape bytes into visible
         // caret-notation garbage instead of passing them to the terminal,
         // worse the longer the URL. Instead: OUTPUT_CLASS shows a short
@@ -137,7 +172,7 @@ class COMMS
         // sequence with a raw std::cout instead - confirmed working
         // (real clickable link, terminal opened it) once ncurses is out of
         // the way.
-        std::vector<std::pair<std::string, std::string>> WEB_LINKS;
+        std::vector<TOOL_ATTACHMENT> TOOL_ATTACHMENTS;
         // --------------------------------------------------------------
 
         // Opposite direction from the block above: set by main.cpp (main

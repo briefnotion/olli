@@ -30,18 +30,26 @@
 // is deleted and reimported, and a document whose source file is gone from
 // disk is deleted. There's no more "import an arbitrary path from anywhere
 // on disk" option - if it's not in a collection's folder, "Update database"
-// won't see it. A "conversations" collection works the same as any other -
-// save/export the conversation you want searchable into its folder first.
-// No chat_log-specific importer or olli-side auto-import exists yet; both
-// were explicitly left out of this phase.
+// won't see it.
+//
+// One exception: "conversations" is a special collection, auto-created
+// (never via "Create collection") the moment a profile has a chat_logs/
+// directory - see do_update_database(). It syncs straight against that
+// existing directory (rag_db.hpp's profile_chat_logs_dir()) rather than a
+// collection/ subfolder, skips anything under MIN_CHAT_LOG_WORDS as noise,
+// and tags each document with its parsed log_date/log_time in metadata.
+// Still no olli-side auto-import - this only runs when "Update database"
+// is run by hand.
 
 #include "rag_chunk.hpp"
 #include "rag_db.hpp"
 #include "rag_embed.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <optional>
 #include <set>
@@ -178,12 +186,27 @@ namespace {
         }
     }
 
+    int word_count(const std::string& s)
+    {
+        std::istringstream stream(s);
+        int count = 0;
+        std::string word;
+        while (stream >> word) count++;
+        return count;
+    }
+
     // The three-way sync described in this file's top comment, for one
     // collection: new file -> import, unchanged (same content_hash) ->
     // skip, changed -> delete old document and reimport, document whose
     // source is no longer on disk -> delete.
+    //
+    // min_words/metadata_for exist only for the special "conversations"
+    // sync (see do_update_database()) - a regular collection leaves both
+    // at their defaults (no size filter, plain "{}" metadata).
     void sync_collection(RAG_DB& db, RAG_EMBEDDER& embedder, const RAG_COLLECTION& collection, const std::string& dir,
-                          int& imported, int& updated, int& unchanged, int& removed)
+                          int& imported, int& updated, int& unchanged, int& removed,
+                          int min_words = 0,
+                          const std::function<std::string(const std::string&)>& metadata_for = nullptr)
     {
         std::vector<RAG_DOCUMENT> existing = db.list_documents(collection.id);
         std::set<std::string> sources_on_disk;
@@ -201,6 +224,10 @@ namespace {
             buffer << file.rdbuf();
             std::string content = buffer.str();
             if (trim(content).empty()) { std::cout << "  " << filename << ": empty, skipping\n"; continue; }
+            if (min_words > 0 && word_count(content) < min_words) {
+                std::cout << "  " << filename << ": too short (under " << min_words << " words), skipping\n";
+                continue;
+            }
 
             sources_on_disk.insert(path);
             std::string hash = hash_content(content);
@@ -222,7 +249,8 @@ namespace {
                 imported++;
             }
 
-            int document_id = db.add_document(collection.id, filename, path, content, hash);
+            std::string metadata_json = metadata_for ? metadata_for(filename) : "{}";
+            int document_id = db.add_document(collection.id, filename, path, content, hash, metadata_json);
             if (document_id < 0) {
                 std::cout << "    failed to create document: " << db.last_error() << "\n";
                 continue;
@@ -254,14 +282,55 @@ namespace {
         }
     }
 
+    // Chat log filenames look like "260909.1216.chat_log.txt" or
+    // "260821.0506.2.chat_log.txt" (an extra numeric disambiguator for a
+    // second log started the same minute) - YYMMDD.HHMM, always. Falls
+    // back to "{}" (no metadata) on anything that doesn't match, rather
+    // than guessing - a filename olli didn't generate itself shouldn't
+    // produce fabricated dates.
+    std::string chat_log_metadata(const std::string& filename)
+    {
+        if (filename.size() < 11 || filename[6] != '.') return "{}";
+        std::string yymmdd = filename.substr(0, 6);
+        std::string hhmm = filename.substr(7, 4);
+        bool digits_ok = std::all_of(yymmdd.begin(), yymmdd.end(), [](unsigned char c) { return std::isdigit(c); }) &&
+                          std::all_of(hhmm.begin(), hhmm.end(), [](unsigned char c) { return std::isdigit(c); });
+        if (!digits_ok) return "{}";
+
+        std::string date = "20" + yymmdd.substr(0, 2) + "-" + yymmdd.substr(2, 2) + "-" + yymmdd.substr(4, 2);
+        std::string time = hhmm.substr(0, 2) + ":" + hhmm.substr(2, 2);
+        return "{\"log_date\": \"" + date + "\", \"log_time\": \"" + time + "\"}";
+    }
+
+    // Chat logs shorter than this are treated as noise (a bare "hi"/"bye"
+    // with nothing else) and skipped entirely - see sync_collection()'s
+    // min_words.
+    constexpr int MIN_CHAT_LOG_WORDS = 30;
+
     void do_update_database(RAG_DB& db, RAG_EMBEDDER& embedder, const std::string& profile_name)
     {
-        std::vector<RAG_COLLECTION> collections = db.list_collections();
-        if (collections.empty()) { std::cout << "(no collections yet - create one first)\n"; return; }
-
         int imported = 0, updated = 0, unchanged = 0, removed = 0;
 
-        for (const auto& collection : collections) {
+        // Special auto-synced collection: olli's own chat_logs/ directory
+        // for this profile, already tied 1:1 to it - never created via
+        // "Create collection", it just exists (get_or_create_collection)
+        // the moment there's a chat_logs/ directory to sync against.
+        std::string chat_logs_dir = profile_chat_logs_dir(profile_name);
+        if (std::filesystem::is_directory(chat_logs_dir)) {
+            int conversations_id = db.get_or_create_collection("conversations", "Auto-synced chat history from past conversations with olli.");
+            if (conversations_id < 0) {
+                std::cout << "\nFailed to set up the conversations collection: " << db.last_error() << "\n";
+            } else {
+                RAG_COLLECTION conversations{conversations_id, "conversations", ""};
+                std::cout << "\n[conversations] " << chat_logs_dir << "\n";
+                sync_collection(db, embedder, conversations, chat_logs_dir, imported, updated, unchanged, removed,
+                                 MIN_CHAT_LOG_WORDS, chat_log_metadata);
+            }
+        }
+
+        for (const auto& collection : db.list_collections()) {
+            if (collection.name == "conversations") continue; // handled above, against chat_logs_dir not collection_dir
+
             std::string dir = profile_collection_dir(profile_name, collection.name);
             std::cout << "\n[" << collection.name << "] " << dir << "\n";
 

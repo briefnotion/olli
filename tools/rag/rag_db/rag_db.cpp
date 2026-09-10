@@ -68,6 +68,21 @@ namespace {
         return result;
     }
 
+    // Case-fold, extension-strip, AND treat '_'/'-' as interchangeable with
+    // a space - found live: a model asked for "misc notes" (space) when
+    // the real title is "misc_notes.txt" (underscore) failed the fallback
+    // above until this normalization was added too. Titles are filenames;
+    // a model recalling one by ear has no reason to preserve the exact
+    // separator character any more than it preserves exact case.
+    std::string normalize_title(const std::string& title)
+    {
+        std::string result = ascii_lowercase(strip_extension(title));
+        for (char& c : result) {
+            if (c == '_' || c == '-') c = ' ';
+        }
+        return result;
+    }
+
     float cosine_similarity(const std::vector<float>& a, const std::vector<float>& b)
     {
         if (a.empty() || a.size() != b.size()) return -1.0f;
@@ -107,6 +122,11 @@ std::string profile_db_path(const std::string& profile_name)
 std::string profile_collection_dir(const std::string& profile_name, const std::string& collection_name)
 {
     return profile_dir(profile_name) + "/collection/" + collection_name;
+}
+
+std::string profile_chat_logs_dir(const std::string& profile_name)
+{
+    return profile_dir(profile_name) + "/chat_logs";
 }
 
 std::string hash_content(const std::string& content)
@@ -361,14 +381,16 @@ std::optional<RAG_DOCUMENT> RAG_DB::find_document_by_title(int collection_id, co
 
     // Fallback: titles are filenames (see rag_admin's sync), and a model
     // asked for a document by name tends to drop the file extension it
-    // was shown (found via the same live test that motivated collections'
-    // COLLATE NOCASE above) - "misc_notes" for a document actually titled
-    // "misc_notes.txt". Comparing both sides with any extension stripped
-    // catches that without changing what's actually stored (which would
-    // risk two different-extension files colliding on one bare name).
-    std::string bare_title = strip_extension(title);
+    // was shown, and/or swap '_'/'-' for a space, the same way it doesn't
+    // reliably preserve exact case either (found via live testing -
+    // "misc_notes" and later "misc notes" both asked for a document
+    // actually titled "misc_notes.txt"). normalize_title() folds case,
+    // strips the extension, AND treats '_'/'-' as a space, without
+    // changing what's actually stored (which would risk two different-
+    // extension files colliding on one bare name).
+    std::string normalized = normalize_title(title);
     for (const RAG_DOCUMENT& doc : list_documents(collection_id)) {
-        if (ascii_lowercase(strip_extension(doc.title)) == ascii_lowercase(bare_title)) return doc;
+        if (normalize_title(doc.title) == normalized) return doc;
     }
     return std::nullopt;
 }

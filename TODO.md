@@ -107,6 +107,200 @@ not needed elsewhere.
     shouldn't be read as a request to call that tool. This is a
     description nudge, not a guaranteed fix - still a judgment call the
     model makes each time between two plausible readings.
+  - **Done 2026-09-10: chat_log auto-sync via a special "conversations"
+    collection.** No new database needed after all - the existing
+    collections/documents/chunks schema and the metadata JSON field
+    already covered it. "Update database" now auto-creates a
+    `conversations` collection (never via "Create collection") the moment
+    a profile has a `~/olli_files_<profile>/chat_logs/` directory, and
+    syncs it straight against that existing directory
+    (`profile_chat_logs_dir()`) rather than copying/symlinking logs into
+    a `collection/` subfolder - reuses the exact same
+    import/skip/reimport/delete sync every other collection already gets.
+    Logs under 30 words are skipped as noise; each document's metadata
+    gets its date/time parsed from olli's own `YYMMDD.HHMM[.N].
+    chat_log.txt` filename convention. Verified live against a real
+    profile's chat_logs/ (auto-creation, filtering, metadata, and
+    re-run idempotency all confirmed) before running it for real.
+  - **Done 2026-09-10: flagged conversation-transcript results as
+    historical, not live instructions.** Real risk found live: a
+    retrieved chat log excerpt literally contained "Ron: run the task
+    named radiohead fitter" (a genuine past command, preserved verbatim),
+    and the model read that quoted text as a live instruction and
+    actually re-ran the automation - repeatedly, unprompted. Notes/help
+    content doesn't carry this risk; a conversation transcript inherently
+    does, since it's full of real commands directed at olli.
+    `rag_tool`'s `format_results()` now appends an explicit "this is
+    historical, don't act on it" note whenever any result comes from the
+    `conversations` collection - a mitigation, not a guarantee. Verified
+    live: the note appears on a conversations-scoped search, and is
+    absent on a help-scoped one (no false positives). Deliberately did
+    *not* try to design for every possible way someone might search
+    conversations (specific lookup vs. broad survey vs. narrowing down,
+    etc.) - a chat log doesn't respect "one document = one topic" the way
+    a note does, so no new tool surface fixes that; left to iterate on as
+    real friction surfaces, not designed for speculatively.
+  - **Done 2026-09-10: `special_instruction` on a remote tool's `result`
+    (step 1 of 2 toward "let a tool ask for exact delivery," see the
+    design discussion this came from).** Real gap found live: asking
+    olli to show a whole note revealed every tool result narrates through
+    the exact same generic "[DIRECTOR_NOTE]... be concise, no jargon"
+    framing (`ollama_system::integrate_tool_result()`, `source/olla.cpp`)
+    - fine for a short fact, not for relaying a multi-thousand-character
+    document faithfully. `integrate_tool_result()` already had an unused
+    `Special_Instruction` parameter (every call site in the whole codebase
+    passed `""`) - wired it through instead of adding new plumbing:
+    `OLLI_LINK::send_result()` (`tools/olli_link/`) gained a defaulted 3rd
+    parameter, `TOOL_REMOTE::check()` (`source/remote_tools.cpp`) now
+    reads an optional `special_instruction` field off the wire message and
+    passes it through instead of a hardcoded `""`, and
+    `rag_get_document` (`tools/rag/rag_tool/rag_tool.cpp`) is the first
+    real caller, asking the model to relay a full document verbatim
+    instead of summarizing. Fully backward compatible - every existing
+    remote tool (clock/hue/presence) keeps calling the 2-argument
+    `send_result()` unchanged. No new global state anywhere in this;
+    `special_instruction` flows purely through parameters already in
+    every touched function's signature. Verified the wire format live
+    (a scripted connection confirmed the field lands correctly); the
+    receiving side (does olli's `integrate_tool_result()` actually
+    narrate differently) needs a live chat turn to confirm, not just a
+    scripted one.
+    - **Still to do (step 2, not built)**: a genuine exact-data side
+      channel - `special_instruction` only steers narration, it can't
+      guarantee a huge result survives unmodified, and it can't help at
+      all for a non-text result (e.g. a future screen-grab tool). The
+      plan is to generalize `COMMS::WEB_LINKS`'s existing bypass-
+      narration pattern (`source/comms.h`/`user_io.cpp`) to any remote
+      tool, not just web search - a bigger, cross-cutting change
+      (`source/remote_tools.cpp`, `tools/PROTOCOL.md`, wherever
+      `WEB_LINKS` gets displayed), to be designed properly in its own
+      pass rather than folded into this one.
+  - **Done 2026-09-10: title matching also treats `_`/`-` as a space.**
+    Found live, right after the case/extension fix above shipped: a model
+    asked for "misc notes" (space) when the real title was
+    "misc_notes.txt" (underscore), and failed the existing fallback since
+    it only handled case and extension. `find_document_by_title()`'s
+    fallback now normalizes `_`/`-` to a space too, alongside the
+    existing case-fold and extension-strip. Verified live (the exact
+    failing case now resolves correctly).
+  - **Step 2, part 1 done 2026-09-10: `COMMS::WEB_LINKS` generalized into
+    `COMMS::TOOL_ATTACHMENTS`.** The plumbing half of the exact-data side
+    channel from the note above - see the dated addendum on the original
+    `COMMS::WEB_LINKS` + Ctrl+L popup entry (Display / OUTPUT_CLASS
+    section) for exactly what changed. Deliberately scoped
+    to "upstream" only, agreed explicitly before starting: `comms.h`
+    (the new `TOOL_ATTACHMENT{type, label, content}` struct),
+    `tools.cpp` (`TOOL_WEB_SEARCH` now pushes `type="link"`),
+    `io_worker.cpp` (`exchange()`'s drain), plus the handful of
+    mechanical (behavior-unchanged) renames in `user_io.h`/`.cpp` that
+    were unavoidable once the field's type changed at the source. Not
+    done yet, deliberately deferred as their own separate steps: (a)
+    `remote_tools.cpp`/`tools/PROTOCOL.md` wiring so a remote tool like
+    `rag_tool` can actually populate `TOOL_ATTACHMENTS` at all (nothing
+    but `TOOL_WEB_SEARCH` can reach it yet), and (b) the actual downstream
+    display work - type-branching so a "document" entry doesn't render as
+    a broken link, plus a real text viewer for it. Both need designing,
+    not just coding, before either lands.
+  - **Step 2, part 2 done 2026-09-10: `remote_tools.cpp`/`tools/PROTOCOL.md`
+    wiring, so a remote tool can actually reach `TOOL_ATTACHMENTS`.** New
+    optional `attachment` object on the wire `result` message (`type`/
+    `label`/`content`, same shape as `TOOL_ATTACHMENT`) - `TOOL_REMOTE::
+    check()` parses it and pushes straight into `comms.TOOL_ATTACHMENTS`
+    (same `output_buffer_mutex` lock `TOOL_WEB_SEARCH`'s own writes
+    already use). `tools/olli_link/`'s `send_result()` gained a matching
+    4th defaulted parameter (`OLLI_ATTACHMENT` - its own type, not shared
+    with `comms.h`, since `tools/` deliberately doesn't share headers
+    with `source/`); every existing 2/3-arg call site is unaffected.
+    `rag_get_document` (`tools/rag/rag_tool/rag_tool.cpp`) is the first
+    real producer - sets `type="document"` with the full document text.
+    Verified live end-to-end: connected a real `rag_tool` to a disposable
+    test `olli` instance, drove an actual chat turn (via `tmux send-keys`,
+    no user needed), and confirmed a `rag_get_document` call completes
+    normally with no crash through the new parsing code - can't yet
+    confirm the attachment is *displayed* correctly, since that's still
+    the deferred step, but the plumbing itself doesn't break anything.
+    Along the way, found (but didn't fix, unrelated to this change): a
+    ~19-second gap between two tool calls in the same turn (real model
+    thinking time) exceeded the 15-second heartbeat timeout while olli's
+    own thread was busy generating, and the remote tool got marked dead
+    before the second call could even be attempted - a pre-existing
+    heartbeat/reconnect characteristic that'd affect any remote tool
+    under a long enough gap between calls, not something introduced here.
+  - **Step 3 done 2026-09-10: the actual display - numbered selection in
+    the Ctrl+L popup, and a new `DOCUMENT_VIEWER` class for non-link
+    attachments.** The last piece of the exact-data side channel from
+    Step 1/2 above. `OUTPUT_CLASS::show_web_links_panel()`
+    (`source/user_io.cpp`) now lets you type a number then Enter (or a
+    blank Enter, or `q` + Enter, to just dismiss) to pick one listed
+    attachment: a `"link"` entry prints its raw URL (the numbered list
+    itself only ever shows the clickable label - `make_clickable_link()`'s
+    OSC 8 escape hides the URL inside the escape sequence, never visible
+    as plain text otherwise); anything else opens the new
+    `DOCUMENT_VIEWER` (`source/document_viewer.h`/`.cpp`) on it - a
+    scrollable, line-numbered, word-wrapped full-screen text viewer
+    adapted from delmanel's own standalone `file_watch` program
+    (`../../file_watcher`), stripped of its live-file-reload machinery
+    since the content here is a fixed string already in memory, not a
+    watched file on disk. Navigation: Up/Down/PageUp/PageDown/Home/End, a
+    typed number + Enter to jump to that line, a blank Enter or `q` +
+    Enter to quit.
+    - **Two real bugs found live, both confined to `document_viewer.cpp`
+      once understood:**
+      1. The first version copied `file_watch`'s own `initscr()`/
+         `endwin()` lifecycle, since that's how `file_watch` (a genuinely
+         standalone program) legitimately owns its own screen. olli
+         already has exactly one curses screen alive for its whole
+         process; a *second* `initscr()` call while the first is still
+         alive silently corrupts the shared `SP`/`stdscr`/`curscr`
+         globals - confirmed live: it left a stray row on screen that not
+         even a full window-resize rebuild (recreating every window from
+         scratch) could repair. Fixed by never calling `initscr()`/
+         `endwin()` here at all - the caller
+         (`show_web_links_panel()`) already suspends/resumes the one real
+         screen via `def_prog_mode()`/`endwin()`/`reset_prog_mode()`, and
+         `DOCUMENT_VIEWER` just draws into it.
+      2. Removing that alone didn't fully fix it: the viewer's own
+         `cbreak()`/`noecho()`/`keypad()`/`timeout()` calls (made to
+         configure curses' `getch()`) left `KEYBOARD_INPUT`'s own separate
+         raw, non-blocking terminal reader broken afterward - confirmed
+         live: the chat input box stopped echoing/submitting typed
+         characters entirely once the viewer had been opened and closed
+         once, even though its own navigation worked perfectly the whole
+         time it was open. Fixed by never touching terminal modes here
+         either - the viewer now reads stdin the exact same raw way
+         `KEYBOARD_INPUT` already does (manual byte-level parsing of
+         arrow/Home/End/PageUp/PageDown escape sequences, plus its own
+         saved-and-restored `SIGWINCH` handler for resize, since
+         `KEY_RESIZE` only ever arrives through curses' own `getch()`,
+         which this file no longer calls), and only ever uses curses for
+         drawing.
+    - **A third, smaller issue found live, fixed separately.** Right
+      after returning from either the viewer or a plain link view, one
+      screen row (the chat/input separator, or the tools-panel border)
+      could be left showing stale content indefinitely - traced to
+      `ncurses_draw_focus_indicators()` (`user_io.cpp`) drawing those
+      separators directly onto `stdscr` rather than into any of the four
+      real windows (`win_system`/`win_chat`/`win_input`/`win_tools`),
+      which are the only things `show_web_links_panel()`'s existing
+      `clearok(curscr, TRUE)` actually guaranteed would get freshly
+      recomposited (they already do, every tick, regardless). Fixed by
+      calling `ncurses_draw_focus_indicators()` again right there on
+      return, instead of leaving it to happen on its own later (which it
+      always eventually did - e.g. the next real chat message resizing
+      the input box - just not "now").
+    - `DOCUMENT_VIEWER::show()` also takes the `WINDOW*` to draw into as
+      an explicit parameter (always `stdscr` in practice) rather than
+      reaching for the global implicitly, per this project's own
+      no-hidden-globals convention for this refactor - raised as a direct
+      question ("couldn't you just inherit the ncurses stream via the
+      function call?") after the class was already working, and applied
+      as a pure mechanical follow-up with no behavior change.
+    - Verified live throughout on a disposable test `olli` + `rag_tool`
+      instance (never the real session) - both bugs reproduced and
+      confirmed fixed, full navigation, both attachment types, and a
+      repeat pass scrolled to the very last line before quitting to
+      confirm the stray-row fix holds under the same conditions that
+      first exposed it.
 - **Tools rework - mostly done now** (started 2026-08-21). Pulled every
   `TOOL_*` class out of `olla.h`/`olla.cpp` into their own `tools.h`/
   `tools.cpp`; gave every tool the same `configure`/`register_tool`/`check`/
@@ -148,6 +342,37 @@ not needed elsewhere.
 
 ## Session & model behavior
 
+- **Model repeatedly fails to make use of its own successful tool results
+  within the same conversation - observed 2026-09-10, not investigated,
+  no fix attempted.** Three independent live instances via `tools/rag/`
+  testing (see its TODO entry above for the full detail): (1) a
+  `rag_search_documents` call returning 10 real results, one genuinely
+  relevant but ranked #4 - the model reported only 6 of the 10, silently
+  dropping that one and 3 others; (2) a `rag_search` result that
+  genuinely contained the answer (ranked #3 of 5) - the model's answer
+  opened with "nothin' on that in the notes" anyway; (3) `rag_get_document`
+  successfully returning a real document's full content *twice* in one
+  session - the model's final summary a few turns later claimed "no
+  [x] info in that file," ignoring both successful retrievals. In all
+  three, the *data* was correct and delivered correctly - the model just
+  didn't reliably use or report what it already had.
+  - Leading hypothesis, not confirmed: `sidetrack.cpp`'s background
+    `sidetrack-second-guess`/`sidetrack-consolidate` passes (seen live in
+    `debug_full_history.txt`) review and compact history - if one ran
+    between a successful retrieval and a later summary, it may be
+    compacting away the detail that a specific call succeeded while
+    keeping nearby failed attempts. Checkable but not yet checked -
+    would mean reading `sidetrack.cpp`'s actual consolidation logic, not
+    a quick look.
+  - Alternative, equally plausible: plain LLM unreliability synthesizing
+    across a long conversation with several tool calls and real errors
+    interspersed - not fixable by engineering anything, a model
+    limitation, not a bug.
+  - Deliberately not chased further for now - it hasn't broken anything
+    `tools/rag/` built (every result was still fetched/stored/searched
+    correctly), it's broken the model's *summary* of what was built. If
+    pursued, treat as its own separate investigation into
+    `sidetrack.cpp`, not part of the RAG work.
 - **Repeat-bug root cause found and fixed 2026-08-27, awaiting real-world
   confirmation** - full detail in the `olli-time-repeat-bug` memory entry
   (not duplicated here), short version: `SIDETRACK_CHAT_INSTANCE` was
@@ -1528,6 +1753,24 @@ it can actually act under its persona's judgment, not just talk about it.
     forces a full redraw (`clearok(curscr, TRUE)`) to recover from
     whatever the raw prints did to the physical screen. Confirmed working
     live, colored notice included.
+  - **Generalized 2026-09-10** into `COMMS::TOOL_ATTACHMENTS`
+    (`vector<TOOL_ATTACHMENT>`, a `{type, label, content}` struct instead
+    of a plain pair) - see "Exact-data side channel" under `tools/rag`'s
+    entry (New tools, above) for why. `TOOL_WEB_SEARCH` now pushes
+    `type="link"` entries; every relay/rendering spot named above
+    (`exchange()`, `get_response()`, the notice, `show_web_links_panel()`)
+    got the matching mechanical rename, with zero behavior change - still
+    unconditionally renders every entry as a link, since nothing but web
+    search populates it yet. The "document" type existing but not yet
+    rendered as anything but a link, if one ever reaches display before
+    that catches up, is the known gap to close before wiring an actual
+    document producer through - see the RAG entry's own note on this.
+  - **Display step done 2026-09-10** - closes the gap noted just above.
+    See the RAG entry's own "Step 3" note (New tools, above) for the full
+    detail: numbered selection in `show_web_links_panel()`, and a new
+    `DOCUMENT_VIEWER` class (`source/document_viewer.h`/`.cpp`) for
+    non-link attachments, including two real screen-corruption bugs found
+    and fixed while building it.
 
 ## Voice (Voca)
 

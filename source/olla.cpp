@@ -45,9 +45,10 @@ void ollama_system::pull_background_output(OUTPUT_CLASS& output)
 std::pair<ollama_system&, COMMS&> ollama_system::spawn_background_task()
 {
     // COMMS::audio (a direct pointer to the speaker) doesn't exist anymore -
-    // TTS output now runs through comms_buffer_audio, which only the main
-    // chat's own COMMS gets fanned into via IO_WORKER_CLASS::exchange()
-    // (io_worker.cpp). Background tasks currently have no speech output at
+    // TTS output now runs through IO_WORKER_CLASS's own comms_stt_tts,
+    // which only the main chat's own COMMS ever reaches (via exchange()
+    // into comms_buffer, then thread_main()'s own copy into comms_stt_tts -
+    // io_worker.cpp). Background tasks currently have no speech output at
     // all as a result - unaddressed, see this session's notes.
     background_tasks.emplace_back(std::make_unique<ollama_system>(), std::make_unique<COMMS>());
     auto& [instance, instance_comms] = background_tasks.back();
@@ -426,13 +427,14 @@ void ollama_system::send(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, CO
                         if (msg_chunk.contains("content")) {
                             std::string c = msg_chunk["content"];
                             accumulated_content += c;
-                            // TTS reads from its own comms_buffer_audio copy
+                            // TTS reads from its own comms_stt_tts copy
                             // (io_worker.cpp), fed from comms.INPUT_FROM_LLM
-                            // by IO_WORKER_CLASS::exchange() - no separate
-                            // append needed here. accumulated_content (->
-                            // last_received.response) always gets it
-                            // regardless - only whether it also goes to
-                            // comms live is gated.
+                            // via exchange() into comms_buffer, then
+                            // thread_main()'s own tick copying that into
+                            // comms_stt_tts - no separate append needed
+                            // here. accumulated_content (-> last_received.
+                            // response) always gets it regardless - only
+                            // whether it also goes to comms live is gated.
                             if (PROPS.stream_output) {
                                 std::lock_guard<std::mutex> lock(output_buffer_mutex);
                                 comms.INPUT_FROM_LLM += c;
@@ -746,10 +748,11 @@ void ollama_system::unload_model()
 
 // write_to_tts() used to chunk comms.tts_buffer (punctuation/length/
 // generation-finished heuristic) and hand it to comms.audio->speak() -
-// both are gone now. That job moved to IO_WORKER_CLASS::thread_main()
-// (io_worker.cpp), which chunks comms_buffer_audio.INPUT_FROM_LLM instead
-// (fed from comms.INPUT_FROM_LLM by exchange()), gated on tts->isSpeaking()
-// rather than a punctuation/length heuristic.
+// both are gone now. That job moved to IO_WORKER_CLASS::display_with_tts()
+// (io_worker.cpp), which chunks its own comms_stt_tts.INPUT_FROM_LLM
+// instead (fed from comms.INPUT_FROM_LLM by exchange() into comms_buffer,
+// then thread_main()'s own tick copying that into comms_stt_tts), gated on
+// tts->isSpeaking() rather than a punctuation/length heuristic.
 
 bool ollama_system::jump_input(COMMS& comms)
 {

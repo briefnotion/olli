@@ -14,6 +14,7 @@
 
 #include "threading.h"
 #include "user_io.h" // KEYBOARD_INPUT, OUTPUT_CLASS, COMMS (via comms.h)
+#include "web_server.h" // WEB_SERVER_CLASS
 
 class ollama_system;
 class TOOL_BASE;
@@ -315,22 +316,57 @@ class IO_WORKER_CLASS
         std::vector<std::string> tool_names;
 
     private:
-        // This worker's own local COMMS - see this class's own comment
-        // (comms_buffer/comms) for what it's for and how exchange() drains
-        // it into the real comms (owned by main_process(), not chat) once
-        // per main-thread tick. Drained by
-        // thread_main()'s own screen-drawing step (see its own comment) -
-        // NOT the same copy TTS reads from (see comms_buffer_audio below);
-        // each has its own independent drain pace, so a single shared copy
-        // would have the two race to steal chunks of the same text.
+        // This worker's own local COMMS - filled by exchange() from the
+        // real comms (owned by main_process(), not chat) once per
+        // main-thread tick, same as before. No longer drained/rendered
+        // directly, though - see thread_main()'s own comment. Two
+        // per-channel copies (comms_keyboard/comms_stt_tts below) are
+        // snapshotted from this at the start and end of each tick; each
+        // channel writes any new input from its own source back into its
+        // own copy, then hands the WHOLE copy back to comms_buffer as one
+        // unit - comms_buffer is just the shared holding place both
+        // channels round-trip through, not something either reads/drains
+        // directly itself.
         COMMS comms_buffer;
 
-        // A second, independent copy of the same INPUT_FROM_LLM/THINKING/
-        // SYSTEM text comms_buffer gets - see exchange()'s own comment for
-        // how both get filled from one drain of the real comms. This one
-        // is TTS's own to read/clear at its own pace, separate from
-        // whatever comms_buffer still has pending for the screen.
-        COMMS comms_buffer_audio;
+        // The keyboard/ncurses channel's own copy - see comms_buffer's own
+        // comment above for the round-trip shape. get_response()+
+        // display_with_ncurses() (thread_main()) drain this each tick, the
+        // same way they used to drain comms_buffer directly.
+        COMMS comms_keyboard;
+
+        // The voice channel's own copy, covering both directions: STT
+        // (popVocaEvent()) writes transcripts into this (not comms_buffer
+        // directly, as it used to), and TTS (display_with_tts()) reads/
+        // clears INPUT_FROM_LLM from this each tick - see comms_buffer's
+        // own comment for the round-trip shape both channels share.
+        // Replaces the old comms_buffer_audio, which only covered the TTS
+        // half.
+        COMMS comms_stt_tts;
+
+        // TTS's own accumulator, separate from comms_stt_tts itself -
+        // comms_stt_tts gets wholesale-overwritten from comms_buffer every
+        // tick (see comms_buffer's own comment), so anything not yet
+        // spoken has to live here instead, surviving across ticks
+        // independent of comms_stt_tts's own lifetime. See
+        // display_with_tts()'s own comment.
+        std::string tts_pending;
+
+        // The web channel's own copy - same round-trip shape as
+        // comms_keyboard/comms_stt_tts above, see comms_buffer's own
+        // comment. display_with_web() drains this each tick, handing it
+        // off to web_server's own outgoing queue (WEB_SERVER_CLASS::
+        // push_output(), web_server.h) - no accumulator of its own needed
+        // the way TTS has tts_pending, since there's nothing here that
+        // needs pacing the way speech does; it's just handed off whole.
+        COMMS comms_web;
+
+        // Lets olli be driven from a browser on the LAN alongside the
+        // local terminal - see WEB_SERVER_CLASS's own class comment
+        // (web_server.h) for the full design. Constructed/torn down
+        // inside thread_main()'s own RUN window, same lifecycle as tts/
+        // voca above (see thread_main()'s own comment for why).
+        std::unique_ptr<WEB_SERVER_CLASS> web_server;
 
         // Live mirror of key_input.LINE, refreshed every tick (see
         // thread_main()'s own comment) - purely for display_with_ncurses()
@@ -382,6 +418,36 @@ class IO_WORKER_CLASS
         // a typed line would. Returns false if nothing is pending.
         bool popVocaEvent(VOCA_EVENT& out);
 
+        // The voice channel's own drain+speak step, called once per tick
+        // from thread_main() with that tick's comms_stt_tts snapshot - the
+        // TTS-side equivalent of get_response()+display_with_ncurses() for
+        // the keyboard channel. Hands INPUT_FROM_LLM off to tts_pending
+        // (see its own comment), clears comms_tty_stt's own copy of every
+        // field regardless (THINKING/SYSTEM/TOOL_ATTACHMENTS aren't spoken,
+        // just dropped here each tick so they don't grow unbounded), then
+        // speaks tts_pending once tts is actually idle. A no-op (still
+        // clears comms_tty_stt) if tts is null.
+        void display_with_tts(COMMS& comms_tty_stt);
+
+        // Pops one pending line submitted from the browser, if any -
+        // mirrors popVocaEvent()'s shape/contract exactly, just backed by
+        // web_server's own queue (WEB_SERVER_CLASS::poll_input()) instead
+        // of Voca's. False (no-op) if web_server is null.
+        bool poll_web_event(std::string& out);
+
+        // The web channel's own drain+push step, called once per tick from
+        // thread_main() with that tick's comms_web snapshot - mirrors
+        // display_with_ncurses()'s signature (not just display_with_tts()'s)
+        // since the intent is eventually matching its full feature set
+        // (tool_names panel, scrolling, live-typing echo) - phase 1 only
+        // actually uses comms_web, same as the others start simple. A
+        // no-op (still clears comms_web) if web_server is null or nobody's
+        // currently connected (WEB_SERVER_CLASS::has_client()) - cheap to
+        // skip entirely when nobody's watching.
+        void display_with_web(const std::string& input_from_user_echo, COMMS& comms_browser,
+                               const std::vector<std::string>& tool_names_arg,
+                               SCROLL_KEY scroll_request, bool focus_cycle_requested);
+
         IO_WORKER_CLASS_PROPERTIES PROPS;
 
         bool RUN = false;
@@ -412,7 +478,7 @@ class IO_WORKER_CLASS
         void VOCA_manual_set(int Command);
 
         // No parameters - thread_main() only ever touches this object's own
-        // comms_buffer/comms_buffer_audio, never chat directly (see this
+        // comms_buffer/comms_stt_tts, never chat directly (see this
         // class's own comment). SIDETRACK_CLASS used to be threaded through
         // here too - dropped now that sidetrack is being reworked; nothing
         // here reaches it anymore.

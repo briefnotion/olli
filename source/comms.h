@@ -184,6 +184,36 @@ class COMMS
         // touch this field directly, so it's atomic instead (same
         // reasoning as KEYBOARD_INPUT_PROPERTIES::ENABLED, user_io.h).
         std::atomic<bool> close_chat_log_requested{false};
+
+        // std::atomic has no copy-assignment operator, which would
+        // otherwise implicitly delete COMMS's own operator= entirely -
+        // provided explicitly instead, copying every field above except
+        // close_chat_log_requested itself (deliberately left alone; it's
+        // a standalone signal, not part of the rest of a COMMS snapshot -
+        // see its own comment just above). Needed because
+        // IO_WORKER_CLASS::thread_main() (io_worker.cpp) round-trips whole
+        // COMMS copies between comms_buffer and its per-channel copies
+        // (comms_keyboard/comms_stt_tts, io_worker.h), treating COMMS as a
+        // plain holding place you assign wholesale rather than something
+        // requiring field-by-field merge logic at each call site.
+        COMMS& operator=(const COMMS& other)
+        {
+            if (this == &other) return *this;
+            INPUT_FROM_LLM = other.INPUT_FROM_LLM;
+            INPUT_FROM_THINKING = other.INPUT_FROM_THINKING;
+            INPUT_FROM_SYSTEM = other.INPUT_FROM_SYSTEM;
+            INPUT_FROM_LLM_COLOR = other.INPUT_FROM_LLM_COLOR;
+            INPUT_FROM_USER_COLOR = other.INPUT_FROM_USER_COLOR;
+            ENTER_PRESSED = other.ENTER_PRESSED;
+            INPUT_FROM_USER = other.INPUT_FROM_USER;
+            INTERRUPTED = other.INTERRUPTED;
+            IS_TYPING = other.IS_TYPING;
+            EXIT_REQUESTED = other.EXIT_REQUESTED;
+            ENABLE_KEYBOARD_INPUT = other.ENABLE_KEYBOARD_INPUT;
+            ENABLE_TTS_OUTPUT = other.ENABLE_TTS_OUTPUT;
+            TOOL_ATTACHMENTS = other.TOOL_ATTACHMENTS;
+            return *this;
+        }
 };
 
 #endif

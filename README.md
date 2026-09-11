@@ -429,9 +429,65 @@ renamed 2026-08-28 from `send`/`submitted_line`/`stop_requested`/
 `exit_requested`, matching `KEYBOARD_INPUT`'s own field names) flow the
 other way. `COMMS::audio` is gone (there's no `AUDIO_CONTROL_CLASS` to point
 at anymore - see [How it works](#how-it-works)) - reaching TTS now goes
-through `comms_buffer_audio` inside `IO_WORKER_CLASS` instead of a pointer
+through `comms_stt_tts` inside `IO_WORKER_CLASS` instead of a pointer
 on `COMMS` itself, which also means background tasks and sidetrack (neither
 routed through `exchange()`) currently have no speech output at all.
+
+`IO_WORKER_CLASS::thread_main()`'s own tick actually treats keyboard/
+ncurses, STT/TTS, and the web interface below as three parallel channels,
+each with its own `COMMS` copy (`comms_keyboard`/`comms_stt_tts`/
+`comms_web`) snapshotted from `comms_buffer` at the start of a tick -
+whichever channel has new input hands its own copy back to `comms_buffer`
+as one unit, then all three get re-synced before their own
+display/speak/push step drains them. `COMMS` gained a real `operator=`
+to make that whole-struct round-tripping possible at all (its
+`close_chat_log_requested` field is a `std::atomic<bool>`, which
+otherwise implicitly deletes it - the new operator copies every other
+field and leaves that one alone).
+
+---
+
+## Web interface
+
+Beyond the local terminal, olli can also be driven from a browser on the
+same LAN - a second, independent way in, running alongside (not instead
+of) the ncurses/keyboard session, not replacing it. `WEB_SERVER_CLASS`
+(`source/web_server.h`/`.cpp`) owns a small embedded HTTP server
+(cpp-httplib, the same header-only dependency [olla.cpp](source/olla.cpp)
+already uses as a client) on its own background thread, listening on
+**port 47602** (separate from the [remote tools](#remote-tools) protocol's
+47601) and bound to every network interface rather than loopback-only,
+since the whole point is reaching it from another machine. No
+authentication - trusted home LAN only, same trust boundary as remote
+tools.
+
+Open `http://<olli-host>:47602/` in any browser to get a simple chat
+page: type a message and hit Enter/Send, and it joins the same
+conversation as the local session, responses streaming back live
+(Server-Sent Events). A right-side panel lists whatever tools are
+currently registered. A small floating box in the upper-right corner
+shows the model's reasoning while it's thinking, mirroring
+`display_with_ncurses()`'s own floating thinking box (see
+[Display](#display) above) - it closes the moment the real reply starts,
+not on a thinking-side timeout, lingering a couple seconds first rather
+than vanishing mid-read. Links render as real clickable `<a>` tags -
+simpler than ncurses' own notice-plus-popup dance, since a browser
+doesn't have ncurses' escape-sequence-stripping problem.
+
+Submissions are line-at-a-time (type, then send), not a live per-keystroke
+mirror of what's being typed the way the local terminal's input line
+shows - that would need the page posting on every keystroke instead of
+just on submit, real added scope not yet built. Also not yet built:
+authentication (deliberately out of scope for now), and real multi-tab
+support - the output/tools-panel queues are single shared buffers rather
+than per-connection, built for the expected case of one browser tab
+watching at a time.
+
+If a browser on another machine can't reach it, check the *host*
+machine's firewall before assuming something's wrong with olli itself -
+a listening-but-unreachable port (confirm with `ss -tlnp | grep 47602`)
+timing out rather than refusing the connection is the telltale sign
+(`sudo ufw allow 47602/tcp` on Ubuntu).
 
 ---
 
@@ -482,6 +538,8 @@ source/
 │                               background thread - see Display below. AUDIO_CONTROL_CLASS/
 │                               audio_control.{h,cpp}/tts.{hpp,cpp}/voca.{hpp,cpp} are gone
 │                               (2026-08-28) - folded in here entirely.
+├── web_server.{h,cpp}          WEB_SERVER_CLASS: the browser-driven web interface - see
+│                               Web interface below.
 ├── sidetrack.{h,cpp}          Background thread: consolidation, "second guess", idle auto-clear.
 │                               Being reworked (2026-08-28) - disconnected from IO_WORKER_CLASS
 │                               and commented out in main.cpp in the meantime; the notes below

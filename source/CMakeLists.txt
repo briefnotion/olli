@@ -146,6 +146,7 @@ add_executable(olli
     ../source/olla.cpp
     ../source/comms.cpp
     ../source/io_worker.cpp
+    ../source/web_server.cpp
     ../source/tools.cpp
     ../source/tools_task_script.cpp
     ../source/remote_tools.cpp

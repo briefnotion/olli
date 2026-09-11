@@ -853,6 +853,74 @@ bool IO_WORKER_CLASS::popVocaEvent(VOCA_EVENT& out)
     return false;
 }
 
+void IO_WORKER_CLASS::display_with_tts(COMMS& comms_tty_stt)
+{
+    // THINKING/SYSTEM/TOOL_ATTACHMENTS aren't spoken - drop them here each
+    // tick regardless of whether tts exists, same as INPUT_FROM_LLM below,
+    // so they don't grow unbounded doing nothing.
+    comms_tty_stt.INPUT_FROM_THINKING.clear();
+    comms_tty_stt.INPUT_FROM_SYSTEM.clear();
+    comms_tty_stt.TOOL_ATTACHMENTS.clear();
+
+    if (!tts)
+    {
+        comms_tty_stt.INPUT_FROM_LLM.clear();
+        return;
+    }
+
+    // comms_tty_stt itself gets wholesale-overwritten from comms_buffer
+    // every tick (see thread_main()'s own comment, step 5/9), so anything
+    // not yet spoken has to live in tts_pending instead, surviving across
+    // ticks independent of comms_tty_stt's own lifetime.
+    tts_pending += comms_tty_stt.INPUT_FROM_LLM;
+    comms_tty_stt.INPUT_FROM_LLM.clear();
+
+    // Speak once idle, chunking into "whatever arrived since it last went
+    // idle" instead of one call per streamed token, without needing a
+    // punctuation/length heuristic.
+    if (!tts->isSpeaking() && !tts_pending.empty())
+    {
+        // Drained either way so disabled speech doesn't just pile up and
+        // dump out once re-enabled - ENABLE_TTS_OUTPUT (copied through
+        // comms_buffer -> comms_tty_stt same as every other field) only
+        // gates whether it's actually spoken.
+        if (comms_tty_stt.ENABLE_TTS_OUTPUT) tts->speakAsync(tts_pending);
+        tts_pending.clear();
+    }
+}
+
+bool IO_WORKER_CLASS::poll_web_event(std::string& out)
+{
+    return web_server && web_server->poll_input(out);
+}
+
+void IO_WORKER_CLASS::display_with_web(const std::string& /*input_from_user_echo*/, COMMS& comms_browser,
+                                        const std::vector<std::string>& tool_names_arg,
+                                        SCROLL_KEY /*scroll_request*/, bool /*focus_cycle_requested*/)
+{
+    // input_from_user_echo/scroll_request/focus_cycle_requested still
+    // unused - tool_names_arg is now the second parameter actually used
+    // (named _arg to avoid shadowing this class's own tool_names member -
+    // see this method's own comment, io_worker.h, for why the signature
+    // matches display_with_ncurses()'s in full regardless).
+    if (!web_server || !web_server->has_client())
+    {
+        comms_browser.INPUT_FROM_LLM.clear();
+        comms_browser.INPUT_FROM_THINKING.clear();
+        comms_browser.INPUT_FROM_SYSTEM.clear();
+        comms_browser.TOOL_ATTACHMENTS.clear();
+        return;
+    }
+
+    web_server->push_output(comms_browser.INPUT_FROM_LLM, comms_browser.INPUT_FROM_THINKING,
+                             comms_browser.INPUT_FROM_SYSTEM, comms_browser.TOOL_ATTACHMENTS);
+    web_server->push_tool_names(tool_names_arg);
+    comms_browser.INPUT_FROM_LLM.clear();
+    comms_browser.INPUT_FROM_THINKING.clear();
+    comms_browser.INPUT_FROM_SYSTEM.clear();
+    comms_browser.TOOL_ATTACHMENTS.clear();
+}
+
 void IO_WORKER_CLASS::thread_start()
 {
     THREAD_CONTROL.create(1000);
@@ -926,6 +994,16 @@ void IO_WORKER_CLASS::thread_main()
         voca.reset();
     }
 
+    // Same RUN-window lifecycle as tts/voca above - see this method's own
+    // comment. Non-fatal if it fails to bind its port (e.g. already in
+    // use) - web_server.reset() leaves poll_web_event()/display_with_web()
+    // no-oping, same as tts/voca being null.
+    web_server = std::make_unique<WEB_SERVER_CLASS>();
+    if (!web_server->start())
+    {
+        web_server.reset();
+    }
+
     RUN = true;
     while (RUN)
     {
@@ -979,32 +1057,43 @@ void IO_WORKER_CLASS::thread_main()
             // 500ms-tick thread (AUDIO_CONTROL_CLASS) and no longer is.
             adjust_audio_files();
 
-            // 5. Flush whatever exchange() has accumulated in
-            // comms_buffer_audio.INPUT_FROM_LLM to the TTS engine, once
-            // it's actually idle - chunks speech into "whatever arrived
-            // since it last went idle" instead of one call per streamed
-            // token, without needing a punctuation/length heuristic.
-            // comms_buffer_audio.INPUT_FROM_LLM doubles as its own
-            // accumulator here (nothing else reads it - exchange() only
-            // ever appends to it), so no separate buffer is needed.
-            if (tts && !tts->isSpeaking() && !comms_buffer_audio.INPUT_FROM_LLM.empty())
+            // 5. Snapshot comms_buffer into every channel's own copy - each
+            // channel below writes any new input from its own source into
+            // its own copy first, then hands the WHOLE copy back to
+            // comms_buffer as one unit (see comms_buffer's own comment,
+            // io_worker.h). Snapshotting here, before any channel is
+            // checked, means whichever channel goes first sees (and hands
+            // back) an accurate, current copy rather than a stale one.
+            comms_stt_tts = comms_buffer;
+            comms_keyboard = comms_buffer;
+            comms_web = comms_buffer;
+
+            // 5.5. Web: same shape as STT's step 6 and keyboard's step 8
+            // below, just checked here since it doesn't interact with
+            // key_input.INTERRUPTED (step 7) the way STT does.
+            std::string web_line;
+            if (poll_web_event(web_line))
             {
-                // Drained either way so disabled speech doesn't just pile up
-                // and dump out once re-enabled - comms_buffer.ENABLE_TTS_
-                // OUTPUT (copied in by exchange(), same as ENABLE_KEYBOARD_
-                // INPUT) only gates whether it's actually spoken.
-                if (comms_buffer.ENABLE_TTS_OUTPUT) tts->speakAsync(comms_buffer_audio.INPUT_FROM_LLM);
-                comms_buffer_audio.INPUT_FROM_LLM.clear();
+                if (comms_buffer.ENTER_PRESSED)
+                {
+                    comms_buffer.INPUT_FROM_USER += "\n" + web_line;
+                }
+                else
+                {
+                    comms_web.INPUT_FROM_USER = web_line;
+                    comms_web.ENTER_PRESSED = true;
+                    comms_buffer = comms_web;
+                }
             }
 
             // 6. Pop at most one pending voice event this tick. STT (Voca)
             // lives inside this worker's own thread_main() now, not behind
             // key_input like typed input - so a transcript goes straight
-            // into comms_buffer's own INPUT_FROM_USER/ENTER_PRESSED instead
-            // of staging through key_input.LINE/ENTER_PRESSED first. A
-            // wake/sleep status_message (see VOCA_EVENT, io_worker.h) is
-            // neither a transcript nor an interrupt - just log it and
-            // skip the rest of this block for that event.
+            // into comms_stt_tts rather than staging through key_input.LINE/
+            // ENTER_PRESSED first. A wake/sleep status_message (see
+            // VOCA_EVENT, io_worker.h) is neither a transcript nor an
+            // interrupt - just log it straight to comms_buffer and skip the
+            // rest of this block for that event.
             VOCA_EVENT voca_event;
             if (popVocaEvent(voca_event))
             {
@@ -1016,8 +1105,22 @@ void IO_WORKER_CLASS::thread_main()
                 {
                     if (!voca_event.text.empty())
                     {
-                        comms_buffer.INPUT_FROM_USER = voca_event.text;
-                        comms_buffer.ENTER_PRESSED = true;
+                        if (comms_buffer.ENTER_PRESSED)
+                        {
+                            // exchange() hasn't picked up a still-pending
+                            // submission yet (from this channel, or from
+                            // keyboard's own step below, later this same
+                            // tick) - append rather than drop or overwrite
+                            // it, so nothing said/typed gets lost; both go
+                            // out together on the next exchange() cycle.
+                            comms_buffer.INPUT_FROM_USER += "\n" + voca_event.text;
+                        }
+                        else
+                        {
+                            comms_stt_tts.INPUT_FROM_USER = voca_event.text;
+                            comms_stt_tts.ENTER_PRESSED = true;
+                            comms_buffer = comms_stt_tts;
+                        }
                     }
                     key_input.INTERRUPTED = true;
                 }
@@ -1044,36 +1147,58 @@ void IO_WORKER_CLASS::thread_main()
             }
 
             // 8. Submission - echo to the screen here, once, uniformly for
-            // typed and voice input (see the comment on LINE's assignment
-            // above). Don't stomp a not-yet-relayed submission. Only
-            // clears LINE/ENTER_PRESSED here, not via key_input.reset() -
-            // that would also clear LINE on ticks where the user is still
-            // mid-typing (ENTER_PRESSED still false), erasing whatever
-            // they'd typed so far before they ever got to press Enter.
+            // typed and voice input (see step 6's own comment). Same
+            // append-if-pending handling as step 6 above, via comms_keyboard
+            // instead of comms_stt_tts. Only clears LINE/ENTER_PRESSED here,
+            // not via key_input.reset() - that would also clear LINE on
+            // ticks where the user is still mid-typing (ENTER_PRESSED still
+            // false), erasing whatever they'd typed so far before they ever
+            // got to press Enter.
             if (key_input.ENTER_PRESSED)
             {
                 output.user_input += key_input.LINE;
 
-                if (!comms_buffer.ENTER_PRESSED)
+                if (comms_buffer.ENTER_PRESSED)
                 {
-                    comms_buffer.ENTER_PRESSED = true;
-                    comms_buffer.INPUT_FROM_USER = key_input.LINE;
+                    comms_buffer.INPUT_FROM_USER += "\n" + key_input.LINE;
+                }
+                else
+                {
+                    comms_keyboard.INPUT_FROM_USER = key_input.LINE;
+                    comms_keyboard.ENTER_PRESSED = true;
+                    comms_buffer = comms_keyboard;
                 }
 
                 key_input.LINE.clear();
                 key_input.ENTER_PRESSED = false;
             }
 
-            // 9. Drain into the screen - comms_buffer (its own copy of
-            // INPUT_FROM_LLM/THINKING/SYSTEM, filled by exchange() - see
-            // comms_buffer's own comment), never the real comms directly,
-            // so this doesn't race comms_buffer_audio's own independent
-            // drain for TTS over the same source text. Still under
-            // output_buffer_mutex (get_response()'s own lock).
-            output.get_response(comms_buffer);
+            // 9. Final re-sync: every channel gets the authoritative,
+            // up-to-date snapshot, including whatever any of them merged
+            // back in steps 5.5/6/8 above. comms_buffer's own copy of the
+            // screen/speech-direction fields is cleared right here, now
+            // that every channel holds its own copy to work from - NOT
+            // done any earlier (e.g. alongside step 5's snapshot), which
+            // would wipe out what step 5 just gave them before any had a
+            // chance to use it.
+            comms_stt_tts = comms_buffer;
+            comms_keyboard = comms_buffer;
+            comms_web = comms_buffer;
+            comms_buffer.INPUT_FROM_LLM.clear();
+            comms_buffer.INPUT_FROM_THINKING.clear();
+            comms_buffer.INPUT_FROM_SYSTEM.clear();
+            comms_buffer.TOOL_ATTACHMENTS.clear();
 
-            // 9.5. Web-links popup - Ctrl+L. Handled right here, after
-            // get_response() just above has drained comms_buffer.
+            // 10. Drain into the screen - comms_keyboard (this channel's
+            // own copy, synced from comms_buffer at step 9 above), not
+            // comms_buffer directly, so this doesn't race comms_stt_tts's
+            // own independent drain in display_with_tts() below over the
+            // same source text. Still under output_buffer_mutex
+            // (get_response()'s own lock).
+            output.get_response(comms_keyboard);
+
+            // 10.5. Web-links popup - Ctrl+L. Handled right here, after
+            // get_response() just above has drained comms_keyboard's own
             // TOOL_ATTACHMENTS into output.web_links, so the popup always
             // sees whatever arrived this same tick. A no-op (inside the
             // function itself) if there's nothing to show yet.
@@ -1091,10 +1216,10 @@ void IO_WORKER_CLASS::thread_main()
             // (see thread_main()'s parameter comment); sidetrack's own
             // output isn't drawn to the screen until that's reworked.
 
-            // 10. Draw.
+            // 11. Draw.
             if (USE_NCURSES)
             {
-                output.display_with_ncurses(input_from_user_echo, comms_buffer, tool_names,
+                output.display_with_ncurses(input_from_user_echo, comms_keyboard, tool_names,
                                              scroll_request, focus_cycle_requested);
             }
             else
@@ -1102,13 +1227,16 @@ void IO_WORKER_CLASS::thread_main()
                 output.display();
             }
 
-            // 11. Nothing speaks comms_buffer_audio.INPUT_FROM_THINKING/
-            // INPUT_FROM_SYSTEM yet (only INPUT_FROM_LLM, step 5) - clear
-            // them here each tick so they don't grow unbounded in the
-            // meantime. Available to any future TTS consumer added earlier
-            // in this block, same tick, before this runs.
-            comms_buffer_audio.INPUT_FROM_THINKING.clear();
-            comms_buffer_audio.INPUT_FROM_SYSTEM.clear();
+            // 12. Voice channel's own drain+speak step - see its own
+            // comment (io_worker.h) for why this is a dedicated function
+            // now rather than inline accumulate-and-speak logic here.
+            display_with_tts(comms_stt_tts);
+
+            // 13. Web channel's own drain+push step - same signature as
+            // display_with_ncurses() above, see this method's own comment
+            // (io_worker.h) for why.
+            display_with_web(input_from_user_echo, comms_web, tool_names,
+                              scroll_request, focus_cycle_requested);
 
             PROCESSING.store(false);
         }
@@ -1116,14 +1244,15 @@ void IO_WORKER_CLASS::thread_main()
         std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<long>(PROPS.INTERVAL)));
     }
 
-    // Unload tts/voca now that this worker is no longer running - see this
-    // function's own opening comment. voca->stop() first (joins its
-    // capture/transcribe threads) before reset() actually destroys it;
-    // tts's own destructor (run by its reset()) stops/joins its worker
-    // thread the same way.
+    // Unload tts/voca/web_server now that this worker is no longer running
+    // - see this function's own opening comment. voca->stop() first (joins
+    // its capture/transcribe threads) before reset() actually destroys it;
+    // tts's and web_server's own destructors (run by their reset()) stop/
+    // join their own worker thread(s) the same way.
     if (voca != nullptr) voca->stop();
     voca.reset();
     tts.reset();
+    web_server.reset();
 }
 
 void IO_WORKER_CLASS::exchange(COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list)
@@ -1151,22 +1280,21 @@ void IO_WORKER_CLASS::exchange(COMMS& comms, std::vector<std::unique_ptr<TOOL_BA
         for (auto& name : tool->tool_functions)
             tool_names.push_back(name);
 
-    // Output direction: comms (real, owned by main_process()) -> BOTH comms_buffer and
-    // comms_buffer_audio (this worker's own two independent copies) - one
-    // drain of the real comms, fanned out to two destinations, each free
-    // to be read/cleared at its own pace afterward (screen drawing vs TTS
-    // - see each buffer's own comment, io_worker.h) without racing each
-    // other for the same source text. Same output_buffer_mutex
-    // OUTPUT_CLASS::get_response() (user_io.cpp) uses, since producer
-    // threads (chat_thread, sidetrack) append to these concurrently with
-    // this main-thread copy.
+    // Output direction: comms (real, owned by main_process()) -> comms_buffer
+    // (this worker's own copy). Used to also fan out a second copy directly
+    // to comms_buffer_audio here - dropped once STT and TTS were folded
+    // into one shared comms_stt_tts covering the whole voice channel;
+    // thread_main() now copies comms_buffer's own drain into comms_stt_tts
+    // itself each tick (see its step 4.5) instead of this doing it. Same
+    // output_buffer_mutex OUTPUT_CLASS::get_response() (user_io.cpp) uses,
+    // since producer threads (chat_thread, sidetrack) append to comms
+    // concurrently with this main-thread copy.
     {
         std::lock_guard<std::mutex> lock(output_buffer_mutex);
 
         if (!comms.INPUT_FROM_LLM.empty())
         {
             comms_buffer.INPUT_FROM_LLM += comms.INPUT_FROM_LLM;
-            comms_buffer_audio.INPUT_FROM_LLM += comms.INPUT_FROM_LLM;
             comms.INPUT_FROM_LLM.clear();
         }
 
@@ -1179,14 +1307,12 @@ void IO_WORKER_CLASS::exchange(COMMS& comms, std::vector<std::unique_ptr<TOOL_BA
         if (!comms.INPUT_FROM_THINKING.empty())
         {
             comms_buffer.INPUT_FROM_THINKING += comms.INPUT_FROM_THINKING;
-            comms_buffer_audio.INPUT_FROM_THINKING += comms.INPUT_FROM_THINKING;
             comms.INPUT_FROM_THINKING.clear();
         }
 
         if (!comms.INPUT_FROM_SYSTEM.empty())
         {
             comms_buffer.INPUT_FROM_SYSTEM += comms.INPUT_FROM_SYSTEM;
-            comms_buffer_audio.INPUT_FROM_SYSTEM += comms.INPUT_FROM_SYSTEM;
             comms.INPUT_FROM_SYSTEM.clear();
         }
 

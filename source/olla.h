@@ -505,9 +505,10 @@ inline std::mutex tools_list_mutex;
 
 // The text-to-speech output hook used to live here as a single process-wide
 // global (g_audio_control), then later as a per-instance COMMS::audio
-// pointer. Neither exists anymore - IO_WORKER_CLASS::exchange() now fans
-// the main chat's own comms.INPUT_FROM_LLM out into its private
-// comms_buffer_audio (io_worker.cpp) and speaks that directly; other
-// instances (background tasks, sidetrack) currently have no speech path.
+// pointer. Neither exists anymore - IO_WORKER_CLASS::thread_main() now
+// copies the main chat's own comms.INPUT_FROM_LLM (already relayed in by
+// exchange() into its comms_buffer) into its own comms_stt_tts and speaks
+// that via display_with_tts() (io_worker.cpp); other instances (background
+// tasks, sidetrack) currently have no speech path.
 
 #endif

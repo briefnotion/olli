@@ -1772,6 +1772,68 @@ it can actually act under its persona's judgment, not just talk about it.
     non-link attachments, including two real screen-corruption bugs found
     and fixed while building it.
 
+### `thread_main()` reworked into three parallel per-channel comms copies; `COMMS` gained `operator=` (2026-09-10)
+
+- **Why:** built as the prerequisite for a browser-driven interface (see
+  "Remote access" below) - `IO_WORKER_CLASS::thread_main()`'s tick used to
+  drain/display `comms_buffer` directly for keyboard/ncurses and a second
+  `comms_buffer_audio` copy for TTS, each handled by its own bespoke
+  logic. Adding a third channel (web) on that same shape meant
+  generalizing the pattern first rather than bolting a special case onto
+  it - went through several rounds of design correction before landing
+  here (see this session's own conversation for the false starts: an
+  accumulate-into-`comms_stt_tts` version that didn't match the intended
+  shape at all, then a version that cleared `comms_buffer` too early and
+  would have wiped what it had just handed the channels before display
+  even ran).
+- **The new shape:** three per-channel `COMMS` copies - `comms_keyboard`,
+  `comms_stt_tts` (STT input + TTS output, one shared channel covering
+  both directions of voice, replacing the old TTS-only
+  `comms_buffer_audio`), `comms_web` - each snapshotted from
+  `comms_buffer` (`comms_X = comms_buffer`) at the start of a tick. Each
+  channel's own input source (`key_input.ENTER_PRESSED`,
+  `popVocaEvent()`, `WEB_SERVER_CLASS::poll_input()`) writes into its own
+  copy and hands the WHOLE copy back to `comms_buffer` as one unit
+  (`comms_buffer = comms_X`) rather than a field-by-field merge - "comms
+  is just a holding place," not something needing per-field merge logic
+  at every call site. A second re-sync right before the display/speak/
+  push step gives every channel the authoritative post-merge state, and
+  only *then* is `comms_buffer`'s own screen/speech-direction copy
+  cleared (`INPUT_FROM_LLM`/`THINKING`/`SYSTEM`/`TOOL_ATTACHMENTS`) -
+  clearing any earlier would wipe what the first snapshot just gave the
+  channels before they'd had a chance to use it. If `exchange()` hasn't
+  picked up a still-pending submission yet when a new one arrives (same
+  tick or a different channel racing it), it's appended onto
+  `INPUT_FROM_USER` with a `\n` rather than dropped or overwritten - a
+  deliberate behavior change from the old "don't stomp" guard, since two
+  rapid submissions now both survive instead of the second one vanishing.
+- **`display_with_tts()` is a new dedicated method**
+  (`io_worker.h`/`.cpp`), replacing the old inline accumulate-and-speak
+  block that read from `comms_buffer_audio` - now reads/clears
+  `comms_stt_tts.INPUT_FROM_LLM` each tick into its own `tts_pending`
+  accumulator (`comms_stt_tts` itself gets wholesale-overwritten every
+  tick, so anything not yet spoken has to live somewhere that survives
+  that independently), speaking once `tts` is actually idle, same pacing
+  as before.
+- **`COMMS` gained a real `operator=`** (`comms.h`) - needed because
+  `std::atomic<bool> close_chat_log_requested` implicitly deletes it
+  otherwise (a `-Werror=shadow`-style compiler error caught this
+  immediately on the first build attempt). The new operator copies every
+  other field and deliberately leaves that one alone - a standalone
+  main-thread -> io-thread signal, never part of the round-trip.
+- **`exchange()` simplified** - no longer fans a second copy
+  (`comms_buffer_audio`) directly from the real `comms`; `thread_main()`
+  now does that copying itself, locally, once per tick, before draining
+  `comms_buffer`. Kept as a pure subtraction from `exchange()`, not a
+  rewrite of it - the caller-facing contract (`comms` in, `comms_buffer`
+  out) didn't change.
+- Verified: full local session testing (keyboard, TTS speech, olli's own
+  responses) confirmed working identically to before the rewrite - this
+  was a pure internal restructuring, no user-visible behavior change on
+  its own. Stale comments left behind in `main.cpp`/`olla.h`/`olla.cpp`
+  still describing the old `comms_buffer_audio`/`exchange()`-fans-it-
+  directly shape were cleaned up in the same session once noticed.
+
 ## Voice (Voca)
 
 - Wake word is "olli" (`findWakeWord()`/`findSleepTrigger()`, now in
@@ -1780,8 +1842,70 @@ it can actually act under its persona's judgment, not just talk about it.
 
 ## Remote access
 
-- **Expose an API** so a program on another system can talk to olli's
-  interface, not just local keyboard/voice/TTS.
+- **Done 2026-09-10: a browser-driven web interface**, alongside (not
+  instead of) the local terminal - answers the "expose an API" item this
+  entry used to be. New `WEB_SERVER_CLASS` (`source/web_server.h`/`.cpp`)
+  owns a `cpp-httplib` `httplib::Server` and its own accept/serve thread
+  (unavoidable - sockets can't be polled synchronously inside
+  `thread_main()`'s ~20ms tick, same reasoning Voca's capture/transcribe
+  threads and `TextToSpeech`'s own worker thread already rely on).
+  Listens on **port 47602** (separate from the remote-tools protocol's
+  47601, see `tools/PROTOCOL.md`), bound `0.0.0.0` rather than
+  loopback-only, since the whole point is LAN reach - no authentication,
+  trusted home LAN only, same trust boundary as remote tools. Built on
+  top of the `comms_web` channel added to `IO_WORKER_CLASS::thread_main()`'s
+  per-channel rework (see "Display / OUTPUT_CLASS" above) -
+  `display_with_web()`'s signature deliberately matches
+  `display_with_ncurses()`'s in full (not just what phase 1 actually
+  uses) so growing toward feature parity later doesn't need the call
+  site touched again.
+  - **The page**: one self-contained HTML/JS/CSS string (`GET /`, no
+    external assets, no build step, no framework) - a scrolling
+    transcript, an input box, `EventSource` against `GET /events`
+    (Server-Sent Events) for live updates, `fetch()` `POST /input` on
+    send. Streamed chat text accumulates into one growing element per
+    turn rather than one `<div>` per chunk - the first version got this
+    wrong (a `<div>` is block-level, so every streamed chunk forced its
+    own line) and needed a live-tested fix.
+  - **Thinking display matches ncurses' own floating box behavior**
+    (`display_with_ncurses()`'s `win_thinking`, `user_io.cpp`) rather
+    than inlining into the transcript, after an initial version that put
+    it inline got corrected: a separate floating box in the upper-right
+    corner, closes the moment the real reply starts (not on a
+    thinking-side timeout - same signal ncurses uses,
+    `in_thinking_block`/`chat_response` in `user_io.cpp`), lingering ~2s
+    first (`THINKING_BOX_LINGER_MS` mirrored in JS) before disappearing.
+    A first pass of this also had a scroll bug - scrolling the wrong
+    (non-scrollable) inner element instead of the actual scrollable
+    container - caught live and fixed.
+  - **Tools panel**: a right-side list of currently-registered tools,
+    kept as current STATE rather than an append-only stream -
+    `WEB_SERVER_CLASS::push_tool_names()` only broadcasts on an actual
+    change, but a brand-new `/events` connection always gets the current
+    list once regardless (forced via `tool_names_dirty_`), so a
+    freshly-opened tab isn't stuck waiting for the next change to see it
+    - confirmed live with back-to-back connections.
+  - **Links render as real clickable `<a>` tags** - simpler than
+    ncurses' own `[Links: ...]` notice + Ctrl+L popup dance, since a
+    browser doesn't have ncurses' OSC-8-escape-stripping problem (see the
+    web-search links entry, Display section above).
+  - **Deliberately deferred for now** (flagged as later work, not
+    forgotten): live-typing echo (`input_from_user_echo` - would need the
+    page posting on every keystroke, not just on submit, real added
+    scope rather than just filling in an existing parameter); scroll/
+    focus-cycle parity (a browser already scrolls its own transcript
+    natively, so `scroll_request`/`focus_cycle_requested` may not even
+    need a real equivalent); auth (explicitly out of scope - trusted home
+    LAN only); real multi-tab support (the output/tools-panel queues are
+    single shared buffers, not per-connection - built for the expected
+    one-viewer-at-a-time case, a second simultaneous tab can occasionally
+    race the first for the same pending chunk).
+  - Verified live end-to-end: connected from a separate Windows machine
+    on the LAN (after finding/fixing a `ufw` firewall block on the olli
+    host - a connection timing out rather than being refused was the
+    tell), full round-trip chat confirmed working, thinking box and tools
+    panel both confirmed against a real running session, not just
+    compiled.
 
 ## Open questions / carried over
 

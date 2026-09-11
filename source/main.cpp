@@ -93,11 +93,14 @@ namespace {
  *                                 screen drawing - see io_worker.h. Owns
  *                                 text-to-speech/speech-to-text privately
  *                                 (nothing outside io_worker.h/.cpp touches
- *                                 either); exchange() below fans chat.comms's
- *                                 own INPUT_FROM_LLM out into io_worker's own
- *                                 comms_buffer_audio and speaks that
- *                                 directly - sidetrack has no speech path of
- *                                 its own right now (see olla.h's note near
+ *                                 either); io_worker's own thread_main()
+ *                                 tick copies chat.comms's own
+ *                                 INPUT_FROM_LLM (already relayed in by
+ *                                 exchange() below into io_worker's own
+ *                                 comms_buffer) into its comms_stt_tts and
+ *                                 speaks that via display_with_tts() -
+ *                                 sidetrack has no speech path of its own
+ *                                 right now (see olla.h's note near
  *                                 output_buffer_mutex). The main loop below
  *                                 only ever talks to io_worker via exchange
  *                                 (chat, chat.comms) once per tick.
@@ -224,10 +227,11 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         }
 
         // TTS output no longer needs wiring up here - COMMS::audio is gone;
-        // IO_WORKER_CLASS::exchange() (io_worker.cpp) fans chat.comms's own
-        // INPUT_FROM_LLM out into its private comms_buffer_audio and speaks
-        // that directly. sidetrack's own generated text has no speech path
-        // at all right now (sidetrack is being reworked) - see olla.h's
+        // IO_WORKER_CLASS::thread_main() (io_worker.cpp) copies chat.comms's
+        // own INPUT_FROM_LLM (already relayed in by exchange() into its
+        // comms_buffer) into its own comms_stt_tts and speaks that via
+        // display_with_tts(). sidetrack's own generated text has no speech
+        // path at all right now (sidetrack is being reworked) - see olla.h's
         // note near output_buffer_mutex.
         //
         // io_worker owns text-to-speech/speech-to-text privately (see

@@ -48,6 +48,13 @@ std::string profile_collection_dir(const std::string& profile_name, const std::s
 // they already are.
 std::string profile_chat_logs_dir(const std::string& profile_name);
 
+// Same convention, for the advisory lock file rag_sync.hpp's
+// sync_profile_collections() takes for the duration of a sync -
+// `~/olli_files_<profile_name>/.rag_sync.lock` (or `~/olli_files/
+// .rag_sync.lock` when empty) - so rag_admin and rag_tool can't corrupt
+// each other's work by syncing the same profile at the same time.
+std::string profile_sync_lock_path(const std::string& profile_name);
+
 // A fast, non-cryptographic content hash (FNV-1a, 64-bit, hex string) -
 // purely for "has this file changed since it was imported", not security.
 // Used to give a re-run of rag_admin's "Update database" a cheap way to

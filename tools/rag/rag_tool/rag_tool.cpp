@@ -1,9 +1,9 @@
 // rag_tool - the olli-facing half of olli's RAG system. Registers as a
 // remote tool (see ../../PROTOCOL.md) so olli can search the RAG knowledge
-// base built by ../rag_admin/ - this program never writes to the database,
-// only reads. Built from ../../template/template_tool.cpp; see that file
-// and ../../PROTOCOL.md for what the connection/registration/heartbeat
-// plumbing (olli_link.hpp/.cpp, shared, untouched here) already handles.
+// base built by ../rag_admin/. Built from ../../template/template_tool.cpp;
+// see that file and ../../PROTOCOL.md for what the connection/registration/
+// heartbeat plumbing (olli_link.hpp/.cpp, shared, untouched here) already
+// handles.
 //
 // Build: `make` in this directory (needs libsqlite3-dev and libcurl, same
 // as ../rag_db/ and ../rag_admin/). Run: `./rag_tool [host] [profile_name]`
@@ -23,17 +23,27 @@
 // Needs Ollama running locally with the embedding model pulled (see
 // ../rag_db/rag_embed.hpp for the default) - query text gets embedded here,
 // same as at import time in rag_admin, so search compares like with like.
+//
+// Also runs the same folder sync rag_admin's "Update database" menu option
+// does (../rag_db/rag_sync.hpp), automatically, every AUTO_SYNC_INTERVAL
+// (currently 10 minutes) while connected to olli - see olli_processing()'s
+// tail below. Safe to run alongside rag_admin doing the same sync by hand:
+// sync_profile_collections()'s own file lock means whichever one is
+// already syncing wins, and the other just skips that round.
 
 #include <nlohmann/json.hpp>
 
 #include "olli_link.hpp"
 #include "rag_db.hpp"
 #include "rag_embed.hpp"
+#include "rag_sync.hpp"
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 
@@ -324,26 +334,42 @@ namespace {
         return "Unknown call received: " + name;
     }
 
-    // Opens a fresh RAG_DB at new_path and swaps it into db, replacing
-    // whatever was open before (RAG_DB has no move/reopen of its own - see
-    // its header - so this is the "reopen" this program does instead: build
-    // a new one, let the old one's destructor close its connection).
-    // No-op if new_path is already what's open, so a redundant identity
-    // resend (e.g. a reconnect under the same profile) doesn't needlessly
-    // drop and recreate the connection.
-    void switch_database(std::unique_ptr<RAG_DB>& db, std::string& db_path, const std::string& new_path, std::string& status, const std::string& reason)
+    // How often the periodic sync below (see olli_processing()'s tail)
+    // re-syncs the current profile's collection folders against the
+    // database, once connected to olli - same effect as choosing "Update
+    // database" in rag_admin, just unattended. Guarded by
+    // sync_profile_collections()'s own file lock, so this can't corrupt a
+    // sync rag_admin happens to be running by hand at the same moment -
+    // that round just gets skipped instead.
+    constexpr auto AUTO_SYNC_INTERVAL = std::chrono::minutes(10);
+
+    // Opens a fresh RAG_DB at profile_db_path(new_profile_name) and swaps
+    // it into db, replacing whatever was open before (RAG_DB has no move/
+    // reopen of its own - see its header - so this is the "reopen" this
+    // program does instead: build a new one, let the old one's destructor
+    // close its connection). Also updates profile_name to match - the
+    // periodic sync above needs the actual profile name (folder-based
+    // sync takes a name, not a db path), not just the resulting db path.
+    // No-op if the resulting path is already what's open, so a redundant
+    // identity resend (e.g. a reconnect under the same profile) doesn't
+    // needlessly drop and recreate the connection.
+    void switch_database(std::unique_ptr<RAG_DB>& db, std::string& db_path, std::string& profile_name,
+                          const std::string& new_profile_name, std::string& status, const std::string& reason)
     {
+        std::string new_path = profile_db_path(new_profile_name);
         if (new_path == db_path) return;
 
         db_path = new_path;
+        profile_name = new_profile_name;
         db = std::make_unique<RAG_DB>(db_path);
         status = db->is_open()
             ? (reason + " - now using " + db_path)
             : ("Failed to open database at \"" + db_path + "\" (" + reason + "): " + db->last_error());
     }
 
-    void olli_processing(OLLI_LINK& link, std::unique_ptr<RAG_DB>& db, std::string& db_path, bool explicit_profile,
-                          RAG_EMBEDDER& embedder, bool socket_readable, std::string& status)
+    void olli_processing(OLLI_LINK& link, std::unique_ptr<RAG_DB>& db, std::string& db_path, std::string& profile_name,
+                          bool explicit_profile, RAG_EMBEDDER& embedder, bool socket_readable, std::string& status,
+                          std::optional<std::chrono::steady_clock::time_point>& last_sync_time, bool& identity_received)
     {
         auto dispatch = [&](const json& msg) {
             std::string type = msg.value("type", "");
@@ -351,7 +377,14 @@ namespace {
                 status = handle_call(link, *db, embedder, msg);
             } else if (type == "identity" && !explicit_profile) {
                 std::string name = msg.value("name", "");
-                switch_database(db, db_path, profile_db_path(name), status,
+                // Set unconditionally, even when switch_database() below
+                // turns out to be a no-op (name matches what's already
+                // open) - this is "have we heard from olli at all about
+                // which profile is active", not "did the db path just
+                // change". See identity_received's own comment (main())
+                // for why the periodic sync needs this distinction.
+                identity_received = true;
+                switch_database(db, db_path, profile_name, name, status,
                                  "Identity: " + (name.empty() ? "(no profile)" : name));
             }
         };
@@ -362,10 +395,40 @@ namespace {
         while (link.next_message(msg)) dispatch(msg);
 
         if (link.consume_disconnected() && !explicit_profile) {
-            switch_database(db, db_path, profile_db_path(""), status, "Disconnected");
+            switch_database(db, db_path, profile_name, "", status, "Disconnected");
+            identity_received = false; // a reconnect may be a different olli/profile - wait for its identity again
         }
 
         if (!link.status().empty()) status = link.status();
+
+        // Periodic background sync (AUTO_SYNC_INTERVAL above) - only while
+        // actually connected, per design discussion (a disconnected
+        // rag_tool syncing in the background wasn't asked for, and
+        // "connected" is already how every other olli-driven state change
+        // here is gated), AND only once we actually know which profile
+        // that is: is_connected() goes true the instant the TCP socket
+        // connects, which can be one or more ticks before olli's own
+        // `identity` message (a separate, later application message)
+        // actually arrives - found live, syncing the wrong (shared
+        // default) profile for a whole AUTO_SYNC_INTERVAL because the
+        // first eligible tick fired before identity_received was true.
+        // explicit_profile skips this wait entirely, same as everywhere
+        // else here - that profile is already known for good, from the
+        // command line. Fires on the very first eligible tick once both
+        // conditions hold (last_sync_time starts unset), then every
+        // AUTO_SYNC_INTERVAL after that.
+        if (link.is_connected() && (explicit_profile || identity_received) &&
+            (!last_sync_time.has_value() ||
+             std::chrono::steady_clock::now() - *last_sync_time >= AUTO_SYNC_INTERVAL))
+        {
+            last_sync_time = std::chrono::steady_clock::now();
+            RAG_SYNC_STATS stats = sync_profile_collections(*db, embedder, profile_name);
+            status = stats.skipped_busy
+                ? "Auto-sync skipped (rag_admin busy)"
+                : ("Auto-synced: " + std::to_string(stats.imported) + " imported, " +
+                   std::to_string(stats.updated) + " updated, " + std::to_string(stats.unchanged) +
+                   " unchanged, " + std::to_string(stats.removed) + " removed");
+        }
     }
 
     // RAII: puts stdin into raw, non-canonical, non-echoing mode so 'q' can
@@ -458,6 +521,12 @@ int main(int argc, char* argv[])
 
     bool has_real_terminal = isatty(STDIN_FILENO) != 0;
     std::string status = "Not connected to olli at " + host + " - retrying...";
+    std::optional<std::chrono::steady_clock::time_point> last_sync_time;
+    // See olli_processing()'s tail comment for why the periodic sync needs
+    // this separately from is_connected() - true from the start when
+    // explicit_profile pins the profile already, since there's nothing to
+    // wait for in that case.
+    bool identity_received = explicit_profile;
 
     bool quit = false;
     while (!quit) {
@@ -488,7 +557,7 @@ int main(int argc, char* argv[])
 
         bool socket_readable = link.fd() >= 0 && ready > 0 && FD_ISSET(link.fd(), &read_fds);
 
-        if (!quit) olli_processing(link, db, db_path, explicit_profile, embedder, socket_readable, status);
+        if (!quit) olli_processing(link, db, db_path, profile_name, explicit_profile, embedder, socket_readable, status, last_sync_time, identity_received);
         if (!quit) redraw_screen(status, db_path);
     }
 

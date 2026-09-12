@@ -7,9 +7,9 @@ its immediate context window. Three programs, one shared storage layer:
 
 | Program | Role |
 |---|---|
-| [`rag_db/`](rag_db) | Shared library - SQLite storage, Ollama embedding client, text chunker. Not a standalone program itself; every binary below links it directly (like [`../olli_link/`](../olli_link) is shared by every other remote tool). |
-| [`rag_admin/`](rag_admin) | Standalone, menu-driven maintenance program - create collections, sync their folders into the database, list/delete documents, test searches. The only thing that ever *writes* to the database. |
-| [`rag_tool/`](rag_tool) | Remote tool ([`../PROTOCOL.md`](../PROTOCOL.md)) - registers `rag_list_collections`/`rag_search`/`rag_search_documents`/`rag_get_document` with a live olli. Read-only. |
+| [`rag_db/`](rag_db) | Shared library - SQLite storage, Ollama embedding client, text chunker, and the collection-folder sync logic (`rag_sync.hpp`/`.cpp`). Not a standalone program itself; every binary below links it directly (like [`../olli_link/`](../olli_link) is shared by every other remote tool). |
+| [`rag_admin/`](rag_admin) | Standalone, menu-driven maintenance program - create collections, sync their folders into the database on request, list/delete documents, test searches. |
+| [`rag_tool/`](rag_tool) | Remote tool ([`../PROTOCOL.md`](../PROTOCOL.md)) - registers `rag_list_collections`/`rag_search`/`rag_search_documents`/`rag_get_document` with a live olli, and syncs the same collection folders automatically every 10 minutes while connected (see "Collection folders and syncing" below) - the only two things that ever write to the database. |
 
 ## How it works
 
@@ -92,10 +92,14 @@ Each collection owns a folder on disk -
 [`rag_db/rag_db.hpp`](rag_db/rag_db.hpp), same profile convention as above)
 - created automatically by `rag_admin`'s "Create collection". There's no
 "import an arbitrary path from anywhere on disk" option any more: drop
-plain-text/markdown files straight into a collection's folder, then run
-"Update database" to sync them in.
+plain-text/markdown files straight into a collection's folder, and either
+run "Update database" in `rag_admin` yourself, or just wait - `rag_tool`
+does the exact same sync automatically every 10 minutes while connected to
+olli (see `rag_tool`'s own section below).
 
-That sync is a real three-way diff, per collection, between what's in the
+That sync (`sync_profile_collections()` in
+[`rag_db/rag_sync.hpp`](rag_db/rag_sync.hpp) - shared by both programs, not
+duplicated) is a real three-way diff, per collection, between what's in the
 folder and what's in the database - matched by each document's stored
 `source` path and a `content_hash` (`hash_content()` in `rag_db.hpp` - a
 fast FNV-1a hash, not cryptographic, purely for "did this change"):
@@ -107,8 +111,18 @@ fast FNV-1a hash, not cryptographic, purely for "did this change"):
   its chunks) is **deleted and reimported** fresh.
 - Document whose source file is no longer on disk → **deleted**.
 
-So "Update database" is always safe to run repeatedly - a second run with
-nothing changed does nothing.
+So a sync is always safe to run repeatedly (or run twice at once by
+accident - see "Concurrency" below) - one with nothing changed does
+nothing.
+
+**Concurrency**: `rag_admin` (on request) and `rag_tool` (on its timer) can
+both try to sync the same profile at the same time. Since they're separate
+processes, `sync_profile_collections()` takes a non-blocking file lock
+(`flock()` on `~/olli_files_<profile>/.rag_sync.lock` -
+`profile_sync_lock_path()` in `rag_db.hpp`) for the whole call - whichever
+one loses just skips that round entirely (`rag_admin` reports "Sync
+already in progress"; `rag_tool` just tries again on its next timer tick)
+rather than waiting or risking both racing the same import.
 
 ## The conversations collection (chat_log auto-sync)
 
@@ -125,14 +139,17 @@ above, no file copying or symlinking involved.
 Two differences from a normal sync, both specific to this one collection:
 
 - Anything under 30 words is skipped as noise (`MIN_CHAT_LOG_WORDS` in
-  `rag_admin.cpp`) - a bare "hi"/"bye" exchange isn't worth a document.
+  `rag_db/rag_sync.cpp`) - a bare "hi"/"bye" exchange isn't worth a
+  document.
 - Each document's `metadata` gets the log's date/time, parsed from olli's
   own `YYMMDD.HHMM[.N].chat_log.txt` filename convention (e.g.
   `{"log_date": "2026-09-09", "log_time": "12:16"}`) - falls back to `{}`
   on any filename that doesn't match, rather than guessing.
 
-Still no olli-side auto-import - this only happens when "Update database"
-is run by hand, same as everything else.
+No olli-side auto-import (olli itself still doesn't push anything into the
+RAG store as it goes) - but this collection, like every other, does get
+picked up automatically by `rag_tool`'s 10-minute sync, same as the rest
+of "Collection folders and syncing" above.
 
 **Real risk found via live testing, worth knowing**: unlike notes/help
 content, a conversation transcript is full of genuine past commands
@@ -207,10 +224,20 @@ Same reconnect/heartbeat/registration plumbing as every other remote tool
 (see [`../PROTOCOL.md`](../PROTOCOL.md)) - it's built from
 [`../template/template_tool.cpp`](../template/template_tool.cpp). Because
 it's a compiled binary, **restart it after pulling in any rag_db/rag_embed/
-rag_chunk change** - the database itself is re-read fresh on every query
-and correctly follows an identity switch without a restart, but *code*
-changes need a rebuild + restart to take effect in an already-running
-process.
+rag_chunk/rag_sync change** - the database itself is re-read fresh on every
+query and correctly follows an identity switch without a restart, but
+*code* changes need a rebuild + restart to take effect in an
+already-running process.
+
+**Also syncs automatically, every 10 minutes, while connected to olli** -
+the exact same `sync_profile_collections()` "Update database" in
+`rag_admin` calls (see "Collection folders and syncing" above), just
+unattended, using whichever profile olli's own `identity` message says is
+currently connected (never the shared default by mistake - the first sync
+deliberately waits until that identity has actually arrived, not just
+until the socket connects, after a real live bug where it didn't). Folds a
+short result into its own status line instead of `rag_admin`'s verbose
+per-file printing.
 
 | Tool | Does |
 |---|---|

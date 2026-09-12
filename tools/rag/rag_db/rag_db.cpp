@@ -129,6 +129,11 @@ std::string profile_chat_logs_dir(const std::string& profile_name)
     return profile_dir(profile_name) + "/chat_logs";
 }
 
+std::string profile_sync_lock_path(const std::string& profile_name)
+{
+    return profile_dir(profile_name) + "/.rag_sync.lock";
+}
+
 std::string hash_content(const std::string& content)
 {
     // FNV-1a, 64-bit - see rag_db.hpp's comment on hash_content() for why a

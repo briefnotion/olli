@@ -301,6 +301,61 @@ not needed elsewhere.
       repeat pass scrolled to the very last line before quitting to
       confirm the stray-row fix holds under the same conditions that
       first exposed it.
+  - **Done 2026-09-12: `rag_tool` now syncs on its own, every 10 minutes,
+    instead of needing `rag_admin` run by hand.** The three-way sync
+    (`sync_collection()`, `do_update_database()`, the special
+    `conversations` handling, `chat_log_metadata()`, `MIN_CHAT_LOG_WORDS`)
+    moved out of `rag_admin.cpp` into a new shared
+    `tools/rag/rag_db/rag_sync.hpp`/`.cpp` - the same location (and
+    Makefile-list-of-`.cpp`-files convention) `rag_db`/`rag_embed`/
+    `rag_chunk` already share between both programs, so both `rag_admin`
+    and `rag_tool`'s Makefiles just gained one more line each rather than
+    needing a new build target. Public surface is one function,
+    `sync_profile_collections(db, embedder, profile_name)`, returning a
+    `RAG_SYNC_STATS` (imported/updated/unchanged/removed counts, plus a
+    `skipped_busy` flag - see below) instead of printing anything itself,
+    so each caller decides how to show it: `rag_admin`'s "Update database"
+    is now a thin wrapper that prints the exact same "Done: X imported..."
+    line it always did (verified byte-for-byte identical output);
+    `rag_tool` folds a short summary into its existing one-line status
+    display instead (due for a real redesign of its own, separately - not
+    attempted here).
+    - **Concurrency**: two separate processes can't share a `std::mutex`,
+      so `sync_profile_collections()` takes a non-blocking `flock()` on a
+      new `.rag_sync.lock` file next to `rag.db` (`profile_sync_lock_path()`,
+      a new sibling to `rag_db.hpp`'s existing `profile_db_path()`/
+      `profile_collection_dir()`/`profile_chat_logs_dir()`) for the whole
+      call - whichever program loses just skips that round (`skipped_busy`)
+      rather than waiting, since `rag_tool` in particular needs to stay
+      responsive to the wire protocol regardless. Verified live: held the
+      lock externally, confirmed `rag_admin` correctly reported "Sync
+      already in progress" and left the database untouched; released it,
+      confirmed a normal sync then worked.
+    - **A real bug found live, not just in review**: the very first
+      automatic sync could fire against the *wrong* profile.
+      `OLLI_LINK::is_connected()` goes true the instant the TCP socket
+      connects, but olli's own `identity` message (how `rag_tool` learns
+      which profile it's actually talking to) arrives as a separate, later
+      application message - the first eligible tick could (and, live,
+      did) fire before that arrived, syncing the shared default
+      `~/olli_files/` instead of the real profile's folder. No data
+      damage in the live case (the one file present in the wrong
+      profile's `chat_logs/` was too short to import), but a real risk in
+      general. Fixed with a new `identity_received` flag, separate from
+      `is_connected()` - the periodic sync now also waits for that (or
+      `explicit_profile`, which already knows its profile for good from
+      the command line and never needs to wait). Reset to false on
+      disconnect, since a reconnect might be a different olli/profile.
+      Re-tested clean afterward - correct profile every time.
+    - `rag_tool` also now tracks the actual profile *name* alongside its
+      existing `db_path` tracking (`switch_database()`'s signature grew a
+      `std::string& profile_name` it keeps in sync with `db_path` at the
+      same two call sites, `identity`/disconnect) - folder-based sync
+      needs the name itself, not just the resulting database path.
+    - Fires on the first eligible tick (immediately once connected and
+      the profile's known, not after waiting a full 10 minutes), per
+      design discussion; only while actually connected, since a
+      disconnected `rag_tool` syncing in the background wasn't asked for.
 - **Tools rework - mostly done now** (started 2026-08-21). Pulled every
   `TOOL_*` class out of `olla.h`/`olla.cpp` into their own `tools.h`/
   `tools.cpp`; gave every tool the same `configure`/`register_tool`/`check`/

@@ -435,6 +435,11 @@ class IO_WORKER_CLASS
         // of Voca's. False (no-op) if web_server is null.
         bool poll_web_event(std::string& out);
 
+        // True (and cleared) if the browser pinged POST /interrupt since
+        // the last call - see WEB_SERVER_CLASS::poll_interrupt()'s own
+        // comment (web_server.h). False (no-op) if web_server is null.
+        bool poll_web_interrupt();
+
         // The web channel's own drain+push step, called once per tick from
         // thread_main() with that tick's comms_web snapshot - mirrors
         // display_with_ncurses()'s signature (not just display_with_tts()'s)

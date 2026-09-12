@@ -464,7 +464,10 @@ tools.
 Open `http://<olli-host>:47602/` in any browser to get a simple chat
 page: type a message and hit Enter/Send, and it joins the same
 conversation as the local session, responses streaming back live
-(Server-Sent Events). A right-side panel lists whatever tools are
+(Server-Sent Events) - typed/spoken input from *any* channel (keyboard,
+speech, or the web page itself) shows up in all of them, not just the one
+it came from. A dedicated strip at the top shows system messages, same as
+ncurses' own `win_system`. A right-side panel lists whatever tools are
 currently registered. A small floating box in the upper-right corner
 shows the model's reasoning while it's thinking, mirroring
 `display_with_ncurses()`'s own floating thinking box (see
@@ -472,7 +475,17 @@ shows the model's reasoning while it's thinking, mirroring
 not on a thinking-side timeout, lingering a couple seconds first rather
 than vanishing mid-read. Links render as real clickable `<a>` tags -
 simpler than ncurses' own notice-plus-popup dance, since a browser
-doesn't have ncurses' escape-sequence-stripping problem.
+doesn't have ncurses' escape-sequence-stripping problem. A reply from a
+background task instance (task-runner, the delegator) shows up in the
+same color the terminal already uses for it (cyan/yellow/magenta/green).
+
+Starting to type interrupts TTS/an in-flight response, the same way
+typing at the local terminal does - not a live per-keystroke sync, just
+one lightweight ping the moment a fresh line starts. A running `.task`
+script's "press enter to continue" works from the page too (an empty
+submission sends a bare newline, matching the terminal's own keyboard
+input), and `[KEYBOARD_INPUT:off]` both disables and visibly dims the
+page's input box, mirroring the terminal's own dimmed input line.
 
 Submissions are line-at-a-time (type, then send), not a live per-keystroke
 mirror of what's being typed the way the local terminal's input line

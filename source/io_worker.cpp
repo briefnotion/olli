@@ -894,6 +894,11 @@ bool IO_WORKER_CLASS::poll_web_event(std::string& out)
     return web_server && web_server->poll_input(out);
 }
 
+bool IO_WORKER_CLASS::poll_web_interrupt()
+{
+    return web_server && web_server->poll_interrupt();
+}
+
 void IO_WORKER_CLASS::display_with_web(const std::string& /*input_from_user_echo*/, COMMS& comms_browser,
                                         const std::vector<std::string>& tool_names_arg,
                                         SCROLL_KEY /*scroll_request*/, bool /*focus_cycle_requested*/)
@@ -913,8 +918,10 @@ void IO_WORKER_CLASS::display_with_web(const std::string& /*input_from_user_echo
     }
 
     web_server->push_output(comms_browser.INPUT_FROM_LLM, comms_browser.INPUT_FROM_THINKING,
-                             comms_browser.INPUT_FROM_SYSTEM, comms_browser.TOOL_ATTACHMENTS);
+                             comms_browser.INPUT_FROM_SYSTEM, comms_browser.TOOL_ATTACHMENTS,
+                             comms_browser.INPUT_FROM_LLM_COLOR);
     web_server->push_tool_names(tool_names_arg);
+    web_server->push_keyboard_enabled(comms_browser.ENABLE_KEYBOARD_INPUT);
     comms_browser.INPUT_FROM_LLM.clear();
     comms_browser.INPUT_FROM_THINKING.clear();
     comms_browser.INPUT_FROM_SYSTEM.clear();
@@ -1070,10 +1077,24 @@ void IO_WORKER_CLASS::thread_main()
 
             // 5.5. Web: same shape as STT's step 6 and keyboard's step 8
             // below, just checked here since it doesn't interact with
-            // key_input.INTERRUPTED (step 7) the way STT does.
+            // key_input.INTERRUPTED (step 7) the way STT does. Echoed to
+            // the terminal only (output.user_input, same bucket
+            // display_with_ncurses() reads for the transcript) - the
+            // browser already echoed this instantly, client-side, on its
+            // own submit (see web_server.cpp's send()), so relaying it
+            // back via WEB_SERVER_CLASS::push_user_message() too would
+            // double it up there. poll_web_event() is called
+            // unconditionally (not inside the ENABLE_KEYBOARD_INPUT check
+            // below) so a submission that arrives while disabled is still
+            // drained/discarded rather than piling up for later - matches
+            // keyboard_input()'s own CHAT_INPUT_ENABLED guard (user_io.cpp),
+            // which drops keystrokes typed while disabled rather than
+            // queuing them.
             std::string web_line;
-            if (poll_web_event(web_line))
+            if (poll_web_event(web_line) && comms_buffer.ENABLE_KEYBOARD_INPUT)
             {
+                output.user_input += web_line;
+
                 if (comms_buffer.ENTER_PRESSED)
                 {
                     comms_buffer.INPUT_FROM_USER += "\n" + web_line;
@@ -1105,6 +1126,16 @@ void IO_WORKER_CLASS::thread_main()
                 {
                     if (!voca_event.text.empty())
                     {
+                        // Echoed to both display surfaces, uniformly - see
+                        // step 8's own comment ("echo... once, uniformly
+                        // for typed and voice input") for why this
+                        // belongs here too, not just keyboard's block.
+                        // Relayed to the browser (unlike web's own step
+                        // 5.5 above) since a spoken line isn't visible
+                        // there any other way.
+                        output.user_input += voca_event.text;
+                        if (web_server) web_server->push_user_message(voca_event.text, comms_buffer.INPUT_FROM_USER_COLOR);
+
                         if (comms_buffer.ENTER_PRESSED)
                         {
                             // exchange() hasn't picked up a still-pending
@@ -1136,7 +1167,13 @@ void IO_WORKER_CLASS::thread_main()
             // signaled here (SIGNALS.INTERUPT_SIGNAL) - dropped along with
             // the rest of sidetrack's wiring into this class; sidetrack is
             // being reworked and will need its own way to learn about this.
-            if (key_input.INTERRUPTED)
+            // poll_web_interrupt() is called unconditionally, not inside
+            // the if() below, since it also clears the flag - short-
+            // circuiting past it whenever key_input.INTERRUPTED is already
+            // true would leave a pending web interrupt uncleared, firing
+            // again next tick for no reason.
+            bool web_interrupted = poll_web_interrupt();
+            if (key_input.INTERRUPTED || web_interrupted)
             {
                 stop_speaking();
                 comms_buffer.INTERRUPTED = true;
@@ -1147,16 +1184,19 @@ void IO_WORKER_CLASS::thread_main()
             }
 
             // 8. Submission - echo to the screen here, once, uniformly for
-            // typed and voice input (see step 6's own comment). Same
-            // append-if-pending handling as step 6 above, via comms_keyboard
-            // instead of comms_stt_tts. Only clears LINE/ENTER_PRESSED here,
-            // not via key_input.reset() - that would also clear LINE on
-            // ticks where the user is still mid-typing (ENTER_PRESSED still
-            // false), erasing whatever they'd typed so far before they ever
-            // got to press Enter.
+            // typed and voice input (see step 6's own comment), and relay
+            // to the browser too (unlike web's own step 5.5, a typed line
+            // isn't visible there any other way). Same append-if-pending
+            // handling as step 6 above, via comms_keyboard instead of
+            // comms_stt_tts. Only clears LINE/ENTER_PRESSED here, not via
+            // key_input.reset() - that would also clear LINE on ticks
+            // where the user is still mid-typing (ENTER_PRESSED still
+            // false), erasing whatever they'd typed so far before they
+            // ever got to press Enter.
             if (key_input.ENTER_PRESSED)
             {
                 output.user_input += key_input.LINE;
+                if (web_server) web_server->push_user_message(key_input.LINE, comms_buffer.INPUT_FROM_USER_COLOR);
 
                 if (comms_buffer.ENTER_PRESSED)
                 {

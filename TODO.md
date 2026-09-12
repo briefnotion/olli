@@ -1906,6 +1906,67 @@ it can actually act under its persona's judgment, not just talk about it.
     tell), full round-trip chat confirmed working, thinking box and tools
     panel both confirmed against a real running session, not just
     compiled.
+  - **Done 2026-09-12: cross-channel echo, interrupt parity, per-instance
+    colors, keyboard-disable parity.** A real bug found via live use: a
+    line typed/spoken via keyboard or STT never showed up in the web
+    transcript, and (less obviously) STT input never showed up in the
+    *terminal's own* transcript either - `output.user_input` (the bucket
+    `display_with_ncurses()` reads for "what the user typed/said") was
+    only ever written to by keyboard's own merge step, despite a comment
+    on it already saying "echo... once, uniformly for typed and voice
+    input." Fixed by adding the same echo to STT's and web's merge steps
+    too, plus a new `WEB_SERVER_CLASS::push_user_message()` (a `user` SSE
+    event) relaying keyboard/STT submissions into the browser - never the
+    other direction, since the browser already echoes its own submission
+    instantly, client-side, on `send()`.
+    - **Interrupt parity**: at the terminal, just starting to type stops
+      TTS/generation (`KEYBOARD_INPUT::keyboard_input()`'s "any keystroke
+      sets `INTERRUPTED`", `user_io.cpp`). The web page can't mirror that
+      literally without live-syncing every keystroke (the live-typing
+      echo already ruled out as unnecessary), so it does the same thing
+      at a coarser grain instead: one `POST /interrupt` ping the moment
+      the input box goes from empty to non-empty, polled once per tick
+      (`WEB_SERVER_CLASS::poll_interrupt()`) and OR'd into the same
+      interrupt-handling step the keyboard's own flag already goes
+      through.
+    - **Per-instance chat colors, relayed to the web page.**
+      `COMMS::INPUT_FROM_LLM_COLOR`/`INPUT_FROM_USER_COLOR` (raw ncurses
+      attributes, set per-instance in `tools.cpp` - task-runner cyan/
+      yellow, delegator magenta/green) were already flowing into
+      `comms_web` for free, just never read there. New
+      `ncurses_attr_to_css_color()` (`web_server.cpp`) decodes the pair
+      number + bold/dim bits via pure bit-math macros rather than calling
+      ncurses' own `pair_content()` at runtime (which needs ncurses
+      actually initialized - would break running headless/web-only) -
+      hardcoded against the same 5 pairs `user_io.cpp` registers, a small,
+      stable duplication rather than a runtime dependency. `llm`/`user`
+      SSE events now carry `{text, color}` instead of a bare string, and
+      the reply now renders as one `<span>` per chunk (inline, so it
+      still flows as one line) instead of one accumulating text node, so
+      a color change mid-reply doesn't break anything.
+    - **Bare Enter now works from the web page** - a running `.task`
+      script's "press enter to continue" (`command_wait_enter()`,
+      `tools_task_script.cpp`) only checks `ENTER_PRESSED`, never the
+      submitted text, but the page's own `send()` refused to fire at all
+      on an empty box. Now submits `"\n"` instead, matching
+      `keyboard_input()`'s own behavior exactly rather than inventing a
+      different convention.
+    - **Keyboard-disable parity, functional and visual.** A running
+      `.task` script's `[KEYBOARD_INPUT:off]` (`COMMS::
+      ENABLE_KEYBOARD_INPUT`) already made the keyboard channel silently
+      discard typing rather than queue it for later; the web channel
+      checked nothing at all. Now gated the same way (still drains the
+      pending submission so it doesn't pile up, just doesn't act on it).
+      New `push_keyboard_enabled()` (same current-state broadcast shape
+      as `push_tool_names()`) also dims the page's own input box/send
+      button via the native `disabled` attribute when this is off,
+      mirroring `ncurses_update_input_box()`'s own dimming - `disabled`
+      also means the box can't receive focus/keystrokes at all while off,
+      so no separate guard was needed to block `send()`/the interrupt-
+      ping from firing during that window.
+    - A UI-only follow-up along the way: the thinking box was widened
+      (its left edge moved from a fixed width to `left: 30%`, right edge
+      unchanged) after live feedback that the original was too narrow.
 
 ## Open questions / carried over
 

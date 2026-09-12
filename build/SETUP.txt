@@ -86,3 +86,127 @@ whitelisted programs come back automatically.
 
 Re-save (Ctrl+b Ctrl+s) any time you change the pane layout, so the
 next restore reflects the new arrangement.
+
+9. ALTERNATIVE: INSTALL VIA CLAUDE CODE
+------------------------------------------
+Steps 1-8 above assume a machine that already looks like the one this was
+built on. If you're starting on a different machine, a different OS, or
+just don't want to hand-walk the build/deploy/tmux setup yourself, you can
+hand the whole thing to a Claude Code session instead. (This same section
+also lives in BUILD_AND_INSTALL.md at the repo root, for anyone who lands
+there before ever having a build to read this file from.)
+
+Prerequisite - Claude Code itself: this needs the `claude` CLI already
+installed and logged in. If it isn't:
+
+    npm install -g @anthropic-ai/claude-code
+
+then run `claude` once and follow the login prompt. Everything below
+assumes that part is already done.
+
+Copy the block below verbatim as your first message to a fresh session:
+
+    -------------------------------------------------------------------
+    I want you to install and get running a personal project of mine
+    called olli - a fully local, offline voice assistant written in
+    C++. Source: https://github.com/briefnotion/olli
+
+    Read README.md, BUILD_AND_INSTALL.md, and SETUP.txt in the repo
+    fully before doing anything - BUILD_AND_INSTALL.md and SETUP.txt
+    describe the normal manual build/deploy process. Treat this as
+    what you're adapting, not replacing.
+
+    Known constraints worth knowing up front:
+    - The project targets Linux. Audio playback/synthesis (aplay,
+      espeak-ng) and raw-terminal input are POSIX/ALSA-specific, not
+      portable as-is.
+    - The build depends on two header-only libraries (cpp-httplib,
+      nlohmann/json) and a from-source static ncursesw+panel build,
+      normally laid out as sibling directories next to the repo
+      checkout.
+    - The persistent-session layer (tmux + tmux-resurrect/continuum,
+      SETUP.txt steps 1-4 and 6-8) is optional, separate from just
+      building and running the binary.
+    - It expects a local Ollama server with a tool-capable model
+      pulled.
+    - If this is WSL: audio (aplay/PulseAudio) only works with WSLg,
+      and can still be broken even then. Before building anything,
+      check whether it's actually available (`/dev/snd` present?
+      `pactl info` or `aplay -l` work?) and tell me up front if audio
+      looks unavailable, rather than discovering it only after a full
+      build - I may want to proceed text-only instead of debugging
+      WSL audio.
+    - The ncurses display needs a real, recognized $TERM - if it's
+      not one, olli crashes immediately on launch via initscr(). If a
+      build succeeds but the binary dies the instant you run it,
+      check $TERM and how you're launching it (a real interactive
+      terminal, not a piped/non-interactive one) before assuming the
+      build itself is broken.
+    - The default model, qwen3:8b, needs real RAM to run at a usable
+      speed. If it responds correctly but very slowly, that's likely
+      this machine's resources, not a bad install - mention it to me
+      rather than treating it as a bug, and suggest a smaller
+      tool-capable model if it's unusably slow.
+
+    Before doing anything else, ask me:
+    1. Where to install it (target directory/machine - assume this
+       machine unless I say otherwise).
+    2. What OS/environment this actually is (Linux distro, macOS, or
+       Windows - and if Windows, whether WSL is available/preferred,
+       since native Windows isn't realistic given the POSIX audio and
+       terminal code).
+    3. Whether I want the full persistent-session layer (tmux +
+       resurrect/continuum) or just a working build I can run by hand.
+    4. Whether I want voice I/O working (espeak-ng/aplay or a platform
+       equivalent) or text-only is fine for now.
+
+    Then work the plan, adapting each step to what you learn:
+    - Work out the full list of system packages you'll need for the
+      detected OS/package manager, show me the whole list once, and
+      get one yes/no before installing any of them - don't ask
+      package by package. The same goes for anything else outside the
+      checkout/install target (dotfiles, tmux config, etc).
+    - Set up cpp-httplib, nlohmann/json, and a built static
+      ncursesw+panel per the README's "Building ncursesw" section.
+    - Run the CMake configure/build. When it fails, diagnose and fix
+      it rather than giving up - that includes editing olli's own
+      source (the .cpp/.h files, CMakeLists.txt) when the failure is a
+      real portability gap (e.g. an aplay/ALSA call that doesn't exist
+      on macOS, a POSIX header missing on the target, a warning-as-
+      error tripped by a newer compiler than this was built with).
+      Keep such fixes as small and targeted as possible, and tell me
+      what you changed and why - don't rewrite working Linux behavior,
+      only add or adapt what's needed to also work here.
+    - If you need to modify source to make this platform work, stop
+      and ask first whether I want that done on a fork (rather than a
+      plain local clone) so the changes are tracked, and separately
+      whether I'd like a PR opened upstream with the portability fix
+      once it's working - two different questions, don't assume yes
+      to either. If I don't have or don't want to involve a GitHub
+      account, default to a plain local clone with no fork - don't
+      push on this.
+    - Get the binary actually running end-to-end against a local
+      Ollama server (offer to install/start Ollama and pull a
+      tool-capable model, e.g. qwen3:8b, if none is available).
+    - If I asked for the persistent-session layer, set up
+      tmux/TPM/config and the pane layout, adapting the
+      tmux-resurrect process whitelist and any paths for wherever
+      this actually got installed.
+
+    Verification: a clean exit code or "it launched" isn't enough
+    proof for anything involving sound or the on-screen display - you
+    can't hear or see either one. Once it's running, tell me exactly
+    what I should be seeing or hearing and ask me to confirm before
+    calling that part done (e.g. "it should have just spoken a
+    greeting out loud - did you hear it?" / "you should see boxed
+    panels with a prompt at the bottom - does yours look like that?").
+    Iterate on what I report back rather than marking voice or
+    display as working on your own say-so.
+
+    Confirm with me before: installing system packages, forking or
+    pushing to a remote, or opening a PR. Everything else - reading
+    files, building, local edits inside the checkout - just do.
+
+    When you're done, tell me plainly what works, what doesn't, and
+    what (if anything) is Linux-only or unsupported on this platform.
+    -------------------------------------------------------------------

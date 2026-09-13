@@ -26,6 +26,7 @@
 #include "helper_presence.hpp"
 
 #include "../olli_link/olli_link.hpp"
+#include "../olli_display/olli_display.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -39,8 +40,6 @@
 #include <filesystem>
 #include <vector>
 
-#include <unistd.h>
-#include <termios.h>
 #include <sys/select.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -220,14 +219,21 @@ namespace {
     // Steps through every person; for each one whose trigger is on, fires
     // their configured action (on_near_action if they just arrived,
     // on_away_action if they just left) through olli, then clears the
-    // trigger so it doesn't fire again next call.
-    void run_triggers(OLLI_LINK& link)
+    // trigger so it doesn't fire again next call. Also drops a line in
+    // OLLI_DISPLAY's activity area for the transition itself - presence's
+    // equivalent of a clock timer going off (see ../clock/clock.cpp's
+    // handle_expired_timers()) - keyed by person name so a later opposite
+    // transition (e.g. "just got home" following "just left") replaces
+    // rather than stacks, and auto-clearing 30s later, same convention as
+    // the timer line.
+    void run_triggers(OLLI_LINK& link, OLLI_DISPLAY& display)
     {
         for (PersonProfile& profile : people) {
             if (!profile.triggered) continue;
 
             std::string message = profile.name + (profile.is_near ? " just got home." : " just left.");
             fire_transition_event(link, message, profile.is_near ? profile.on_near_action : profile.on_away_action);
+            display.set_activity_line(profile.name, message, 30);
 
             profile.triggered = false;
         }
@@ -251,7 +257,14 @@ namespace {
     // - see handle_identity()'s own comment for why that distinction matters.
     std::string people_profile_name;
 
-    std::string handle_identity(const json& msg)
+    // Doesn't return a status string for the shared tool-status line -
+    // OLLI_DISPLAY already has a dedicated, always-current Profile line
+    // (see main()'s display.set_profile(current_profile_name...) call, run
+    // every tick), so a one-shot "Identified: X" on the status line would
+    // just repeat that fact and blot out whatever real tool activity was on
+    // it beforehand - same reasoning as ../clock/clock.cpp's
+    // handle_identity().
+    void handle_identity(const json& msg)
     {
         current_profile_name = msg.value("name", "");
         settings = load_settings(current_profile_name);
@@ -281,12 +294,6 @@ namespace {
             // live near/away/backend state.
             sync_person_actions();
         }
-
-        if (current_profile_name.empty()) {
-            return "Identified: olli's shared default (no profile)";
-        }
-        return "Identified: " + current_profile_name + " - settings loaded from " +
-               settings_path_for(current_profile_name).string();
     }
 
     void reset_to_default_profile()
@@ -359,7 +366,7 @@ namespace {
 
     // One-line summary of a {"tool": ..., "arguments": {...}} action, or a
     // fixed placeholder for an unconfigured (empty object) one - shared by
-    // redraw_screen() and get_presence_setup's result below, so the
+    // draw_people_list() and get_presence_setup's result below, so the
     // terminal display and what olli can be asked always agree.
     std::string describe_action(const json& action)
     {
@@ -602,53 +609,19 @@ namespace {
         return status;
     }
 
-    // --- Terminal handling (see ../template/template_tool.cpp's own copy
-    // of this for the full explanation - unchanged here) ---
+    // --- Display ---
 
-    class RawTerminal {
-        public:
-            RawTerminal()
-            {
-                if (tcgetattr(STDIN_FILENO, &old_termios) == 0) {
-                    termios raw = old_termios;
-                    raw.c_lflag &= static_cast<tcflag_t>(~(ICANON | ECHO | ISIG));
-                    raw.c_cc[VMIN] = 0;
-                    raw.c_cc[VTIME] = 0;
-                    tcsetattr(STDIN_FILENO, TCSANOW, &raw);
-                    active = true;
-                }
-                std::cout << "\033[?25l" << std::flush; // hide cursor
-            }
-
-            ~RawTerminal()
-            {
-                std::cout << "\033[?25h" << std::flush; // show cursor again
-                if (active) tcsetattr(STDIN_FILENO, TCSANOW, &old_termios);
-            }
-
-            RawTerminal(const RawTerminal&) = delete;
-            RawTerminal& operator=(const RawTerminal&) = delete;
-
-        private:
-            termios old_termios{};
-            bool active = false;
-    };
-
-    // Tracks how many lines the previous frame drew, so a frame with fewer
-    // lines (e.g. a profile switch to a household with fewer people) still
-    // blanks the leftover lines below it instead of leaving stale text on
-    // screen - see redraw_screen() below.
-    int last_frame_line_count = 0;
-
-    void redraw_screen(const std::string& status, const std::string& conn_status)
+    // Draws the per-person near/away list into display's tool area - the
+    // one part of the screen genuinely variable in height (a household
+    // gaining/losing a tracked person, or a profile switch to a different
+    // household), unlike clock's fixed-size digit face. set_tool_area_height()
+    // is a no-op unless the line count actually changed, so calling it
+    // unconditionally every tick is cheap on the common no-change tick.
+    void draw_people_list(OLLI_DISPLAY& display)
     {
         std::vector<std::string> lines;
-        lines.push_back(conn_status);
-        lines.push_back(current_profile_name.empty()
-                    ? "Profile: (shared default)" : "Profile: " + current_profile_name);
-
         if (people.empty()) {
-            lines.push_back("  No people loaded.");
+            lines.push_back("No people loaded.");
         } else {
             for (const PersonProfile& profile : people) {
                 lines.push_back("Person: " + profile.name + " - " + (profile.is_near ? "NEAR" : "AWAY"));
@@ -664,17 +637,15 @@ namespace {
                 lines.push_back("  On away: " + describe_action(profile.on_away_action));
             }
         }
-        lines.push_back(status);
 
-        std::cout << "\033[H";
-        size_t total = std::max(lines.size(), static_cast<size_t>(last_frame_line_count));
-        for (size_t i = 0; i < total; ++i) {
-            std::cout << "\033[2K";
-            if (i < lines.size()) std::cout << lines[i];
-            std::cout << "\n";
+        display.set_tool_area_height(static_cast<int>(lines.size()));
+
+        WINDOW* win = display.tool_area();
+        werase(win);
+        for (size_t i = 0; i < lines.size(); ++i) {
+            mvwaddstr(win, static_cast<int>(i), 0, lines[i].c_str());
         }
-        last_frame_line_count = static_cast<int>(lines.size());
-        std::cout << std::flush;
+        display.refresh_tool_area();
     }
 
     void print_usage(const char* argv0)
@@ -718,29 +689,22 @@ int main(int argc, char* argv[])
     // presence started polling real hardware before olli had even
     // connected, under whatever the shared file happened to hold.
     OLLI_LINK link(host, host_addr, make_register_message());
+    OLLI_DISPLAY display(1); // "No people loaded." until draw_people_list()'s first call corrects this
 
-    RawTerminal raw_terminal;
-    std::cout << "\033[2J";
-
-    // A file at EOF (stdin redirected from /dev/null, or genuinely closed -
-    // e.g. this program ever run unattended, with no controlling terminal)
-    // is always "ready to read" as far as select() is concerned, since
-    // reading it returns immediately (0 bytes) rather than blocking. If
-    // STDIN_FILENO were unconditionally watched below, that would make
-    // select()'s 200ms timeout never actually apply - the loop would spin
-    // as fast as the CPU allows instead of pacing itself, hammering the
-    // socket/display/poll logic at full speed. Watching it only when it's a
-    // real terminal sidesteps that entirely: with nothing in read_fds but a
-    // (possibly absent) socket, select() genuinely blocks for the timeout,
-    // same as intended. There's no 'q'-to-quit to watch for anyway without
-    // a real terminal for someone to press it on.
-    bool has_real_terminal = isatty(STDIN_FILENO) != 0;
-
-    std::string status = "Not connected to olli at " + host + " - retrying...";
-    std::string conn_status = status;
+    // connection_status/tool_status are the display's two lower fixed lines
+    // (see olli_display.hpp) - kept separate since a connection change and
+    // a tool event (a call answered) are unrelated facts that used to
+    // overwrite each other here (identity's return value was landing in
+    // conn_status by mistake, and a "Polled N people" status stomped
+    // whatever real call-answered status was there on literally every
+    // tick - both fixed alongside this rewrite).
+    std::string connection_status = "Not connected to olli at " + host + " - retrying...";
+    std::string tool_status;
 
     bool quit = false;
     while (!quit) {
+        display.tick(); // picks up a resize, expires any timed-out activity line
+
         timeval tv{};
         tv.tv_sec = 0;
         tv.tv_usec = 200000;
@@ -748,23 +712,15 @@ int main(int argc, char* argv[])
         fd_set read_fds;
         FD_ZERO(&read_fds);
         int max_fd = -1;
-        if (has_real_terminal) {
-            FD_SET(STDIN_FILENO, &read_fds);
-            max_fd = STDIN_FILENO;
-        }
         if (link.fd() >= 0) {
             FD_SET(link.fd(), &read_fds);
-            max_fd = std::max(link.fd(), max_fd);
+            max_fd = link.fd();
         }
 
         int ready = select(max_fd + 1, &read_fds, nullptr, nullptr, &tv);
 
-        if (ready > 0 && FD_ISSET(STDIN_FILENO, &read_fds)) {
-            char c = 0;
-            if (read(STDIN_FILENO, &c, 1) > 0) {
-                if (c == 'q' || c == 'Q' || c == 3) quit = true;
-            }
-        }
+        int key = display.get_key();
+        if (key == 'q' || key == 'Q' || key == 3) quit = true;
 
         bool socket_readable = link.fd() >= 0 && ready > 0 && FD_ISSET(link.fd(), &read_fds);
 
@@ -776,11 +732,11 @@ int main(int argc, char* argv[])
             json msg;
             while (link.next_message(msg)) {
                 std::string type = msg.value("type", "");
-                if (type == "call") status = handle_call(link, msg);
-                else if (type == "identity") conn_status = handle_identity(msg);
+                if (type == "call") tool_status = handle_call(link, msg);
+                else if (type == "identity") handle_identity(msg);
             }
 
-            if (!link.status().empty()) conn_status = link.status();
+            if (!link.status().empty()) connection_status = link.status();
         }
 
         // Poll every tracked person and fire whatever just transitioned -
@@ -791,11 +747,16 @@ int main(int argc, char* argv[])
         // nothing to do.
         if (!quit) {
             poll_all_people();
-            run_triggers(link);
-            status = "Polled " + std::to_string(people.size()) + " people.";
-        }
+            run_triggers(link, display);
 
-        if (!quit) redraw_screen(status, conn_status);
+            draw_people_list(display);
+
+            display.set_connection(connection_status);
+            display.set_profile(current_profile_name.empty() ? "Profile: (shared default)" : "Profile: " + current_profile_name);
+            display.set_tool_status(tool_status);
+
+            display.present();
+        }
     }
 
     return 0;

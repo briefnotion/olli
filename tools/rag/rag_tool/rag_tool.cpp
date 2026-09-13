@@ -26,14 +26,15 @@
 //
 // Also runs the same folder sync rag_admin's "Update database" menu option
 // does (../rag_db/rag_sync.hpp), automatically, every AUTO_SYNC_INTERVAL
-// (currently 10 minutes) while connected to olli - see olli_processing()'s
-// tail below. Safe to run alongside rag_admin doing the same sync by hand:
-// sync_profile_collections()'s own file lock means whichever one is
+// (currently 10 minutes) while connected to olli - see main()'s periodic-
+// sync block below. Safe to run alongside rag_admin doing the same sync by
+// hand: sync_profile_collections()'s own file lock means whichever one is
 // already syncing wins, and the other just skips that round.
 
 #include <nlohmann/json.hpp>
 
 #include "olli_link.hpp"
+#include "../../olli_display/olli_display.hpp"
 #include "rag_db.hpp"
 #include "rag_embed.hpp"
 #include "rag_sync.hpp"
@@ -41,14 +42,14 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <ctime>
+#include <iomanip>
 #include <iostream>
 #include <memory>
 #include <optional>
 #include <sstream>
 #include <string>
 
-#include <unistd.h>
-#include <termios.h>
 #include <sys/select.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -137,6 +138,17 @@ namespace {
                 }
             })}
         };
+    }
+
+    std::string current_time(const std::string& format)
+    {
+        auto now = std::chrono::system_clock::now();
+        std::time_t now_time = std::chrono::system_clock::to_time_t(now);
+        std::tm local_tm{};
+        localtime_r(&now_time, &local_tm);
+        std::stringstream ss;
+        ss << std::put_time(&local_tm, format.c_str());
+        return ss.str();
     }
 
     bool iequals_ascii(const std::string& a, const std::string& b)
@@ -334,7 +346,7 @@ namespace {
         return "Unknown call received: " + name;
     }
 
-    // How often the periodic sync below (see olli_processing()'s tail)
+    // How often the periodic sync below (see main()'s periodic-sync block)
     // re-syncs the current profile's collection folders against the
     // database, once connected to olli - same effect as choosing "Update
     // database" in rag_admin, just unattended. Guarded by
@@ -353,6 +365,15 @@ namespace {
     // No-op if the resulting path is already what's open, so a redundant
     // identity resend (e.g. a reconnect under the same profile) doesn't
     // needlessly drop and recreate the connection.
+    //
+    // Only writes to status on failure - draw_tool_area() already shows the
+    // current db path live every tick and OLLI_DISPLAY's own Profile line
+    // (see main()) already shows the current profile, so a success message
+    // here would just repeat both of those on the shared tool-status line,
+    // same redundancy already fixed in ../../clock/clock.cpp,
+    // ../../presence/presence.cpp, and ../../hue/hue.cpp's own
+    // handle_identity(). A failed open is genuinely new information (an
+    // actual error), so that case still reports.
     void switch_database(std::unique_ptr<RAG_DB>& db, std::string& db_path, std::string& profile_name,
                           const std::string& new_profile_name, std::string& status, const std::string& reason)
     {
@@ -362,109 +383,29 @@ namespace {
         db_path = new_path;
         profile_name = new_profile_name;
         db = std::make_unique<RAG_DB>(db_path);
-        status = db->is_open()
-            ? (reason + " - now using " + db_path)
-            : ("Failed to open database at \"" + db_path + "\" (" + reason + "): " + db->last_error());
-    }
-
-    void olli_processing(OLLI_LINK& link, std::unique_ptr<RAG_DB>& db, std::string& db_path, std::string& profile_name,
-                          bool explicit_profile, RAG_EMBEDDER& embedder, bool socket_readable, std::string& status,
-                          std::optional<std::chrono::steady_clock::time_point>& last_sync_time, bool& identity_received)
-    {
-        auto dispatch = [&](const json& msg) {
-            std::string type = msg.value("type", "");
-            if (type == "call") {
-                status = handle_call(link, *db, embedder, msg);
-            } else if (type == "identity" && !explicit_profile) {
-                std::string name = msg.value("name", "");
-                // Set unconditionally, even when switch_database() below
-                // turns out to be a no-op (name matches what's already
-                // open) - this is "have we heard from olli at all about
-                // which profile is active", not "did the db path just
-                // change". See identity_received's own comment (main())
-                // for why the periodic sync needs this distinction.
-                identity_received = true;
-                switch_database(db, db_path, profile_name, name, status,
-                                 "Identity: " + (name.empty() ? "(no profile)" : name));
-            }
-        };
-
-        link.service(socket_readable);
-
-        json msg;
-        while (link.next_message(msg)) dispatch(msg);
-
-        if (link.consume_disconnected() && !explicit_profile) {
-            switch_database(db, db_path, profile_name, "", status, "Disconnected");
-            identity_received = false; // a reconnect may be a different olli/profile - wait for its identity again
-        }
-
-        if (!link.status().empty()) status = link.status();
-
-        // Periodic background sync (AUTO_SYNC_INTERVAL above) - only while
-        // actually connected, per design discussion (a disconnected
-        // rag_tool syncing in the background wasn't asked for, and
-        // "connected" is already how every other olli-driven state change
-        // here is gated), AND only once we actually know which profile
-        // that is: is_connected() goes true the instant the TCP socket
-        // connects, which can be one or more ticks before olli's own
-        // `identity` message (a separate, later application message)
-        // actually arrives - found live, syncing the wrong (shared
-        // default) profile for a whole AUTO_SYNC_INTERVAL because the
-        // first eligible tick fired before identity_received was true.
-        // explicit_profile skips this wait entirely, same as everywhere
-        // else here - that profile is already known for good, from the
-        // command line. Fires on the very first eligible tick once both
-        // conditions hold (last_sync_time starts unset), then every
-        // AUTO_SYNC_INTERVAL after that.
-        if (link.is_connected() && (explicit_profile || identity_received) &&
-            (!last_sync_time.has_value() ||
-             std::chrono::steady_clock::now() - *last_sync_time >= AUTO_SYNC_INTERVAL))
-        {
-            last_sync_time = std::chrono::steady_clock::now();
-            RAG_SYNC_STATS stats = sync_profile_collections(*db, embedder, profile_name);
-            status = stats.skipped_busy
-                ? "Auto-sync skipped (rag_admin busy)"
-                : ("Auto-synced: " + std::to_string(stats.imported) + " imported, " +
-                   std::to_string(stats.updated) + " updated, " + std::to_string(stats.unchanged) +
-                   " unchanged, " + std::to_string(stats.removed) + " removed");
+        if (!db->is_open()) {
+            status = "Failed to open database at \"" + db_path + "\" (" + reason + "): " + db->last_error();
         }
     }
 
-    // RAII: puts stdin into raw, non-canonical, non-echoing mode so 'q' can
-    // be read immediately - same pattern as ../../template/template_tool.cpp.
-    class RawTerminal {
-        public:
-            RawTerminal()
-            {
-                if (tcgetattr(STDIN_FILENO, &old_termios) == 0) {
-                    termios raw = old_termios;
-                    raw.c_lflag &= static_cast<tcflag_t>(~(ICANON | ECHO | ISIG));
-                    raw.c_cc[VMIN] = 0;
-                    raw.c_cc[VTIME] = 0;
-                    tcsetattr(STDIN_FILENO, TCSANOW, &raw);
-                    active = true;
-                }
-                std::cout << "\033[?25l" << std::flush;
-            }
-
-            ~RawTerminal()
-            {
-                std::cout << "\033[?25h" << std::flush;
-                if (active) tcsetattr(STDIN_FILENO, TCSANOW, &old_termios);
-            }
-
-            RawTerminal(const RawTerminal&) = delete;
-            RawTerminal& operator=(const RawTerminal&) = delete;
-
-        private:
-            termios old_termios{};
-            bool active = false;
-    };
-
-    void redraw_screen(const std::string& status, const std::string& db_path)
+    // Draws the current database path + collection count into display's
+    // tool area - the closest thing rag_tool has to clock's digit face or
+    // hue's light list. Modest by design: this tool is new, and there's
+    // not much of its own to show yet beyond what it's pointed at.
+    void draw_tool_area(OLLI_DISPLAY& display, RAG_DB& db, const std::string& db_path)
     {
-        std::cout << "\033[H\033[2K" << "rag_tool - db: " << db_path << " - " << status << std::flush;
+        std::vector<std::string> lines;
+        lines.push_back("Database: " + db_path);
+        lines.push_back("Collections: " + std::to_string(db.list_collections().size()));
+
+        display.set_tool_area_height(static_cast<int>(lines.size()));
+
+        WINDOW* win = display.tool_area();
+        werase(win);
+        for (size_t i = 0; i < lines.size(); ++i) {
+            mvwaddstr(win, static_cast<int>(i), 0, lines[i].c_str());
+        }
+        display.refresh_tool_area();
     }
 
     void print_usage(const char* argv0)
@@ -515,21 +456,25 @@ int main(int argc, char* argv[])
 
     RAG_EMBEDDER embedder;
     OLLI_LINK link(host, host_addr, make_register_message());
+    OLLI_DISPLAY display(2); // "Database: ..." + "Collections: N" - draw_tool_area() keeps this in sync
 
-    RawTerminal raw_terminal;
-    std::cout << "\033[2J";
-
-    bool has_real_terminal = isatty(STDIN_FILENO) != 0;
-    std::string status = "Not connected to olli at " + host + " - retrying...";
+    // connection_status/tool_status are the display's two lower fixed lines
+    // (see olli_display.hpp) - kept separate since a connection change and
+    // a tool event (a call answered, a sync completing) are unrelated
+    // facts, same split as every other tool here.
+    std::string connection_status = "Not connected to olli at " + host + " - retrying...";
+    std::string tool_status;
     std::optional<std::chrono::steady_clock::time_point> last_sync_time;
-    // See olli_processing()'s tail comment for why the periodic sync needs
-    // this separately from is_connected() - true from the start when
+    // See the periodic-sync block below for why this needs to be tracked
+    // separately from is_connected() - true from the start when
     // explicit_profile pins the profile already, since there's nothing to
     // wait for in that case.
     bool identity_received = explicit_profile;
 
     bool quit = false;
     while (!quit) {
+        display.tick(); // picks up a resize, expires any timed-out activity line
+
         timeval tv{};
         tv.tv_sec = 0;
         tv.tv_usec = 200000;
@@ -537,28 +482,96 @@ int main(int argc, char* argv[])
         fd_set read_fds;
         FD_ZERO(&read_fds);
         int max_fd = -1;
-        if (has_real_terminal) {
-            FD_SET(STDIN_FILENO, &read_fds);
-            max_fd = STDIN_FILENO;
-        }
         if (link.fd() >= 0) {
             FD_SET(link.fd(), &read_fds);
-            max_fd = std::max(link.fd(), max_fd);
+            max_fd = link.fd();
         }
 
         int ready = select(max_fd + 1, &read_fds, nullptr, nullptr, &tv);
 
-        if (ready > 0 && FD_ISSET(STDIN_FILENO, &read_fds)) {
-            char c = 0;
-            if (read(STDIN_FILENO, &c, 1) > 0) {
-                if (c == 'q' || c == 'Q' || c == 3) quit = true;
-            }
-        }
+        int key = display.get_key();
+        if (key == 'q' || key == 'Q' || key == 3) quit = true;
 
         bool socket_readable = link.fd() >= 0 && ready > 0 && FD_ISSET(link.fd(), &read_fds);
 
-        if (!quit) olli_processing(link, db, db_path, profile_name, explicit_profile, embedder, socket_readable, status, last_sync_time, identity_received);
-        if (!quit) redraw_screen(status, db_path);
+        if (!quit) {
+            link.service(socket_readable);
+
+            json msg;
+            while (link.next_message(msg)) {
+                std::string type = msg.value("type", "");
+                if (type == "call") {
+                    tool_status = handle_call(link, *db, embedder, msg);
+                } else if (type == "identity" && !explicit_profile) {
+                    std::string name = msg.value("name", "");
+                    // Set unconditionally, even when switch_database()
+                    // below turns out to be a no-op (name matches what's
+                    // already open) - this is "have we heard from olli at
+                    // all about which profile is active", not "did the db
+                    // path just change". See the periodic-sync block below
+                    // for why that distinction matters.
+                    identity_received = true;
+                    switch_database(db, db_path, profile_name, name, tool_status,
+                                     "Identity: " + (name.empty() ? "(no profile)" : name));
+                }
+            }
+
+            if (link.consume_disconnected() && !explicit_profile) {
+                switch_database(db, db_path, profile_name, "", tool_status, "Disconnected");
+                identity_received = false; // a reconnect may be a different olli/profile - wait for its identity again
+            }
+
+            if (!link.status().empty()) connection_status = link.status();
+        }
+
+        // Periodic background sync (AUTO_SYNC_INTERVAL above) - only while
+        // actually connected, per design discussion (a disconnected
+        // rag_tool syncing in the background wasn't asked for, and
+        // "connected" is already how every other olli-driven state change
+        // here is gated), AND only once we actually know which profile
+        // that is: is_connected() goes true the instant the TCP socket
+        // connects, which can be one or more ticks before olli's own
+        // `identity` message (a separate, later application message)
+        // actually arrives - found live, syncing the wrong (shared
+        // default) profile for a whole AUTO_SYNC_INTERVAL because the
+        // first eligible tick fired before identity_received was true.
+        // explicit_profile skips this wait entirely, same as everywhere
+        // else here - that profile is already known for good, from the
+        // command line. Fires on the very first eligible tick once both
+        // conditions hold (last_sync_time starts unset), then every
+        // AUTO_SYNC_INTERVAL after that.
+        //
+        // Reported on its own activity-area line rather than the shared
+        // tool-status line, same reasoning as clock's timer-expiry line
+        // and presence's transition line: this is a periodic background
+        // event, not a response to a call, and (unlike those two) happens
+        // rarely enough that it should stay visible - ttl_seconds 0 (the
+        // default) - until the next sync replaces it, not blink away after
+        // 30s the way a timer-expiry line does.
+        if (!quit && link.is_connected() && (explicit_profile || identity_received) &&
+            (!last_sync_time.has_value() ||
+             std::chrono::steady_clock::now() - *last_sync_time >= AUTO_SYNC_INTERVAL))
+        {
+            last_sync_time = std::chrono::steady_clock::now();
+            RAG_SYNC_STATS stats = sync_profile_collections(*db, embedder, profile_name, /*verbose=*/false);
+            std::string sync_summary = "Last sync (" + current_time("%H:%M:%S") + "): " +
+                (stats.skipped_busy
+                    ? "skipped (rag_admin busy)"
+                    : (std::to_string(stats.imported) + " imported, " +
+                       std::to_string(stats.updated) + " updated, " + std::to_string(stats.unchanged) +
+                       " unchanged, " + std::to_string(stats.removed) + " removed"));
+            display.set_activity_line("sync", sync_summary);
+        }
+
+        if (!quit) {
+            draw_tool_area(display, *db, db_path);
+
+            display.set_connection(connection_status);
+            display.set_profile(profile_name.empty() ? "Profile: (shared default)" : "Profile: " + profile_name);
+            display.set_tool_status(tool_status);
+
+            display.present();
+        }
     }
 
     return 0;

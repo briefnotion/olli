@@ -1,8 +1,7 @@
 // Hue remote tool - Philips Hue light control, ported out of olli's core
 // (formerly TOOL_HUE, source/tools.cpp/.h + HUE_LIGHT_CLASS,
 // source/tools_helper.h/.cpp) onto the tools/template/ plumbing. See
-// ../PROTOCOL.md for the wire protocol, and this file's own header comment
-// on olli_processing() for the split between tailored and generic code.
+// ../PROTOCOL.md for the wire protocol.
 //
 // Registers set_hue_light/list_hue_lights/manage_hue_scenes with the exact
 // same names, descriptions, and argument shapes as the original TOOL_HUE -
@@ -47,6 +46,7 @@
 #include <nlohmann/json.hpp>
 
 #include "olli_link.hpp"
+#include "../olli_display/olli_display.hpp"
 
 #include <curl/curl.h>
 
@@ -67,8 +67,6 @@
 #include <thread>
 #include <vector>
 
-#include <unistd.h>
-#include <termios.h>
 #include <sys/select.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -545,25 +543,28 @@ namespace {
     // Called once at startup (for the shared default) and again on every
     // "identity" message - loads this profile's bridge_ip/api_key, points
     // HUE_LIGHT_CLASS at this profile's scenes.json, and refreshes the
-    // light cache. Returns a status string for the display.
-    std::string switch_profile(const std::string& profile_name)
+    // light cache.
+    //
+    // Doesn't return a status string for the shared tool-status line -
+    // OLLI_DISPLAY already has a dedicated, always-current Profile line
+    // (see main()'s display.set_profile(current_profile_name...) call, run
+    // every tick) and draw_light_list() above shows live bridge/light-count
+    // info as part of the tool area on every tick regardless - a one-shot
+    // status here would just repeat both of those and blot out whatever
+    // real tool activity was on the status line beforehand. Same reasoning
+    // as ../clock/clock.cpp's and ../presence/presence.cpp's
+    // handle_identity().
+    void switch_profile(const std::string& profile_name)
     {
         current_profile_name = profile_name;
         hue_settings = load_hue_settings(profile_name);
         hue.set_credentials(hue_settings.bridge_ip, hue_settings.api_key, scenes_path_for(profile_name).string());
-        bool reached_bridge = hue.refresh_lights();
-
-        std::string who = profile_name.empty() ? "shared default" : profile_name;
-        if (!reached_bridge) {
-            return "Profile: " + who + " - bridge " + hue_settings.bridge_ip + " unreachable";
-        }
-        return "Profile: " + who + " - bridge " + hue_settings.bridge_ip + ", "
-               + std::to_string(hue.cached_light_count()) + " light(s)";
+        hue.refresh_lights();
     }
 
-    std::string handle_identity(const json& msg)
+    void handle_identity(const json& msg)
     {
-        return switch_profile(msg.value("name", ""));
+        switch_profile(msg.value("name", ""));
     }
 
     // Called on every disconnect - falls back to the shared-default
@@ -790,72 +791,13 @@ namespace {
         return "Unknown call received: " + name;
     }
 
-    // Called once per main-loop tick - see tools/template/template_tool.cpp
-    // for the shape this follows. Top half (CUSTOMIZE #2, inherited from
-    // the template) routes each message type; bottom half is the calls
-    // into OLLI_LINK.
-    void olli_processing(OLLI_LINK& link, bool socket_readable, std::string& status)
-    {
-        auto dispatch = [&](const json& msg) {
-            std::string type = msg.value("type", "");
-            if (type == "call") status = handle_call(link, msg);
-            else if (type == "identity") status = handle_identity(msg);
-        };
-
-        // ---------------------------------------------------------------
-        // Below this line: olli communication plumbing (see
-        // ../template/olli_link.hpp / olli_link.cpp, carried over
-        // unmodified). Nothing here needs to change for this tool.
-        // ---------------------------------------------------------------
-        link.service(socket_readable);
-
-        if (link.consume_disconnected()) reset_to_default_profile();
-
-        json msg;
-        while (link.next_message(msg)) dispatch(msg);
-
-        if (!link.status().empty()) status = link.status();
-    }
-
-    // --- Terminal handling (unchanged from tools/template/, see its own
-    // comment for the full explanation) ---
-
-    class RawTerminal {
-        public:
-            RawTerminal()
-            {
-                if (tcgetattr(STDIN_FILENO, &old_termios) == 0) {
-                    termios raw = old_termios;
-                    raw.c_lflag &= static_cast<tcflag_t>(~(ICANON | ECHO | ISIG));
-                    raw.c_cc[VMIN] = 0;
-                    raw.c_cc[VTIME] = 0;
-                    tcsetattr(STDIN_FILENO, TCSANOW, &raw);
-                    active = true;
-                }
-                std::cout << "\033[?25l" << std::flush;
-            }
-
-            ~RawTerminal()
-            {
-                std::cout << "\033[?25h" << std::flush;
-                if (active) tcsetattr(STDIN_FILENO, TCSANOW, &old_termios);
-            }
-
-            RawTerminal(const RawTerminal&) = delete;
-            RawTerminal& operator=(const RawTerminal&) = delete;
-
-        private:
-            termios old_termios{};
-            bool active = false;
-    };
-
     struct RGB { int r = 255, g = 255, b = 255; };
 
     // The published inverse of the exact "Wide RGB D65" matrix
     // HUE_LIGHT_CLASS::rgb_to_xy() uses forward - same reference (the
     // matrices are a matched pair). Normalized so the brightest channel
     // always hits 255: this is only ever used to show a light's HUE on
-    // screen (light_row()'s color swatch below), and the brightness bar
+    // screen (draw_light_row()'s color swatch below), and the brightness bar
     // right next to it already carries how bright the light actually is,
     // so there's no need for this to also encode real luminance - the Y
     // (luminance) term cancels out of the final ratio once normalized,
@@ -901,11 +843,86 @@ namespace {
         return bar;
     }
 
+    // --- Color swatch ---
+    //
+    // Raw ANSI truecolor escapes (\033[38;2;r;g;bm...) - what this used to
+    // embed directly in a plain std::string - don't work through ncurses:
+    // waddstr()/mvwaddstr() don't interpret escape sequences, they just
+    // print the ESC byte and whatever follows as literal (non-printing)
+    // characters, corrupting ncurses' own idea of where the cursor is.
+    // Real color through ncurses means an actual color pair, applied via
+    // wattron()/wattroff() around the swatch characters, not baked into the
+    // string. Colors/pairs are dynamically allocated the first time a given
+    // RGB is seen and cached by packed value - a real bridge has a small,
+    // bounded number of lights (so a bounded number of distinct colors),
+    // well under COLORS/COLOR_PAIRS on any modern terminal. If that ever
+    // were exhausted, new colors just reuse the most recently allocated
+    // pair rather than growing without bound or erroring.
+    bool color_ready = false;
+    std::map<int, short> rgb_to_pair; // packed 0xRRGGBB -> ncurses pair id
+    short next_color_slot = 1;        // slot 0 is the terminal's own default palette entry
+    short next_pair_slot = 1;         // pair 0 is reserved (default fg/bg)
+
+    // Called once from main(), right after OLLI_DISPLAY brings up ncurses -
+    // only set_hue_light's color path (preset/hex) needs this, so a
+    // terminal with no color support (color_ready stays false) just means
+    // draw_light_row() below falls back to plain block characters in the
+    // default color instead of failing.
+    void init_color_support()
+    {
+        if (!has_colors()) return;
+        start_color();
+        use_default_colors(); // lets a pair's background stay -1 (terminal default) below
+        color_ready = can_change_color();
+    }
+
+    short pair_for_rgb(const RGB& c)
+    {
+        if (!color_ready) return 0;
+
+        int key = (c.r << 16) | (c.g << 8) | c.b;
+        auto it = rgb_to_pair.find(key);
+        if (it != rgb_to_pair.end()) return it->second;
+
+        if (next_pair_slot >= COLOR_PAIRS || next_color_slot >= COLORS) {
+            return rgb_to_pair.empty() ? static_cast<short>(0) : rgb_to_pair.rbegin()->second;
+        }
+
+        short color_id = next_color_slot++;
+        short pair_id = next_pair_slot++;
+        // init_extended_color()'s r/g/b are 0-1000, not 0-255.
+        init_extended_color(color_id, c.r * 1000 / 255, c.g * 1000 / 255, c.b * 1000 / 255);
+        init_extended_pair(pair_id, color_id, -1);
+        rgb_to_pair[key] = pair_id;
+        return pair_id;
+    }
+
+    // Display columns in a string built only from ASCII plus
+    // brightness_bar()'s U+2588/U+2591 block glyphs - each of those is 3
+    // UTF-8 bytes but exactly 1 terminal column, so a plain byte count
+    // (std::string::size()) overcounts by 2 columns per glyph. Counts every
+    // byte that isn't a UTF-8 continuation byte (top two bits "10") as one
+    // column instead - same "byte count isn't proportional to column count"
+    // pitfall ../clock/clock.cpp's BigClock struct tracks its own width to
+    // avoid, just via a general helper here instead of a running total kept
+    // alongside construction.
+    int display_width(const std::string& s)
+    {
+        int width = 0;
+        for (unsigned char c : s) {
+            if ((c & 0xC0) != 0x80) ++width;
+        }
+        return width;
+    }
+
     // One line of the light list below - id, name, on/off, a brightness
     // bar, and (if this light supports color - a plain white/ambiance bulb
-    // has no "xy" at all) an actual colored swatch via 24-bit truecolor,
-    // not just a text label.
-    std::string light_row(const LightState& state)
+    // has no "xy" at all) an actual colored swatch. Draws straight into
+    // win at row (not a plain string, unlike every other line in
+    // draw_light_list() below) since the swatch's color has to be applied
+    // as a real ncurses attribute around just those few characters, not
+    // embedded in the text - see the color-swatch comment above.
+    void draw_light_row(WINDOW* win, int row, const LightState& state)
     {
         int percent = bri_to_brightness_percent(state.brightness);
 
@@ -913,26 +930,35 @@ namespace {
         ss << " [" << std::setw(3) << std::right << state.id << "] "
            << std::setw(14) << std::left << state.name.substr(0, 14) << " "
            << (state.on ? "ON " : "OFF") << "  "
-           << brightness_bar(percent) << " " << std::setw(3) << std::right << percent << "%";
+           << brightness_bar(percent) << " " << std::setw(3) << std::right << percent << "%  ";
+
+        std::string prefix = ss.str();
+        mvwaddstr(win, row, 0, prefix.c_str());
+        int col = display_width(prefix); // NOT prefix.size() - see display_width()'s comment
 
         if (state.xy.size() == 2) {
             RGB c = xy_to_rgb(state.xy[0], state.xy[1]);
-            ss << "  \033[38;2;" << c.r << ";" << c.g << ";" << c.b << "m\xE2\x96\x88\xE2\x96\x88\xE2\x96\x88\xE2\x96\x88\033[0m";
+            short pair = pair_for_rgb(c);
+            if (pair > 0) wattron(win, COLOR_PAIR(pair));
+            mvwaddstr(win, row, col, "\xE2\x96\x88\xE2\x96\x88\xE2\x96\x88\xE2\x96\x88");
+            if (pair > 0) wattroff(win, COLOR_PAIR(pair));
+            col += 4;
         } else {
-            ss << "  (no color data)";
+            mvwaddstr(win, row, col, "(no color data)");
+            col += 15;
         }
 
-        if (!state.reachable) ss << "  *UNREACHABLE*";
-        return ss.str();
+        if (!state.reachable) mvwaddstr(win, row, col, "  *UNREACHABLE*");
     }
 
-    void redraw_screen(const std::string& status)
+    // Draws the bridge summary + light list into display's tool area - the
+    // part of the screen genuinely variable in height (a bridge refresh can
+    // add/drop a light), same reasoning as ../presence/presence.cpp's
+    // draw_people_list().
+    void draw_light_list(OLLI_DISPLAY& display)
     {
-        std::cout << "\033[H\033[2K" << "Profile: "
-                   << (current_profile_name.empty() ? "(shared default)" : current_profile_name) << "\n";
-        std::cout << "\033[2K" << "Bridge: " << hue_settings.bridge_ip << " - "
-                   << hue.cached_light_count() << " light(s) cached\n";
-        std::cout << "\033[2K" << "\n";
+        std::string bridge_line = "Bridge: " + hue_settings.bridge_ip + " - " +
+                                   std::to_string(hue.cached_light_count()) + " light(s) cached";
 
         // Sorted numerically for display, not the map's own lexicographic
         // key order (which would put "10" before "2") - purely cosmetic,
@@ -945,23 +971,22 @@ namespace {
             return std::atoi(a.id.c_str()) < std::atoi(b.id.c_str());
         });
 
+        int row_count = sorted_lights.empty() ? 1 : static_cast<int>(sorted_lights.size());
+        display.set_tool_area_height(2 + row_count); // bridge line + blank + rows
+
+        WINDOW* win = display.tool_area();
+        werase(win);
+        mvwaddstr(win, 0, 0, bridge_line.c_str());
+
         if (sorted_lights.empty()) {
-            std::cout << "\033[2K" << "  (no lights cached yet)\n";
+            mvwaddstr(win, 2, 0, "  (no lights cached yet)");
         } else {
-            for (auto const& state : sorted_lights) {
-                std::cout << "\033[2K" << light_row(state) << "\n";
+            for (size_t i = 0; i < sorted_lights.size(); ++i) {
+                draw_light_row(win, static_cast<int>(2 + i), sorted_lights[i]);
             }
         }
 
-        std::cout << "\033[2K" << "\n";
-        std::cout << "\033[2K" << status << "\n";
-        // Erases anything left over below this point from a previous,
-        // taller frame - the light list's height varies (a bridge refresh
-        // can add/drop a light), unlike every other line here, so a plain
-        // per-line \033[2K alone isn't enough to keep a shrinking frame
-        // clean the way it is for tools/clock/clock.cpp's fixed-height
-        // display.
-        std::cout << "\033[J" << std::flush;
+        display.refresh_tool_area();
     }
 
     void print_usage(const char* argv0)
@@ -1009,21 +1034,25 @@ int main(int argc, char* argv[])
     // Shared-default profile until an "identity" message says otherwise -
     // this is also what picks up a real bridge_ip/api_key migrated from
     // olli-core's old settings.json on first run (see load_hue_settings()).
-    std::string status = switch_profile("");
+    switch_profile("");
 
-    // ---- olli communications declaration ----
     OLLI_LINK link(host, host_addr, make_register_message());
+    OLLI_DISPLAY display(1); // draw_light_list()'s first call corrects this
+    init_color_support();    // must run after OLLI_DISPLAY brings up ncurses
 
-    // ---- user code ----
-    RawTerminal raw_terminal;
-    std::cout << "\033[2J";
+    // connection_status/tool_status are the display's two lower fixed lines
+    // (see olli_display.hpp) - kept separate since a connection change and
+    // a tool event (a call answered) are unrelated facts, same split as
+    // ../clock/clock.cpp and ../presence/presence.cpp.
+    std::string connection_status = "Not connected to olli at " + host + " - retrying...";
+    std::string tool_status;
 
-    bool has_real_terminal = isatty(STDIN_FILENO) != 0;
     auto last_light_refresh = std::chrono::steady_clock::now();
 
     bool quit = false;
     while (!quit) {
-        // ---- user code: wait for stdin/socket activity ----
+        display.tick(); // picks up a resize, expires any timed-out activity line
+
         timeval tv{};
         tv.tv_sec = 0;
         tv.tv_usec = 200000;
@@ -1031,32 +1060,35 @@ int main(int argc, char* argv[])
         fd_set read_fds;
         FD_ZERO(&read_fds);
         int max_fd = -1;
-        if (has_real_terminal) {
-            FD_SET(STDIN_FILENO, &read_fds);
-            max_fd = STDIN_FILENO;
-        }
         if (link.fd() >= 0) {
             FD_SET(link.fd(), &read_fds);
-            max_fd = std::max(link.fd(), max_fd);
+            max_fd = link.fd();
         }
 
         int ready = select(max_fd + 1, &read_fds, nullptr, nullptr, &tv);
 
-        if (ready > 0 && FD_ISSET(STDIN_FILENO, &read_fds)) {
-            char c = 0;
-            if (read(STDIN_FILENO, &c, 1) > 0) {
-                if (c == 'q' || c == 'Q' || c == 3) quit = true; // 3 = Ctrl+C
-            }
-        }
+        int key = display.get_key();
+        if (key == 'q' || key == 'Q' || key == 3) quit = true; // 3 = Ctrl+C
 
         bool socket_readable = link.fd() >= 0 && ready > 0 && FD_ISSET(link.fd(), &read_fds);
 
-        // ---- olli communications ----
-        if (!quit) olli_processing(link, socket_readable, status);
+        if (!quit) {
+            link.service(socket_readable);
 
-        // ---- user code: periodic light-cache refresh, independent of
-        // whatever happened above this tick - see LIGHT_REFRESH_INTERVAL_
-        // SECONDS' comment. ----
+            if (link.consume_disconnected()) reset_to_default_profile();
+
+            json msg;
+            while (link.next_message(msg)) {
+                std::string type = msg.value("type", "");
+                if (type == "call") tool_status = handle_call(link, msg);
+                else if (type == "identity") handle_identity(msg);
+            }
+
+            if (!link.status().empty()) connection_status = link.status();
+        }
+
+        // Periodic light-cache refresh, independent of whatever happened
+        // above this tick - see LIGHT_REFRESH_INTERVAL_SECONDS' comment.
         if (!quit) {
             auto now = std::chrono::steady_clock::now();
             if (std::chrono::duration_cast<std::chrono::seconds>(now - last_light_refresh).count()
@@ -1066,10 +1098,17 @@ int main(int argc, char* argv[])
             }
         }
 
-        if (!quit) redraw_screen(status);
+        if (!quit) {
+            draw_light_list(display);
+
+            display.set_connection(connection_status);
+            display.set_profile(current_profile_name.empty() ? "Profile: (shared default)" : "Profile: " + current_profile_name);
+            display.set_tool_status(tool_status);
+
+            display.present();
+        }
     }
 
-    // ---- closing code ----
     curl_global_cleanup();
     return 0;
 }

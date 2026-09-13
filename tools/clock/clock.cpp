@@ -21,6 +21,7 @@
 // somewhere else on the network. `./clock -h` / `--help` for usage.
 
 #include "../olli_link/olli_link.hpp"
+#include "../olli_display/olli_display.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -32,13 +33,9 @@
 #include <ctime>
 #include <vector>
 #include <map>
-#include <deque>
 #include <algorithm>
 
-#include <unistd.h>
-#include <termios.h>
 #include <sys/select.h>
-#include <sys/ioctl.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
@@ -119,7 +116,7 @@ namespace {
     // it fires on the first tick after reconnecting instead of being lost.
     // Updates `status` too, same as handle_call()'s return value, so the
     // display reflects it immediately.
-    void handle_expired_timers(OLLI_LINK& link, std::string& status)
+    void handle_expired_timers(OLLI_LINK& link, OLLI_DISPLAY& display, std::string& status)
     {
         auto now = std::chrono::steady_clock::now();
         for (auto& [label, timer] : active_timers) {
@@ -128,6 +125,16 @@ namespace {
             if (!timer.blinked) {
                 timer.blinked = true;
                 blink_ticks_left = BLINK_TOTAL_TICKS;
+
+                // The countdown line update_running_timer_lines() has been
+                // keeping alive stops the moment a timer crosses its
+                // deadline (see that function) - this is the one-shot
+                // handoff to a "went off at..." line of its own, armed to
+                // auto-clear from the activity area 30s after this exact
+                // moment rather than lingering there forever.
+                std::string activity_line = "Timer '" + label + "' went off at " + current_time("%I:%M:%S %p");
+                if (!timer.reminder.empty()) activity_line += " - " + timer.reminder;
+                display.set_activity_line(label, activity_line, 30);
             }
 
             if (timer.event_sent || !link.is_connected()) continue;
@@ -214,106 +221,24 @@ namespace {
         return result;
     }
 
-    // --- Terminal handling ---
+    // --- Display ---
 
-    // RAII: puts stdin into raw, non-canonical, non-echoing mode so a
-    // keypress ('q' to quit) can be read immediately without waiting for
-    // Enter, and hides the cursor while the display is live - restores both
-    // exactly as found on destruction. Same reasoning as olli's own
-    // KEYBOARD_INPUT (source/user_io.cpp), just self-contained here since
-    // this program builds independently of olli's source tree.
-    class RawTerminal {
-        public:
-            RawTerminal()
-            {
-                if (tcgetattr(STDIN_FILENO, &old_termios) == 0) {
-                    termios raw = old_termios;
-                    raw.c_lflag &= static_cast<tcflag_t>(~(ICANON | ECHO | ISIG));
-                    raw.c_cc[VMIN] = 0;
-                    raw.c_cc[VTIME] = 0;
-                    tcsetattr(STDIN_FILENO, TCSANOW, &raw);
-                    active = true;
-                }
-                std::cout << "\033[?25l" << std::flush; // hide cursor
-            }
+    // Rows the clock face itself needs inside OLLI_DISPLAY's tool area: 5
+    // for the big digits (see BigClock), a blank line, the date line, and
+    // one more blank line before the shared connection/profile/status
+    // lines start - see draw_clock_face() below, which lays out exactly
+    // this many rows and no more.
+    constexpr int TOOL_AREA_HEIGHT = 8;
 
-            ~RawTerminal()
-            {
-                std::cout << "\033[?25h" << std::flush; // show cursor again
-                if (active) tcsetattr(STDIN_FILENO, TCSANOW, &old_termios);
-                std::cout << '\n'; // leave the cursor on its own fresh line, not behind the last frame
-            }
-
-            RawTerminal(const RawTerminal&) = delete;
-            RawTerminal& operator=(const RawTerminal&) = delete;
-
-        private:
-            termios old_termios{};
-            bool active = false;
-    };
-
-    int terminal_width()
+    // Draws the big digit clock + date into display's tool area. Runs every
+    // tick regardless of connection state - the clock keeps ticking whether
+    // or not olli is reachable right now.
+    void draw_clock_face(OLLI_DISPLAY& display)
     {
-        winsize w{};
-        if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == 0 && w.ws_col > 0) {
-            return w.ws_col;
-        }
-        return 80; // reasonable fallback if the ioctl fails
-    }
-
-    int terminal_height()
-    {
-        winsize w{};
-        if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == 0 && w.ws_row > 0) {
-            return w.ws_row;
-        }
-        return 24; // reasonable fallback if the ioctl fails
-    }
-
-    // Size seen on the previous redraw_screen() call - lets a resize
-    // (either dimension) be detected below and answered with a full
-    // \033[2J clear instead of the usual per-line \033[K overwrite. Most
-    // terminals reflow or scroll their buffer on resize, which can leave
-    // stale fragments of the old, differently-sized frame that a per-line
-    // clear alone never reaches - see redraw_screen()'s use of this.
-    int last_terminal_cols = -1;
-    int last_terminal_rows = -1;
-
-    std::string centered(const std::string& text, int width)
-    {
-        int pad = std::max(0, (width - static_cast<int>(text.size())) / 2);
-        return std::string(static_cast<size_t>(pad), ' ') + text;
-    }
-
-    // How many recent status lines stay on screen at once - oldest scrolls
-    // off the top as new ones arrive, like a small log tail.
-    constexpr size_t STATUS_LOG_LINES = 6;
-
-    std::deque<std::string> status_log;
-    std::string last_logged_status;
-
-    // redraw_screen() runs ~5x/sec regardless of whether anything actually
-    // happened, so `status` is the same string on most ticks - this is what
-    // keeps the log from filling up with duplicate "Registered with
-    // olli..." lines instead of an actual history of events. Timestamped so
-    // a quiet stretch between events is still visible in the log.
-    void log_status(const std::string& status)
-    {
-        if (status.empty() || status == last_logged_status) return;
-        last_logged_status = status;
-
-        status_log.push_back("[" + current_time("%H:%M:%S") + "] " + status);
-        while (status_log.size() > STATUS_LOG_LINES) status_log.pop_front();
-    }
-
-    // \033[K after each line clears any leftover from a previous, wider
-    // frame - needed since this repositions to \033[H and overwrites rather
-    // than clearing the whole screen every redraw (avoids a visible flicker
-    // once a second). Runs regardless of connection state - the clock keeps
-    // ticking whether or not olli is reachable right now.
-    void redraw_screen(const std::string& status)
-    {
-        log_status(status);
+        WINDOW* win = display.tool_area();
+        int height = 0, width = 0;
+        getmaxyx(win, height, width);
+        (void)height;
 
         // Timer-expiry flash (see blink_ticks_left's comment) - alternates
         // on/off each tick rather than staying solid for its whole
@@ -327,50 +252,57 @@ namespace {
         }
 
         BigClock clock_display = render_big_clock(current_time("%H:%M:%S"));
-        int width = terminal_width();
-        int height = terminal_height();
 
-        // Resize since the last frame - resync with a full clear before
-        // repainting (see last_terminal_cols/last_terminal_rows' comment).
-        // Skipped on the common no-resize tick to avoid needless flicker.
-        if (width != last_terminal_cols || height != last_terminal_rows) {
-            std::cout << "\033[2J";
-            last_terminal_cols = width;
-            last_terminal_rows = height;
+        werase(win);
+        if (inverted) wattron(win, A_REVERSE);
+
+        int pad = std::max(0, (width - clock_display.width) / 2);
+        for (size_t r = 0; r < clock_display.rows.size(); ++r) {
+            mvwaddstr(win, static_cast<int>(r), pad, clock_display.rows[r].c_str());
         }
 
-        if (inverted) std::cout << "\033[7m"; // reverse video - the \033[K erases below pick this up too
+        std::string date_line = current_time("%A, %B %d %Y");
+        int date_pad = std::max(0, (width - static_cast<int>(date_line.size())) / 2);
+        mvwaddstr(win, static_cast<int>(clock_display.rows.size()) + 1, date_pad, date_line.c_str());
 
-        std::cout << "\033[H";
-        for (auto& row : clock_display.rows) {
-            int pad = std::max(0, (width - clock_display.width) / 2);
-            std::cout << std::string(static_cast<size_t>(pad), ' ') << row << "\033[K\n";
+        if (inverted) wattroff(win, A_REVERSE);
+        display.refresh_tool_area();
+    }
+
+    // One activity-area line per timer still counting down - keyed by
+    // label, same as active_timers itself, so this and
+    // handle_expired_timers()'s own set_activity_line() call never fight
+    // over the same line: this owns it strictly before the deadline,
+    // handle_expired_timers() strictly from the moment it's crossed.
+    void update_running_timer_lines(OLLI_DISPLAY& display)
+    {
+        auto now = std::chrono::steady_clock::now();
+        for (auto& [label, timer] : active_timers) {
+            if (now >= timer.deadline) continue;
+
+            int total_seconds = static_cast<int>(std::chrono::duration<double>(timer.deadline - now).count() + 0.5);
+            int mins = total_seconds / 60;
+            int secs = total_seconds % 60;
+
+            std::stringstream ss;
+            ss << "Timer '" << label << "': " << mins << ":" << std::setfill('0') << std::setw(2) << secs << " remaining";
+            if (!timer.reminder.empty()) ss << " - will " << timer.reminder;
+
+            display.set_activity_line(label, ss.str());
         }
-
-        std::cout << "\n" << centered(current_time("%A, %B %d %Y"), width) << "\033[K\n\n";
-
-        // Left-aligned, unlike the clock/date above - a log reads as a log
-        // when it isn't re-centering itself around lines of varying length.
-        // Padded with blank lines up to STATUS_LOG_LINES so the frame's
-        // total height is stable from the very first tick, not just once
-        // the log fills up.
-        for (auto& line : status_log) {
-            std::cout << line << "\033[K\n";
-        }
-        for (size_t i = status_log.size(); i < STATUS_LOG_LINES; ++i) {
-            std::cout << "\033[K\n";
-        }
-
-        if (inverted) std::cout << "\033[0m"; // back to normal before the next frame
-
-        std::cout << std::flush;
     }
 
     // Answers one already-parsed "identity" message (see ../PROTOCOL.md) -
     // who's running olli right now, sent once, right after this program's
-    // own registration completes. Same status-string-return convention as
-    // handle_call() below, for the same reason (redraw_screen() owns the
-    // screen).
+    // own registration completes.
+    //
+    // Unlike handle_call() below, this doesn't return a status string for
+    // the shared tool-status line - OLLI_DISPLAY already has a dedicated,
+    // always-current Profile line (see main()'s
+    // display.set_profile(current_user_name...) call, run every tick), so
+    // a one-shot "Identified: X" on the status line would just be the same
+    // fact shown twice, and would blot out whatever real tool activity
+    // (timer set, call answered, ...) was on that line beforehand.
     //
     // clock has no real per-user settings to reload, so this just records
     // the identity for display. A future remote tool that DOES have its own
@@ -379,7 +311,7 @@ namespace {
     // instead of the commented-out sketch below: look for a settings file
     // of its own keyed by this name and load it, falling back to defaults
     // if none exists for this user yet.
-    std::string handle_identity(const json& msg)
+    void handle_identity(const json& msg)
     {
         current_user_name = msg.value("name", "");
         current_user_full_name = msg.value("full_name", "");
@@ -398,11 +330,6 @@ namespace {
         //         load_default_settings(); // no profile for this user - fall back cleanly
         //     }
         // }
-
-        if (current_user_name.empty()) {
-            return "Identified: olli's shared default (no profile)";
-        }
-        return "Identified: " + current_user_name;
     }
 
     // Called on every disconnect (both places fd gets reset to -1 below) -
@@ -594,32 +521,27 @@ int main(int argc, char* argv[])
     }
 
     OLLI_LINK link(host, host_addr, make_register_message());
+    OLLI_DISPLAY display(TOOL_AREA_HEIGHT); // owns the terminal from here on - restores it on scope exit
 
-    RawTerminal raw_terminal; // hides cursor, enables raw stdin - restores both on scope exit
-    std::cout << "\033[2J"; // one full clear at startup, redraw_screen() only overwrites from here on
-
-    // A file at EOF (stdin redirected from /dev/null, or genuinely closed -
-    // e.g. this program ever run unattended, with no controlling terminal)
-    // is always "ready to read" as far as select() is concerned, since
-    // reading it returns immediately (0 bytes) rather than blocking. If
-    // STDIN_FILENO were unconditionally watched below, that would make
-    // select()'s 200ms timeout never actually apply - the loop would spin
-    // as fast as the CPU allows instead of pacing itself, hammering the
-    // socket/display/timer logic at full speed (seen for real: 37GB written
-    // in 18 minutes at ~95% CPU, testing a sibling tool built on this same
-    // plumbing). Watching it only when it's a real terminal sidesteps that
-    // entirely: with nothing in read_fds but a (possibly absent) socket,
-    // select() genuinely blocks for the timeout, same as intended. There's
-    // no 'q'-to-quit to watch for anyway without a real terminal for
-    // someone to press it on.
-    bool has_real_terminal = isatty(STDIN_FILENO) != 0;
-
-    std::string status = "Not connected to olli at " + host + " - retrying...";
+    // connection_status/tool_status are the display's two lower fixed
+    // lines (see olli_display.hpp) - kept as separate variables rather than
+    // the single shared `status` this used to be, since a connection change
+    // and a tool event (a call answered, a timer set) are unrelated facts
+    // that used to silently overwrite each other on whichever happened most
+    // recently.
+    std::string connection_status = "Not connected to olli at " + host + " - retrying...";
+    std::string tool_status;
 
     bool quit = false;
     while (!quit) {
-        // A short, repeating wait - frequent enough for a responsive 'q'
-        // quit and a smoothly ticking display without busy-looping.
+        display.tick(); // picks up a resize, expires any timed-out activity line
+
+        // A short, repeating wait - frequent enough for a smoothly ticking
+        // display without busy-looping. Keyboard input is read separately
+        // below via display.get_key(), which - unlike the raw
+        // read(STDIN_FILENO) this replaced - is routed through ncurses and
+        // doesn't need its own guard against a closed/non-terminal stdin
+        // spinning this loop (see get_key()'s own comment).
         timeval tv{};
         tv.tv_sec = 0;
         tv.tv_usec = 200000;
@@ -627,23 +549,15 @@ int main(int argc, char* argv[])
         fd_set read_fds;
         FD_ZERO(&read_fds);
         int max_fd = -1;
-        if (has_real_terminal) {
-            FD_SET(STDIN_FILENO, &read_fds);
-            max_fd = STDIN_FILENO;
-        }
         if (link.fd() >= 0) {
             FD_SET(link.fd(), &read_fds);
-            max_fd = std::max(link.fd(), max_fd);
+            max_fd = link.fd();
         }
 
         int ready = select(max_fd + 1, &read_fds, nullptr, nullptr, &tv);
 
-        if (ready > 0 && FD_ISSET(STDIN_FILENO, &read_fds)) {
-            char c = 0;
-            if (read(STDIN_FILENO, &c, 1) > 0) {
-                if (c == 'q' || c == 'Q' || c == 3) quit = true; // 3 = Ctrl+C
-            }
-        }
+        int key = display.get_key();
+        if (key == 'q' || key == 'Q' || key == 3) quit = true; // 3 = Ctrl+C
 
         bool socket_readable = link.fd() >= 0 && ready > 0 && FD_ISSET(link.fd(), &read_fds);
 
@@ -655,19 +569,28 @@ int main(int argc, char* argv[])
             json msg;
             while (link.next_message(msg)) {
                 std::string type = msg.value("type", "");
-                if (type == "call") status = handle_call(link, msg);
-                else if (type == "identity") status = handle_identity(msg);
+                if (type == "call") tool_status = handle_call(link, msg);
+                else if (type == "identity") handle_identity(msg);
             }
 
-            if (!link.status().empty()) status = link.status();
+            if (!link.status().empty()) connection_status = link.status();
         }
 
         // Timer expiry - independent of whatever arrived this tick above,
         // same as the heartbeat handled inside link.service(). See
         // handle_expired_timers()'s comment.
-        if (!quit) handle_expired_timers(link, status);
+        if (!quit) handle_expired_timers(link, display, tool_status);
 
-        if (!quit) redraw_screen(status);
+        if (!quit) {
+            update_running_timer_lines(display);
+            draw_clock_face(display);
+
+            display.set_connection(connection_status);
+            display.set_profile(current_user_name.empty() ? "Profile: (shared default)" : "Profile: " + current_user_name);
+            display.set_tool_status(tool_status);
+
+            display.present();
+        }
     }
 
     return 0;

@@ -58,11 +58,12 @@ exactly what changed at each step. Summary of what's there:
   out call both call `mark_dead()` too, not just a cleanly closed
   connection.
 - **Step 7** - `tools/clock/clock.cpp` has a real display: a big ASCII-art
-  digital clock (block-character digits, "tty-clock" style) plus the date,
-  redrawn ~5x/sec via cursor repositioning, not a full clear each frame.
-  `'q'`/Ctrl+C quits cleanly via a `RawTerminal` RAII guard. The stub's
-  canned test event (used to prove the push path during Steps 5-6) has
-  since been removed - `clock.cpp` doesn't fire anything unprompted anymore.
+  digital clock (block-character digits, "tty-clock" style) plus the date.
+  `'q'`/Ctrl+C quits cleanly. The stub's canned test event (used to prove
+  the push path during Steps 5-6) has since been removed - `clock.cpp`
+  doesn't fire anything unprompted anymore. (The raw-ANSI redraw/
+  `RawTerminal` this originally used is gone - see "Standardized display"
+  below.)
 
 Remaining open items from the steps above: the event/call interleaving gap
 (Step 4/5), and the fact remote tools only register with the main chat
@@ -149,6 +150,73 @@ staying on loopback or actually crossing a network; the only behavior
 difference for a real remote target is that reconnect attempts now fail
 within a bounded 2s instead of either near-instant (loopback) or
 platform-timeout-slow (remote, previously).
+
+### Standardized display (2026-09-13)
+
+Every remote tool with a live terminal UI (`clock`, `presence`, `hue`,
+`rag_tool`) had independently reimplemented the same raw-ANSI redraw loop -
+its own `RawTerminal` (raw termios + cursor hide/show), its own cursor-
+positioning math, its own ad hoc idea of what to show and where. Replaced
+with one shared module, [`tools/olli_display/`](olli_display/olli_display.hpp)
+- the display-side counterpart to `olli_link/` on the networking side - built
+on ncurses (the same from-source static `ncursesw` build `source/
+CMakeLists.txt` already uses for olli's own display, per `BUILD_AND_INSTALL.md`'s
+"Building ncursesw"; see each tool's `Makefile` for the link line).
+
+Every tool's screen now has the same three-part shape, top to bottom:
+
+1. A **tool area** - full width, owned entirely by the tool (clock's digit
+   face, presence's people list, hue's light list, rag_tool's db path/
+   collection count). Fixed height for a tool whose content never changes
+   shape (clock); `OLLI_DISPLAY::set_tool_area_height()` for one that does
+   (presence/hue's lists grow and shrink).
+2. Three fixed one-line fields, common to every tool and never scrolled
+   away, each redrawn only when its value actually changes:
+   **connection** (from `OLLI_LINK::status()`), **profile** (from the last
+   `identity` message), **status** (the last real thing the tool did - a
+   call answered, a timer set, ...).
+3. An **activity area** below that - named lines a tool adds/updates/
+   removes itself as discrete things happen (clock: one line per running
+   timer, counting down, auto-clearing 30s after it fires; presence: one
+   line per home/away transition, same 30s auto-clear; rag_tool: one
+   persistent line for the last periodic sync, no auto-clear since it's
+   infrequent enough to want visible until the next one). hue doesn't use
+   this yet - the flash-cancel timer would be a natural fit, deferred since
+   it needs new state tracking to show a real countdown, not just relaying
+   an existing value.
+
+`identity` handling on all four no longer writes a redundant "Identified:
+X" to the status line - the Profile line already shows that, live, every
+tick; a one-shot status message on top of it just repeated the same fact
+and blotted out whatever real tool activity was there before. Found via
+live testing (`presence` had a worse version of the same bug: a "Polled N
+people" status re-stamped over the status line on literally every tick,
+so a real "Call answered" result never stayed visible longer than 200ms).
+
+Two more bugs found only by actually running these against a real
+terminal, not just compiling:
+- `hue`'s per-light color swatch used to be raw ANSI truecolor escapes
+  (`\033[38;2;r;g;bm...`) baked into the row string - ncurses doesn't
+  interpret escape sequences in `waddstr()`, so this printed as literal
+  garbage. Replaced with real ncurses color pairs, dynamically allocated
+  per unique RGB via `init_extended_color`/`init_extended_pair`. The
+  column where the swatch starts was also being computed as
+  `std::string::size()` (a byte count) rather than actual terminal
+  columns - `brightness_bar()`'s block/shade characters are 3-byte UTF-8
+  but 1 column each, so that overshot by ~20 columns. Fixed with a
+  `display_width()` helper that counts non-continuation UTF-8 bytes
+  instead - same "byte count isn't proportional to column count" pitfall
+  `clock.cpp`'s `BigClock` struct already tracks its own width to avoid.
+- `rag_tool`'s periodic auto-sync calls `sync_profile_collections()`
+  (`tools/rag/rag_db/rag_sync.cpp`, shared with `rag_admin`), which prints
+  a per-file progress line straight to `std::cout` - fine for `rag_admin`'s
+  plain terminal, but a raw stdout write in the middle of an ncurses
+  redraw cycle corrupts the display (ncurses has no idea the write
+  happened, so its next redraw repositions the cursor based on a screen
+  state that's now wrong - confirmed live: a sync produced pages of text
+  scattered at random screen positions). `sync_profile_collections()` and
+  `sync_collection()` both gained a `verbose` parameter (default `true` -
+  `rag_admin`'s call site is unchanged); `rag_tool` passes `false`.
 
 ## Scope (for this first pass)
 

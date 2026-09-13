@@ -37,7 +37,8 @@ None of this needs to be *fully* automated - actually running
 sensitive step (needs its own separate design/authorization conversation,
 not something to sneak in as a side effect of a startup check). Even just
 *detecting* these conditions and printing clear guidance in the same place
-`status`/`conn_status` already render would meaningfully shorten setup for
+the status line (see `OLLI_DISPLAY::set_tool_status()`, `../olli_display/
+olli_display.hpp`) already renders would meaningfully shorten setup for
 whoever's next - the gap is diagnosis, not remediation.
 
 ## Known rough edges from real-world testing (2026-08-24)

@@ -14,7 +14,7 @@
 // Aggregate result of one sync_profile_collections() run. Printing/
 // displaying these is deliberately left to the caller - rag_admin shows
 // them as a one-line human-readable summary; rag_tool folds them into its
-// own status display (due for a redesign of its own, separately).
+// own status display.
 struct RAG_SYNC_STATS {
     int imported = 0;
     int updated = 0;
@@ -43,4 +43,16 @@ struct RAG_SYNC_STATS {
 // waiting - simpler and safer than blocking a process that needs to stay
 // responsive (rag_tool's wire protocol) or than risking two processes
 // racing the same import.
-RAG_SYNC_STATS sync_profile_collections(RAG_DB& db, RAG_EMBEDDER& embedder, const std::string& profile_name);
+//
+// verbose (default true - rag_admin's plain-terminal CLI wants this
+// unchanged) prints a per-file progress line ("foo.txt: unchanged,
+// skipping", etc.) straight to std::cout as it goes. rag_tool passes false:
+// its terminal is ncurses-owned (see olli_display.hpp), and a raw stdout
+// write in the middle of an ncurses redraw cycle corrupts the display -
+// ncurses has no idea the write happened, so its next redraw repositions
+// the cursor based on a screen state that's now wrong (confirmed live: a
+// sync produced pages of text scattered at random screen positions).
+// rag_tool already reports the same per-file information back to olli as
+// this function's summary result and its own activity-area line (see its
+// main()) instead.
+RAG_SYNC_STATS sync_profile_collections(RAG_DB& db, RAG_EMBEDDER& embedder, const std::string& profile_name, bool verbose = true);

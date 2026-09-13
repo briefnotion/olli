@@ -47,7 +47,7 @@ namespace {
     // sync (see sync_profile_collections() below) - a regular collection
     // leaves both at their defaults (no size filter, plain "{}" metadata).
     void sync_collection(RAG_DB& db, RAG_EMBEDDER& embedder, const RAG_COLLECTION& collection, const std::string& dir,
-                          int& imported, int& updated, int& unchanged, int& removed,
+                          int& imported, int& updated, int& unchanged, int& removed, bool verbose,
                           int min_words = 0,
                           const std::function<std::string(const std::string&)>& metadata_for = nullptr)
     {
@@ -62,13 +62,13 @@ namespace {
             if (filename.empty() || filename[0] == '.') continue; // skip hidden files
 
             std::ifstream file(path);
-            if (!file) { std::cout << "  " << filename << ": could not open, skipping\n"; continue; }
+            if (!file) { if (verbose) std::cout << "  " << filename << ": could not open, skipping\n"; continue; }
             std::stringstream buffer;
             buffer << file.rdbuf();
             std::string content = buffer.str();
-            if (trim(content).empty()) { std::cout << "  " << filename << ": empty, skipping\n"; continue; }
+            if (trim(content).empty()) { if (verbose) std::cout << "  " << filename << ": empty, skipping\n"; continue; }
             if (min_words > 0 && word_count(content) < min_words) {
-                std::cout << "  " << filename << ": too short (under " << min_words << " words), skipping\n";
+                if (verbose) std::cout << "  " << filename << ": too short (under " << min_words << " words), skipping\n";
                 continue;
             }
 
@@ -80,22 +80,22 @@ namespace {
 
             if (existing_doc != existing.end()) {
                 if (existing_doc->content_hash == hash) {
-                    std::cout << "  " << filename << ": unchanged, skipping\n";
+                    if (verbose) std::cout << "  " << filename << ": unchanged, skipping\n";
                     unchanged++;
                     continue;
                 }
-                std::cout << "  " << filename << ": changed, reimporting\n";
+                if (verbose) std::cout << "  " << filename << ": changed, reimporting\n";
                 db.delete_document(existing_doc->id);
                 updated++;
             } else {
-                std::cout << "  " << filename << ": new, importing\n";
+                if (verbose) std::cout << "  " << filename << ": new, importing\n";
                 imported++;
             }
 
             std::string metadata_json = metadata_for ? metadata_for(filename) : "{}";
             int document_id = db.add_document(collection.id, filename, path, content, hash, metadata_json);
             if (document_id < 0) {
-                std::cout << "    failed to create document: " << db.last_error() << "\n";
+                if (verbose) std::cout << "    failed to create document: " << db.last_error() << "\n";
                 continue;
             }
 
@@ -104,22 +104,22 @@ namespace {
             for (size_t i = 0; i < chunks.size(); i++) {
                 std::vector<float> embedding = embedder.embed_document(chunks[i]);
                 if (embedding.empty()) {
-                    std::cout << "    embedding failed on chunk " << i << ": " << embedder.last_error() << " - stopping this file\n";
+                    if (verbose) std::cout << "    embedding failed on chunk " << i << ": " << embedder.last_error() << " - stopping this file\n";
                     ok = false;
                     break;
                 }
                 if (!db.add_chunk(document_id, static_cast<int>(i), chunks[i], embedding)) {
-                    std::cout << "    failed to store chunk " << i << ": " << db.last_error() << "\n";
+                    if (verbose) std::cout << "    failed to store chunk " << i << ": " << db.last_error() << "\n";
                     ok = false;
                     break;
                 }
             }
-            std::cout << "    " << (ok ? "stored " : "partially stored ") << chunks.size() << " chunk(s)\n";
+            if (verbose) std::cout << "    " << (ok ? "stored " : "partially stored ") << chunks.size() << " chunk(s)\n";
         }
 
         for (const auto& d : existing) {
             if (sources_on_disk.count(d.source) == 0) {
-                std::cout << "  " << basename_of(d.source) << ": source removed, deleting document\n";
+                if (verbose) std::cout << "  " << basename_of(d.source) << ": source removed, deleting document\n";
                 if (db.delete_document(d.id)) removed++;
             }
         }
@@ -181,7 +181,7 @@ namespace {
     };
 }
 
-RAG_SYNC_STATS sync_profile_collections(RAG_DB& db, RAG_EMBEDDER& embedder, const std::string& profile_name)
+RAG_SYNC_STATS sync_profile_collections(RAG_DB& db, RAG_EMBEDDER& embedder, const std::string& profile_name, bool verbose)
 {
     RAG_SYNC_STATS stats;
 
@@ -199,12 +199,12 @@ RAG_SYNC_STATS sync_profile_collections(RAG_DB& db, RAG_EMBEDDER& embedder, cons
     if (std::filesystem::is_directory(chat_logs_dir)) {
         int conversations_id = db.get_or_create_collection("conversations", "Auto-synced chat history from past conversations with olli.");
         if (conversations_id < 0) {
-            std::cout << "\nFailed to set up the conversations collection: " << db.last_error() << "\n";
+            if (verbose) std::cout << "\nFailed to set up the conversations collection: " << db.last_error() << "\n";
         } else {
             RAG_COLLECTION conversations{conversations_id, "conversations", ""};
-            std::cout << "\n[conversations] " << chat_logs_dir << "\n";
+            if (verbose) std::cout << "\n[conversations] " << chat_logs_dir << "\n";
             sync_collection(db, embedder, conversations, chat_logs_dir, stats.imported, stats.updated, stats.unchanged, stats.removed,
-                             MIN_CHAT_LOG_WORDS, chat_log_metadata);
+                             verbose, MIN_CHAT_LOG_WORDS, chat_log_metadata);
         }
     }
 
@@ -212,14 +212,14 @@ RAG_SYNC_STATS sync_profile_collections(RAG_DB& db, RAG_EMBEDDER& embedder, cons
         if (collection.name == "conversations") continue; // handled above, against chat_logs_dir not collection_dir
 
         std::string dir = profile_collection_dir(profile_name, collection.name);
-        std::cout << "\n[" << collection.name << "] " << dir << "\n";
+        if (verbose) std::cout << "\n[" << collection.name << "] " << dir << "\n";
 
         if (!std::filesystem::is_directory(dir)) {
-            std::cout << "  (folder doesn't exist - skipping)\n";
+            if (verbose) std::cout << "  (folder doesn't exist - skipping)\n";
             continue;
         }
 
-        sync_collection(db, embedder, collection, dir, stats.imported, stats.updated, stats.unchanged, stats.removed);
+        sync_collection(db, embedder, collection, dir, stats.imported, stats.updated, stats.unchanged, stats.removed, verbose);
     }
 
     return stats;

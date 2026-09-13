@@ -677,6 +677,20 @@ void TOOL_TASK_RUNNER::handle_tool(IO_WORKER_CLASS& io_worker, ollama_system& ch
             advance_script_state(state, i, current_input, found_task, instance, instance_comms, tools_list, files_dir, keyboard_was_enabled);
 
             io_worker.exchange(instance_comms, tools_list);
+
+            // Ctrl+C during a running task - exchange() just above relays
+            // it onto instance_comms (this loop passes its own instance_
+            // comms, not the main chat's), where nothing else reads it:
+            // main.cpp's own EXIT_REQUESTED check never gets a turn while
+            // this loop has the main thread blocked. Treat it as "the
+            // command list just ended" rather than plumbing a real olli
+            // shutdown through here - lets a big/runaway automation be
+            // stopped without killing the whole program.
+            if (instance_comms.EXIT_REQUESTED)
+            {
+                instance_comms.EXIT_REQUESTED = false;
+                state = SCRIPT_STATE::DONE;
+            }
         }
 
         // Safety net - WAIT_RESPONSE already joins instance.chat_thread once

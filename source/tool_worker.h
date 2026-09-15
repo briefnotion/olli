@@ -1,0 +1,172 @@
+#ifndef TOOL_WORKER_H
+#define TOOL_WORKER_H
+
+#include <atomic>
+#include <chrono>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "olla.h" // ToolCall
+#include "remote_tools.h" // TOOL_RESULT, TOOL_REMOTE
+#include "threading.h"
+
+/**
+ * TOOL_WORKER_CLASS
+ *
+ * Modeled on IO_WORKER_CLASS (io_worker.h/.cpp): owns a background thread
+ * via thread_main(). Unlike IO_WORKER_CLASS's single combined exchange()
+ * (one relay covering several COMMS fields every tick, because keyboard/
+ * audio genuinely need continuous two-way syncing), this worker's two data
+ * flows are independent and arrive at different rhythms - a call only
+ * happens when the LLM issues one, a result only when one's ready - so
+ * they get their own small functions instead: put_pending_call() and
+ * get_pending_result(). Each does its own INTERUPTED/PROCESSING rendezvous
+ * (same shape as IO_WORKER_CLASS::exchange() - sets INTERUPTED so
+ * thread_main() won't start a new tick, waits for PROCESSING to clear,
+ * then it's safe to touch this worker's own state directly with no mutex
+ * over the data itself) rather than sharing one combined call.
+ */
+class TOOL_WORKER_CLASS
+{
+    private:
+        THREADING_INFO THREAD_CONTROL;
+        std::atomic<bool> INTERUPTED{false};
+        std::atomic<bool> PROCESSING{false};
+
+        bool RUN = false;
+
+        // The communication variables tools_list's calls/results actually
+        // cross put_pending_call()/get_pending_result() through - the same
+        // worker-private copies io_worker's comms_buffer/comms_keyboard/
+        // comms_stt_tts (io_worker.h) are for that class, just two of them
+        // instead of one shared COMMS.
+        //
+        // FIFO: pushed at the back, drained from the front - oldest call/
+        // result serviced first.
+        //
+        // Outgoing: main hands a call off via put_pending_call() for this
+        // thread to actually dispatch to the matching TOOL_REMOTE - reuses
+        // ToolCall (olla.h) rather than inventing a duplicate id/name/
+        // arguments type.
+        std::vector<ToolCall> pending_calls;
+
+        // Incoming: this thread queues a TOOL_RESULT as each one lands, for
+        // get_pending_result() to drain back to main.
+        std::vector<TOOL_RESULT> pending_results;
+
+        // Incoming, same as pending_results but for unsolicited `event`
+        // messages (TOOL_EVENT's own comment, remote_tools.h) - kept
+        // separate since an event isn't a response to any call_id.
+        std::vector<TOOL_EVENT> pending_events;
+
+        // How long a call gets to produce a real result before thread_main()
+        // gives up on it and synthesizes an error TOOL_RESULT instead -
+        // covers both a call nothing ever claims (no connected tool
+        // declares that name) and a call a tool claimed but never answered
+        // (crashed, disconnected, or just never replies). Generous on
+        // purpose: a legitimately busy tool (e.g. rag mid-search) shouldn't
+        // get cut off just because it's slow - a queued call costs nothing
+        // but a slot in a vector while it waits, so there's no pressure to
+        // reclaim it quickly the way a held resource would need.
+        static constexpr int CALL_TIMEOUT_SECONDS = 300;
+
+        // call_id -> when put_pending_call() first queued it. Tracks a
+        // call's whole lifecycle regardless of whether it's still sitting
+        // unclaimed in pending_calls or already claimed as some
+        // TOOL_REMOTE's own awaiting_call_id - thread_main() doesn't need
+        // to know which, just how long it's been waiting. Entry removed as
+        // soon as a real result exists for that call_id (whether or not
+        // main's drained it yet via get_pending_result()), or once
+        // thread_main()'s own timeout sweep gives up on it.
+        std::vector<std::pair<std::string, std::chrono::steady_clock::time_point>> call_deadlines;
+
+        // Fixed set, not tied to any connection - a built-in tool (still
+        // dispatched/run inline on main's own thread, unchanged - see
+        // add_manual_tool_def()'s own comment) has no handshake to learn
+        // its schema from. Already in Ollama's final wrapped schema shape
+        // ({"type":"function","function":{...}}), not the raw wire-protocol
+        // shape a remote tool's own tool_defs has - the caller gets this by
+        // constructing the real tool and calling its own register_tool()
+        // (tools.cpp) into a scratch array, the same call send() used to
+        // make directly, so there's exactly one place that ever describes a
+        // built-in's schema, not two.
+        json manual_tool_defs = json::array();
+
+        // The "identification bubble" for every tool currently available -
+        // both this fixed manual_tool_defs set and every currently-
+        // connected remote tool, combined, and both already in the same
+        // final wrapped shape. Refreshed by thread_main() itself once per
+        // tick from its own local tools_list (each TOOL_REMOTE's own raw
+        // get_tool_defs(), remote_tools.h, wrapped via add_tool() - tools.h
+        // - the same conversion TOOL_REMOTE::register_tool() used to do
+        // itself) plus manual_tool_defs above, so get_registered_tool_defs()
+        // below has something of its own to hand back without reaching
+        // into tools_list directly (that stays local/guarded, same as
+        // IO_WORKER_CLASS::tool_names does for its own list, io_worker.h),
+        // and send() (olla.cpp) can fold the result straight into its own
+        // outgoing tools array with no further conversion needed.
+        json registered_tool_defs = json::array();
+
+        // What thread_main() sends via send_identity() (tools/PROTOCOL.md)
+        // right after a new registration completes - main.cpp has the real
+        // USER_IDENTITY (CLASS_SYSTEM::user, system.h) this thread has no
+        // path to otherwise, so it's handed over once via set_identity()
+        // instead. Default-constructed (empty strings) until that's called.
+        USER_IDENTITY identity;
+
+    public:
+        void thread_start();
+        void thread_stop();
+
+        // Runs on the background thread.
+        void thread_main();
+
+        // Both run on the MAIN/owner thread, called independently as main
+        // actually has something to send/check for - not tied to a fixed
+        // per-tick cadence the way IO_WORKER_CLASS::exchange() is.
+
+        // Registers one manually-inserted tool def, already in Ollama's
+        // final wrapped schema shape (see manual_tool_defs' own comment) -
+        // for a built-in tool whose actual code still runs inline on main's
+        // own thread (tools.cpp), not here; this only makes it show up in
+        // get_registered_tool_defs()'s combined list so send() only has one
+        // source to advertise to Ollama instead of two. Called once per
+        // built-in, before thread_start() (main.cpp) - no lasting harm
+        // calling it later either, same rendezvous guard as the rest.
+        void add_manual_tool_def(const json& def);
+
+        // Seeds manual_tool_defs for every built-in in tools_list, reusing
+        // each real instance's own register_tool() (chat is only needed
+        // because that's register_tool()'s own signature) rather than
+        // duplicating any schema here - same trick add_manual_tool_def()'s
+        // caller used to do inline in main.cpp. Called once, before
+        // thread_start(), same as a manual add_manual_tool_def() call would be.
+        void register_local_tools(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, ollama_system& chat);
+
+        // Sets what a newly-registered remote tool is told via
+        // send_identity() (tools/PROTOCOL.md) - see identity's own comment
+        // above for why this exists. Called once, before thread_start()
+        // (main.cpp) - no lasting harm calling it later either, same
+        // rendezvous guard as the rest.
+        void set_identity(const USER_IDENTITY& user_identity);
+
+        // Queues one call for this worker to dispatch.
+        void put_pending_call(const ToolCall& call);
+
+        // Pops the oldest available result, if any - false (and 'out'
+        // untouched) if nothing's ready yet. Same shape as
+        // IO_WORKER_CLASS::popVocaEvent() (io_worker.h).
+        bool get_pending_result(TOOL_RESULT& out);
+
+        // Same shape as get_pending_result(), for pending_events instead.
+        bool get_pending_event(TOOL_EVENT& out);
+
+        // Snapshot of registered_tool_defs, for main's send() to fold into
+        // its own outgoing tools array. A plain copy, not a pop/drain like
+        // the three above - this is a standing fact ("what's connected right
+        // now"), not a one-shot event, so there's nothing to consume.
+        json get_registered_tool_defs();
+};
+
+#endif

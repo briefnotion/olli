@@ -44,6 +44,17 @@ namespace {
         return home / dir_name;
     }
 
+    // Used for the chat log's speaker label - profile_name is already
+    // lower_case()'d elsewhere (for the olli_files_<name> directory), so the
+    // label needs its own first-letter capitalization to match "Olli: "'s
+    // own capitalization.
+    std::string capitalize_first_letter(std::string text)
+    {
+        if (!text.empty())
+            text[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(text[0])));
+        return text;
+    }
+
     // A persistent, durable record of every restart the supervisor
     // triggers - the std::cerr messages alone only live as long as the
     // terminal/screen session does, which is exactly what left the first
@@ -161,22 +172,22 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         ollama_system chat;
         SIDETRACK_CLASS sidetrack;
         IO_WORKER_CLASS io_worker; // keyboard input + screen display - see io_worker.h
+        TOOL_WORKER_CLASS tool_worker; // remote-tool communications - see tool_worker.h
 
-        // The main chat's real tools_list - the 3 built-ins plus every
-        // remote tool that registers over its lifetime (see the remote-tool
-        // handshake below). Declared here, not owned by 'chat' itself - see
-        // process()'s comment in olla.h for why tools_list moved to a
-        // reference parameter rather than living on ollama_system.
+        // The main chat's real tools_list - the 4 built-ins. Declared here,
+        // not owned by 'chat' itself - see process()'s comment in olla.h for
+        // why this is a reference parameter rather than living on
+        // ollama_system. Remote tools live in tool_worker's own separate
+        // tools_list instead (tool_worker.cpp) - this one never holds one.
         std::vector<std::unique_ptr<TOOL_BASE>> tools_list;
         populate_default_tools(tools_list);
 
+        // --- system: profile/settings ---
         system.setings_vars.profile_name = profile_name;
         system.user.name = profile_name;
 
         system.setings_vars.load_settings();
         std::filesystem::path settings_path = system.setings_vars.get_settings_path();
-
-        chat.PROPS.OLLI_DIRECTORY = settings_path;
 
         // Raw, unfiltered debug log of every message any ollama_system
         // instance ever creates (main chat, sidetrack, task-runner
@@ -187,6 +198,13 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         // LLM-written summary in the live history/history.json - this is
         // the one place the full, original wording survives afterward.
         DEBUG_LOG_CLASS::instance().reset(settings_path / "debug_full_history.txt");
+
+        // --- chat ---
+        chat.PROPS.OLLI_DIRECTORY = settings_path;
+        chat.PROPS.web_search_api_key = system.setings_vars.tool_web_search_apiKey;
+        chat.PROPS.use_thinking = false;
+        chat.PROPS.model = "qwen3:8b";
+        chat.debug_label = "chat";
 
         // Wiped fresh on every startup too, same reasoning as
         // debug_full_history.txt above - chat.open() (below) loads this via
@@ -199,25 +217,6 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         // empty-but-present file would hit its catch block instead.
         std::filesystem::remove(settings_path / "history.json");
 
-        // Flat-text, human-readable transcript (speaker labels, "Olli: " for
-        // the assistant) kept independent of history.json's own structured,
-        // periodically-rewritten persistence - see
-        // OUTPUT_CLASS::append_to_chat_log() in user_io.cpp.
-        io_worker.output.chat_log_path = settings_path / "chat_log.txt";
-        if (!profile_name.empty())
-        {
-            // profile_name is already lower_case()'d above (for the
-            // olli_files_<name> directory) - capitalize just the first letter
-            // for the log label, matching "Olli: "'s own capitalization.
-            std::string label = profile_name;
-            label[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(label[0])));
-            io_worker.output.chat_log_user_label = label;
-        }
-        chat.PROPS.web_search_api_key = system.setings_vars.tool_web_search_apiKey;
-
-        chat.PROPS.use_thinking = false;
-        chat.PROPS.model = "qwen3:8b";
-        chat.debug_label = "chat";
         chat.open(tools_list);
         DEBUG_LOG_CLASS::instance().log_event("chat", "instance created");
 
@@ -225,6 +224,19 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         {
             chat.log("[System] Recovered from a previous crash - starting fresh.\n");
         }
+
+        // --- sidetrack ---
+        sidetrack.create(chat.PROPS);
+
+        // --- io_worker: keyboard input + screen display ---
+
+        // Flat-text, human-readable transcript (speaker labels, "Olli: " for
+        // the assistant) kept independent of history.json's own structured,
+        // periodically-rewritten persistence - see
+        // OUTPUT_CLASS::append_to_chat_log() in user_io.cpp.
+        io_worker.output.chat_log_path = settings_path / "chat_log.txt";
+        if (!profile_name.empty())
+            io_worker.output.chat_log_user_label = capitalize_first_letter(profile_name);
 
         // TTS output no longer needs wiring up here - COMMS::audio is gone;
         // IO_WORKER_CLASS::thread_main() (io_worker.cpp) copies chat.comms's
@@ -243,14 +255,32 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         // per-profile directory (see Settings::get_shared_path()).
         io_worker.create(system.setings_vars.get_shared_path());
 
-        sidetrack.create(chat.PROPS);
-
         io_worker.key_input.PROPS.ENABLED = true;
         // Under ncurses, keyboard_input()'s own raw per-character echo would
         // corrupt the ncurses-controlled screen - the input window renders the
         // typed line itself instead (see display_with_ncurses()).
         io_worker.key_input.PROPS.RAW_ECHO = !USE_NCURSES;
+
+        // Needs chat.open() to have already run - see IO_WORKER_CLASS::
+        // thread_main()'s own comment for why its very first tick flushing
+        // chat.open()'s startup log depends on that ordering.
         io_worker.thread_start();
+
+        // --- tool_worker: remote-tool communications ---
+
+        // Built-ins are back in tools_list/dispatch_tool_call() (olla.h), but
+        // tool_worker's own registry never learns about them on its own -
+        // see register_local_tools()'s own comment (tool_worker.h).
+        tool_worker.register_local_tools(tools_list, chat);
+
+        // Tell tool_worker who's running olli right now, same info main's
+        // old registration code used to send directly (see tools/
+        // PROTOCOL.md's "identity" message and TOOL_REMOTE::send_identity()'s
+        // comment, remote_tools.h) - before thread_start(), so the very
+        // first registration already has it rather than the empty default.
+        tool_worker.set_identity(system.user);
+
+        tool_worker.thread_start();
 
         // No separate priming call needed here (there used to be one - a
         // one-off get_response()+display() to flush chat.open()'s startup
@@ -274,45 +304,18 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         // which stops an in-flight response before returning (see olla.cpp).
         while (chat.running)
         {
-            // Non-blocking check for a remote tool completing its registration
-            // handshake (see system.remote_tools' declaration in system.h and
-            // tools/PROTOCOL.md) - if one just did, hand it to chat as a real
-            // tool. Scoped to the main chat instance only for now, not
-            // background task-runner/jump instances - see PROTOCOL.md's Scope
-            // section. Unrelated to IO - stays here rather than moving onto
-            // io_worker.
-            auto remote_registration = system.remote_tools.poll();
-            if (remote_registration.has_value())
-            {
-                chat.log("[RemoteTools] Registered " +
-                    std::to_string(remote_registration->tools.size()) + " tool(s)\n");
-
-                auto remote_tool = std::make_unique<TOOL_REMOTE>(
-                    remote_registration->fd, std::move(remote_registration->tools));
-
-                // Tell it who's running olli right now - see tools/PROTOCOL.md's
-                // "identity" message and TOOL_REMOTE::send_identity()'s comment
-                // (remote_tools.h). Sent once, right after registration - a
-                // reconnect re-registers from scratch, so it lands here again
-                // naturally rather than needing its own separate trigger.
-                remote_tool->send_identity(system.user.name, system.user.full_name, system.user.about);
-
-                // tools_list_mutex (olla.h) - a push_back can reallocate the
-                // vector's storage, which would yank it out from under
-                // ollama_system::send()'s register_tool loop if that's
-                // concurrently iterating it on some instance's chat_thread.
-                {
-                    std::lock_guard<std::mutex> lock(tools_list_mutex);
-                    tools_list.push_back(std::move(remote_tool));
-                }
-            }
+            // Remote-tool registration used to be polled here
+            // (system.remote_tools.poll(), tools/PROTOCOL.md) and pushed
+            // into tools_list - that whole handshake now happens inside
+            // TOOL_WORKER_CLASS::thread_main() itself (tool_worker.cpp),
+            // continuously on its own thread rather than once per tick here.
 
             // Keyboard, voice, and screen drawing all happen entirely on
             // io_worker's own background thread now (see io_worker.h's
             // class comment). This relays whatever it staged this tick
             // (a submitted line, a stop-request, an exit-request) into
             // chat.comms.
-            io_worker.exchange(comms, tools_list);
+            io_worker.exchange(comms, &tool_worker);
 
             // Ctrl+C - see COMMS::EXIT_REQUESTED's comment (comms.h) for
             // why this needs its own handling instead of a real SIGINT.
@@ -330,16 +333,16 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
             // Returns true once a full response cycle has completed (see
             // olla.cpp for the exact conditions), at which point we're
             // ready for new input.
-            bool response_complete = chat.input(comms, tools_list);
+            bool response_complete = chat.input(comms, &tool_worker);
 
             // Dispatches any pending tool calls, flushes new text to TTS
             // (write_to_tts), periodically writes history to disk if it
             // changed. See ollama_system::process in olla.cpp.
-            chat.process(io_worker, &system, tools_list, comms);
+            chat.process(io_worker, &system, tools_list, &tool_worker, comms);
 
             // Runs sidetrack's main-thread half of both routines' state
             // machines - see SIDETRACK_CLASS::check's doc comment.
-            sidetrack.check(io_worker, chat, comms, tools_list, &system);
+            sidetrack.check(io_worker, chat, comms, tools_list, &tool_worker, &system);
 
             //if (sidetrack.SIGNALS.CONTEXT_CLEARED_SIGNAL)
             //{
@@ -390,6 +393,7 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         // matters) - no separate audio thread_stop() call needed anymore.
         // See IO_WORKER_CLASS's class comment (io_worker.h).
         io_worker.thread_stop();
+        tool_worker.thread_stop();
 
         // Hand the real terminal screen back before printing any of the
         // shutdown messages below - otherwise they'd print while ncurses'

@@ -27,6 +27,7 @@ using json = nlohmann::json;
 class ollama_system;
 class CLASS_SYSTEM; // see the CLASS_SYSTEM* parameter's comment on TOOL_BASE::check() (tools.h)
 class OUTPUT_CLASS; // for pull_background_output() below - see user_io.h (now reached via IO_WORKER_CLASS, not CLASS_SYSTEM)
+class TOOL_WORKER_CLASS; // nullable pointer, same reasoning as CLASS_SYSTEM* above - see process()'s own comment below
 
 // Declared before Message - Message::tool_calls (below) holds a vector of
 // these, and needs the type (and its own JSON (de)serialization) already
@@ -240,13 +241,16 @@ class ollama_system {
 
         // Shared by both call sources handle_instance_tools() drains (the
         // model's own last_received.tool_calls, and the system-injected
-        // pending_tool_calls) - same cap check, same tools_list dispatch,
-        // same "unrecognized name" fallback either way.
-        // 'system' is just forwarded to each tool's check() - see that
-        // parameter's own comment on TOOL_BASE::check() (tools.h). 'tools_list'
-        // is the caller's own - see its comment on process() below for why
-        // this is a reference parameter now, not a member.
-        void dispatch_tool_call(IO_WORKER_CLASS& io_worker, const ToolCall& tc, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms);
+        // pending_tool_calls) - same cap check, same dispatch, same
+        // "unrecognized name" fallback either way.
+        // 'system' is nullable, forwarded to each tool's check() - see
+        // TOOL_BASE::check()'s comment (tools.h). 'tools_list' is the
+        // caller's own built-ins, tried first via each tool's own check().
+        // 'tool_worker' is the caller's own, also nullable - if nothing in
+        // tools_list claims tc.name, it's queued there via
+        // put_pending_call() instead when non-null; "not recognized" only if
+        // neither claims it.
+        void dispatch_tool_call(IO_WORKER_CLASS& io_worker, const ToolCall& tc, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms);
 
         bool saveHistoryToJson(std::filesystem::path filepath);
         bool loadHistoryFromJson(std::filesystem::path filepath);
@@ -271,11 +275,10 @@ class ollama_system {
 
         // 'system' is the one real CLASS_SYSTEM for the process, or nullptr
         // where there isn't one to give (see TOOL_BASE::check()'s comment in
-        // tools.h) - just forwarded down to dispatch_tool_call() for each
-        // tool's check()/monitor_tool(). 'tools_list' is the caller's own -
-        // see process()'s comment below for why this moved to a reference
-        // parameter instead of living on ollama_system.
-        void handle_instance_tools(IO_WORKER_CLASS& io_worker, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms);
+        // tools.h) - forwarded down to dispatch_tool_call(). 'tools_list'/
+        // 'tool_worker' are the caller's own, also nullable/reference the
+        // same way - see process()'s own comment below.
+        void handle_instance_tools(IO_WORKER_CLASS& io_worker, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms);
 
         // Explicit flush to disk, e.g. right after consolidation commits or on shutdown.
         void save_history();
@@ -401,20 +404,16 @@ class ollama_system {
         // this, to run an automation sequence without blocking chat.
         std::pair<ollama_system&, COMMS&> spawn_background_task();
 
-        // 'tools_list' is now owned by the caller, not this instance (see
-        // process()'s comment below for why) - each of these three tools_list-
-        // touching entry points takes it as a reference. A remote tool joins
-        // simply by tools_list.push_back()-ing directly into the caller's own
-        // vector (source/remote_tools.h's registration handshake, main.cpp);
-        // that takes effect on the next send() call, which rebuilds the
-        // tools array sent to Ollama from tools_list fresh every time (see
-        // the comment there) rather than once at open().
+        // 'tools_list' is the caller's own built-ins - each one's
+        // configure() runs here, once, before anything else touches it. A
+        // remote tool's own registration (tool_worker.h/.cpp) doesn't route
+        // through open() at all, so this never needed tool_worker.
         void open(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list);
         void open(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, OLLAMA_SYSTEM_PROPERTIES Properties);
 
         string gather_history();
-        void integrate_tool_result(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms, std::string Special_Instruction, const std::string& raw_result);
-        void send(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms, const std::string& role);
+        void integrate_tool_result(TOOL_WORKER_CLASS* tool_worker, COMMS& comms, std::string Special_Instruction, const std::string& raw_result);
+        void send(TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const std::string& role);
         void send_tool_result(const std::string& tool_call_id, const std::string& result);
 
         // Helper to reset the signal
@@ -436,7 +435,7 @@ class ollama_system {
         void update_status();
 
         bool jump_input(COMMS& comms);
-        bool input(COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list);
+        bool input(COMMS& comms, TOOL_WORKER_CLASS* tool_worker);
 
         // 'system' is nullable and just threaded down to handle_instance_tools()
         // and each tool's monitor_tool() - see TOOL_BASE::check()'s comment in
@@ -458,7 +457,16 @@ class ollama_system {
         // private one, the automation instance's own local one) supplies a
         // real, always-valid tools_list of its own - never null, because a
         // reference can't be.
-        void process(IO_WORKER_CLASS& io_worker, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms);
+        //
+        // 'tool_worker' is nullable the same way 'system' is, for the same
+        // reason - there's only ever one real TOOL_WORKER_CLASS (main.cpp's
+        // own, owning the actual remote-tool connections). Most sub-agent
+        // instances pass nullptr, but not all: sidetrack's second-guess
+        // review and a running TOOL_TASK_RUNNER/TOOL_DELEGATOR script's own
+        // sub-instance deliberately get the real one too, same reasoning as
+        // their own real tools_list - so a remote-tool call made from
+        // inside either has somewhere to actually go, not just built-ins.
+        void process(IO_WORKER_CLASS& io_worker, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms);
 
 };
 
@@ -487,21 +495,16 @@ inline std::mutex history_mutex;
 // above - kept separate from history_mutex there too, so locking one doesn't block
 // the other.
 
-// Same 'inline' reasoning again, this time for main.cpp's one real
-// tools_list (std::vector<std::unique_ptr<TOOL_BASE>>, passed around by
-// reference everywhere rather than living on this class - see
-// populate_default_tools()'s comment above). Confirmed by a live crash:
-// ollama_system::send() (olla.cpp) rebuilds the tools schema by iterating
-// tools_list on whatever thread is driving that instance's own chat_thread,
-// while process() (olla.cpp) can concurrently erase a disconnected
-// TOOL_REMOTE from the very same vector on the main thread - caught with
-// gdb as a null unique_ptr dereference mid-iteration. Only guards the
-// mutation sites (send()'s register_tool loop, process()'s erase, and
-// main.cpp's push_back when a new remote tool connects) - NOT
-// monitor_tool()'s own loop, which can recurse back into send() (a pushed
-// event -> integrate_tool_result() -> send()) on the same thread and would
-// self-deadlock against a lock held across that whole loop.
-inline std::mutex tools_list_mutex;
+// A mutex used to live here (tools_list_mutex) guarding main.cpp's one real
+// tools_list against a live crash: send() (olla.cpp) rebuilding the tools
+// schema by iterating tools_list on one thread, while process() (olla.cpp)
+// concurrently erased a disconnected TOOL_REMOTE from the same vector on
+// the main thread - caught with gdb as a null unique_ptr dereference
+// mid-iteration. That whole race is gone now, not just guarded: a
+// TOOL_REMOTE never lives in tools_list at all anymore, only inside
+// TOOL_WORKER_CLASS's own thread-local tools_list (tool_worker.cpp), reached
+// exclusively through its own INTERUPTED/PROCESSING rendezvous - the same
+// job this mutex used to do, done by construction instead of a lock.
 
 // The text-to-speech output hook used to live here as a single process-wide
 // global (g_audio_control), then later as a per-instance COMMS::audio

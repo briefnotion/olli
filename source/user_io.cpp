@@ -471,7 +471,8 @@ void KEYBOARD_INPUT::keyboard_input()
                     {
                         if (code == '5' || code == '6')
                         {
-                            read(STDIN_FILENO, &tilde, 1); // consume trailing '~'
+                            ssize_t discard = read(STDIN_FILENO, &tilde, 1); // consume trailing '~'
+                            (void)discard;
                             SCROLL_REQUEST = (code == '5') ? SCROLL_KEY::PAGE_UP : SCROLL_KEY::PAGE_DOWN;
                         }
                         // any other CSI code (arrow keys, Home/End, ...) -

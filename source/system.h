@@ -4,7 +4,6 @@
 #include <string>
 
 #include "helper_olli.h"
-#include "remote_tools.h"
 
 class CLASS_SYSTEM
 {
@@ -27,15 +26,12 @@ class CLASS_SYSTEM
         // setings_vars.profile_name is resolved.
         USER_IDENTITY user;
 
-        // Accepts remote-tool connections (see tools/PROTOCOL.md and
-        // remote_tools.h) - polled once per main-loop tick in main.cpp. A
-        // passive resource like audio_control/key_input above, not business
-        // logic (unlike ollama_system/SIDETRACK_CLASS, which stay separate
-        // and take CLASS_SYSTEM& as a parameter instead of living on it) -
-        // moved here so anything that ever needs to see every connected
-        // remote tool, not just the one that just finished registering,
-        // has somewhere to reach it from.
-        REMOTE_TOOL_LISTENER remote_tools;
+        // Remote-tool connections used to be accepted here
+        // (REMOTE_TOOL_LISTENER remote_tools, tools/PROTOCOL.md/
+        // remote_tools.h) - that listening socket now lives inside
+        // TOOL_WORKER_CLASS's own thread_main() instead (tool_worker.h/
+        // .cpp), which owns and services it continuously on its own
+        // background thread rather than once per main-loop tick.
 };
 
 #endif

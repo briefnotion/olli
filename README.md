@@ -194,7 +194,10 @@ lifecycle: it connects to olli over a small TCP protocol, registers whatever
 it wants to expose exactly the way a built-in tool would (`TOOL_REMOTE`,
 `source/remote_tools.h`/`.cpp`, never knows or cares what program it's
 proxying for), and can run before olli even starts, keep going if olli isn't
-reachable, and reconnect automatically once it is. Full wire protocol in
+reachable, and reconnect automatically once it is. All of this - listening
+for new connections, polling each one, matching calls to results - runs on
+`TOOL_WORKER_CLASS`'s own background thread (`source/tool_worker.h`/`.cpp`),
+independent of whatever the main chat thread is doing. Full wire protocol in
 [`tools/PROTOCOL.md`](tools/PROTOCOL.md).
 
 olli listens for these on **port 47601**, loopback-only for now (see
@@ -450,6 +453,11 @@ source/
 │                               background thread - see Display below. AUDIO_CONTROL_CLASS/
 │                               audio_control.{h,cpp}/tts.{hpp,cpp}/voca.{hpp,cpp} are gone
 │                               (2026-08-28) - folded in here entirely.
+├── tool_worker.{h,cpp}         TOOL_WORKER_CLASS: owns all remote-tool wire communication (see
+│                               Remote tools below) on its own background thread, same
+│                               atomics-rendezvous shape as IO_WORKER_CLASS above. Built-in
+│                               tools still dispatch inline on main's own thread (tools.cpp) -
+│                               this only advertises them alongside the remote ones.
 ├── web_server.{h,cpp}          WEB_SERVER_CLASS: the browser-driven web interface - see
 │                               Web interface below.
 ├── sidetrack.{h,cpp}          Background thread: consolidation, "second guess", idle auto-clear.
@@ -460,8 +468,9 @@ source/
 ├── stringthings.{h,cpp}       General-purpose string utility library.
 ├── fled_time.{h,cpp}          Timing / frame-pacing helpers used by the background threads.
 ├── threading.{h,cpp}          Thin std::async thread wrapper.
-├── system.h                   Aggregates Settings + user identity + remote-tool listener into
-│                               one object (keyboard/display/audio moved to IO_WORKER_CLASS above).
+├── system.h                   Aggregates Settings + user identity into one object (keyboard/
+│                               display/audio moved to IO_WORKER_CLASS, remote-tool listener
+│                               moved to TOOL_WORKER_CLASS, both above).
 └── CMakeLists.txt             Build definition.
 ```
 

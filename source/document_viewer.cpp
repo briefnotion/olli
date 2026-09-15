@@ -97,7 +97,8 @@ namespace {
                 case '1': case '4': case '5': case '6':
                 {
                     char tilde = 0;
-                    read(STDIN_FILENO, &tilde, 1); // consume trailing '~'
+                    ssize_t discard = read(STDIN_FILENO, &tilde, 1); // consume trailing '~'
+                    (void)discard;
                     if (code == '1') return { DV_KEY::HOME, 0 };
                     if (code == '4') return { DV_KEY::END, 0 };
                     return { (code == '5') ? DV_KEY::PAGE_UP : DV_KEY::PAGE_DOWN, 0 };

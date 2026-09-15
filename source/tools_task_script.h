@@ -16,6 +16,7 @@
 class ollama_system;
 class COMMS;
 class TOOL_BASE;
+class TOOL_WORKER_CLASS;
 
 // The states TOOL_TASK_RUNNER::handle_tool()'s while loop (tools.cpp) steps
 // through to drive one .task script from GET_COMMAND to DONE.
@@ -83,7 +84,7 @@ void command_plain(SCRIPT_STATE& state, std::string& current_input, const std::s
 void command_get_command(SCRIPT_STATE& state, size_t& i, std::string& current_input, const TASK_SIMPLE& found_task, ollama_system& instance, COMMS& instance_comms, const std::filesystem::path& files_dir, bool& keyboard_was_enabled);
 void command_wait_enter(SCRIPT_STATE& state, size_t& i, COMMS& instance_comms, bool& keyboard_was_enabled);
 void command_wait_ask(SCRIPT_STATE& state, std::string& current_input, COMMS& instance_comms, bool& keyboard_was_enabled);
-void command_execute_command(SCRIPT_STATE& state, const std::string& current_input, ollama_system& instance, COMMS& instance_comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list);
+void command_execute_command(SCRIPT_STATE& state, const std::string& current_input, ollama_system& instance, COMMS& instance_comms, TOOL_WORKER_CLASS* tool_worker);
 void command_wait_response(SCRIPT_STATE& state, size_t& i, ollama_system& instance);
 
 // Drives the state machine one tick - called once per iteration of
@@ -92,6 +93,9 @@ void command_wait_response(SCRIPT_STATE& state, size_t& i, ollama_system& instan
 // keyboard_was_enabled is TOOL_TASK_RUNNER::handle_tool()'s own persistent
 // local (declared alongside i/current_input/state), threaded through the
 // same way - see command_pause()'s own comment for what it's for.
-void advance_script_state(SCRIPT_STATE& state, size_t& i, std::string& current_input, const TASK_SIMPLE& found_task, ollama_system& instance, COMMS& instance_comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, const std::filesystem::path& files_dir, bool& keyboard_was_enabled);
+// tool_worker is the caller's own (nullable) - only EXECUTE_COMMAND
+// actually needs it (forwarded to command_execute_command()'s own send()
+// call), but every state gets it passed down for a uniform signature.
+void advance_script_state(SCRIPT_STATE& state, size_t& i, std::string& current_input, const TASK_SIMPLE& found_task, ollama_system& instance, COMMS& instance_comms, TOOL_WORKER_CLASS* tool_worker, const std::filesystem::path& files_dir, bool& keyboard_was_enabled);
 
 #endif

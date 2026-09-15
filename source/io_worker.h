@@ -18,6 +18,7 @@
 
 class ollama_system;
 class TOOL_BASE;
+class TOOL_WORKER_CLASS;
 
 #define DEF_VOCA_SLEEP  0
 #define DEF_VOCA_PAUSE  1
@@ -305,10 +306,10 @@ class IO_WORKER_CLASS
         std::atomic<bool> INTERUPTED{false};
         std::atomic<bool> PROCESSING{false};
 
-        // Just the names of whatever's in the caller's tools_list (see
-        // exchange()'s comment in the .cpp), for the right-side tools panel
-        // (OUTPUT_CLASS::display_with_ncurses()). Copied fresh every
-        // exchange() call, on the main thread, while
+        // Just the names of whatever's currently registered with the
+        // caller's tool_worker (see exchange()'s comment in the .cpp), for
+        // the right-side tools panel (OUTPUT_CLASS::display_with_ncurses()).
+        // Copied fresh every exchange() call, on the main thread, while
         // thread_main() is confirmed not running (same PROCESSING-wait
         // synchronization exchange() already does for `comms_buffer`) - this
         // worker's own thread only ever reads it, never writes it, so no
@@ -497,11 +498,13 @@ class IO_WORKER_CLASS
         // Runs on the MAIN/owner thread - call once per its own loop tick,
         // passing the real comms (see this class's own comment for why
         // that's the only thing that crosses this boundary) and the main
-        // chat's own tools_list (see process()'s comment in olla.h for why
-        // that's a reference parameter, not owned by ollama_system) -
-        // copies each tool's own registered names (TOOL_BASE::
-        // tool_functions) into tool_names for the ncurses tools panel.
-        void exchange(COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list);
+        // chat's own tool_worker (nullable - see process()'s comment in
+        // olla.h for why) - copies every currently-registered tool's name,
+        // built-in and remote alike (TOOL_WORKER_CLASS::
+        // get_registered_tool_defs() - main.cpp seeds the built-ins into
+        // this same registry at startup, so it's already the combined
+        // list), into tool_names for the ncurses tools panel.
+        void exchange(COMMS& comms, TOOL_WORKER_CLASS* tool_worker);
 };
 
 #endif

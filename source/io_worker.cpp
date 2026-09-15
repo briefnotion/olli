@@ -4,6 +4,7 @@
 #include <thread>
 
 #include "olla.h"
+#include "tool_worker.h"
 
 #include <fcntl.h>
 #include <signal.h>
@@ -1295,7 +1296,7 @@ void IO_WORKER_CLASS::thread_main()
     web_server.reset();
 }
 
-void IO_WORKER_CLASS::exchange(COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list)
+void IO_WORKER_CLASS::exchange(COMMS& comms, TOOL_WORKER_CLASS* tool_worker)
 {
     if (!PROPS.BLOCKING) return;
 
@@ -1311,14 +1312,17 @@ void IO_WORKER_CLASS::exchange(COMMS& comms, std::vector<std::unique_ptr<TOOL_BA
 
     // Safe to touch tool_names here - thread_main() is confirmed not
     // running (the wait above), so this doesn't race its own read of
-    // tool_names down in the display step. Each tool's own tool_functions
-    // (TOOL_BASE, tools.h) already holds whatever names its last
-    // register_tool() call registered - no need to call register_tool()
-    // again here just to re-derive them into a throwaway json array.
+    // tool_names down in the display step. get_registered_tool_defs()
+    // does its own separate INTERUPTED/PROCESSING rendezvous with
+    // tool_worker's own thread - unrelated to this one, no deadlock risk.
+    // Already the combined built-in + remote list - main.cpp seeds the
+    // built-ins into tool_worker's own registry at startup.
     tool_names.clear();
-    for (auto& tool : tools_list)
-        for (auto& name : tool->tool_functions)
-            tool_names.push_back(name);
+    if (tool_worker)
+    {
+        for (auto& def : tool_worker->get_registered_tool_defs())
+            tool_names.push_back(def.value("function", json::object()).value("name", ""));
+    }
 
     // Output direction: comms (real, owned by main_process()) -> comms_buffer
     // (this worker's own copy). Used to also fan out a second copy directly

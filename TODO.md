@@ -394,6 +394,73 @@ not needed elsewhere.
   - **Done 2026-09-02: the task-runner display bug below.**
   - General polish pass over the existing tool set (Hue lights, timers, web
     search, task runner) beyond the structural rework itself.
+  - **Done 2026-09-15: remote-tool communication moved to its own thread,
+    `TOOL_WORKER_CLASS` (`source/tool_worker.h`/`.cpp`).** The real bug this
+    fixed wasn't a crash - remote-tool results/events arriving while main's
+    own thread was busy (streaming a response, blocked in a task-runner
+    script) used to just sit unpolled until the next `process()` tick got
+    around to them, since the old dispatch/monitor loop
+    (`ollama_system::dispatch_tool_call()`/`TOOL_REMOTE::monitor_tool()`,
+    `tools.cpp`/`remote_tools.cpp`) only ever ran inline on that same
+    thread. Modeled directly on `IO_WORKER_CLASS` (`io_worker.h`/`.cpp`):
+    its own background thread, the same INTERUPTED/PROCESSING atomics
+    rendezvous for cross-thread handoff (no mutex over the worker's own
+    state - `set_identity()`/`put_pending_call()`/`get_pending_result()`/
+    `get_pending_event()`/`get_registered_tool_defs()` each do their own
+    short wait-then-touch, mirroring `exchange()`'s shape), and no global
+    state - every function takes what it needs as a parameter, same as the
+    rest of this rework.
+    - **`TOOL_REMOTE` gained a non-blocking `poll_communications()`**
+      (`remote_tools.h`/`.cpp`), driven purely by `pending_calls`/
+      `pending_results`/`pending_events` vectors with no `chat`/`comms`
+      dependency at all - added alongside the old blocking `check()`/
+      `monitor_tool()` rather than replacing them (both still compile and
+      still work; nothing currently calls them outside sidetrack's own
+      historical path, kept rather than deleted per this project's usual
+      caution around code real remote tools - clock/hue/presence/rag -
+      still depend on being correct).
+    - **One unified call-timeout** (`CALL_TIMEOUT_SECONDS = 300`,
+      `call_deadlines` tracked by call_id) covers both a call nothing ever
+      claims and a call claimed but abandoned - previously two different
+      failure shapes with no single mechanism catching both.
+    - **One unified tool-advertisement registry**
+      (`registered_tool_defs`/`manual_tool_defs`), rebuilt every tick from
+      whatever's actually connected plus the built-ins - `send()`
+      (`olla.cpp`) now reads only from `tool_worker->get_registered_tool_defs()`
+      instead of separately walking `tools_list`. Built-ins are seeded once
+      via `register_local_tools()`, reusing each real tool instance's own
+      `register_tool()` (no schema duplicated anywhere).
+    - **Built-ins (`TOOL_SET_THINKING_MODE`/`TOOL_WEB_SEARCH`/
+      `TOOL_DELEGATOR`/`TOOL_TASK_RUNNER`) still dispatch inline on main's
+      own thread**, through the same `tools_list`+`check()`-loop dispatcher
+      as before - deliberately not folded into tool_worker's queue, since
+      they have real reasons to run on main's thread (e.g. `TOOL_DELEGATOR`/
+      `TOOL_TASK_RUNNER` spawning their own sub-agent `ollama_system`
+      instances). `dispatch_tool_call()` tries the built-in loop first,
+      falling through to `tool_worker->put_pending_call()` only if nothing
+      claimed it. This required threading a nullable `TOOL_WORKER_CLASS*`
+      all the way into `TOOL_BASE`'s own virtual interface
+      (`check()`/`monitor_tool()`, not just `dispatch_tool_call()`'s level)
+      - needed once a running task-runner script's own sub-instance can
+      itself call another task/delegator, which needs real access to
+      `tool_worker` too, not `nullptr` (same nullable-pointer convention
+      `CLASS_SYSTEM*` already uses, and the same kind of deliberate
+      exception to it sidetrack's second-guess review already has).
+    - **`tools_list_mutex` removed entirely** (was guarding 3 sites,
+      see the 2026-09-05 race-crash entry below) - now genuinely dead, since
+      tool_worker's own rendezvous is what actually prevents concurrent
+      access to shared tool state, not a mutex over `tools_list` itself.
+    - Live-verified end-to-end against real profiles/real remote tools
+      (clock, hue, presence, rag) before this landed - registration,
+      non-blocking servicing, timeout, event routing, and built-in dispatch
+      all confirmed via `debug_full_history.txt`, not just a clean compile.
+    - **Known, deliberately deferred, not designed yet**: `pending_events`/
+      `pending_results` have no correlation to "which conversation" is
+      waiting on them, so whichever `ollama_system::process()` call reaches
+      them first (often a blocked sub-agent's own fast inner loop) drains
+      them - a pre-existing characteristic (the old `monitor_tool()` had the
+      same race), not a regression. Plan is script-defined behavior for an
+      out-of-script tool event/result, not yet designed.
 
 ## Session & model behavior
 
@@ -1549,6 +1616,14 @@ it can actually act under its persona's judgment, not just talk about it.
 
 ### Live crash caught and fixed: unsynchronized `tools_list`; build version display; task-runner file I/O (2026-09-05)
 
+- **`tools_list_mutex` superseded 2026-09-15** - removed entirely as part of
+  the `TOOL_WORKER_CLASS` rewrite (see the Tools rework section above). The
+  race this guarded against structurally can't happen anymore: remote-tool
+  state now lives in `tool_worker`'s own thread-local `tools_list`, reachable
+  from outside only through its INTERUPTED/PROCESSING rendezvous, not a
+  shared vector multiple threads could iterate/erase/push_back on at once.
+  Root-cause analysis below is still accurate history, just describing a
+  problem that no longer exists in the current design.
 - **The crash.** A real, reproducible SIGSEGV, caught live with `gdb -p`
   attached to a running `ron` session (no core dump otherwise - apport
   skips unpackaged binaries). Backtrace landed in `ollama_system::send()`

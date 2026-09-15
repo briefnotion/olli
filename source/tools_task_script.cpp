@@ -324,7 +324,7 @@ void command_wait_ask(SCRIPT_STATE& state, std::string& current_input, COMMS& in
     }
 }
 
-void command_execute_command(SCRIPT_STATE& state, const std::string& current_input, ollama_system& instance, COMMS& instance_comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list)
+void command_execute_command(SCRIPT_STATE& state, const std::string& current_input, ollama_system& instance, COMMS& instance_comms, TOOL_WORKER_CLASS* tool_worker)
 {
     instance_comms.INPUT_FROM_LLM = "--------------------------\nINPUT: " + current_input + "\n";
     instance_comms.INPUT_FROM_USER = current_input;
@@ -340,9 +340,12 @@ void command_execute_command(SCRIPT_STATE& state, const std::string& current_inp
     instance.status.interrupt_signal = false;
     instance.is_processing = true;
     if (instance.chat_thread.joinable()) instance.chat_thread.join();
-    instance.chat_thread = std::thread([&instance, &instance_comms, &tools_list]()
+    instance.chat_thread = std::thread([&instance, tool_worker, &instance_comms]()
     {
-        instance.send(tools_list, instance_comms, "user");
+        // Real tool_worker, not nullptr - the caller's own (TOOL_TASK_RUNNER::
+        // handle_tool(), tools.cpp), shared the same way tools_list already
+        // is, so a script's own commands can actually reach a remote tool.
+        instance.send(tool_worker, instance_comms, "user");
         instance.is_processing = false;
     });
 
@@ -368,7 +371,7 @@ void command_wait_response(SCRIPT_STATE& state, size_t& i, ollama_system& instan
     }
 }
 
-void advance_script_state(SCRIPT_STATE& state, size_t& i, std::string& current_input, const TASK_SIMPLE& found_task, ollama_system& instance, COMMS& instance_comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, const std::filesystem::path& files_dir, bool& keyboard_was_enabled)
+void advance_script_state(SCRIPT_STATE& state, size_t& i, std::string& current_input, const TASK_SIMPLE& found_task, ollama_system& instance, COMMS& instance_comms, TOOL_WORKER_CLASS* tool_worker, const std::filesystem::path& files_dir, bool& keyboard_was_enabled)
 {
     switch (state)
     {
@@ -385,7 +388,7 @@ void advance_script_state(SCRIPT_STATE& state, size_t& i, std::string& current_i
             break;
 
         case SCRIPT_STATE::EXECUTE_COMMAND:
-            command_execute_command(state, current_input, instance, instance_comms, tools_list);
+            command_execute_command(state, current_input, instance, instance_comms, tool_worker);
             break;
 
         case SCRIPT_STATE::WAIT_RESPONSE:

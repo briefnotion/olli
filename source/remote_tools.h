@@ -4,6 +4,7 @@
 #include <string>
 #include <optional>
 #include <chrono>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -18,6 +19,42 @@ struct REMOTE_TOOL_REGISTRATION
 {
     int fd = -1;
     json tools;   // the "tools" array from the register message, unparsed further
+};
+
+// What TOOL_REMOTE::poll_communications() (new, alongside the existing
+// check()/monitor_tool() - see its own comment) queues up as a call's
+// result lands, for TOOL_WORKER_CLASS::get_pending_result() (tool_worker.h)
+// to hand back to main. Mirrors tools/PROTOCOL.md's `result` message and
+// check()'s own response_str/special_instruction locals - a wire-level
+// "error" is folded into 'response' as plain text, same as check() already
+// does, so there's no separate error field to carry here either.
+struct TOOL_RESULT
+{
+    std::string call_id;
+    std::string response;
+    std::string special_instruction;
+};
+
+// What poll_communications() queues up for an unsolicited `event` message
+// (tools/PROTOCOL.md) - separate from TOOL_RESULT since an event isn't a
+// response to any call_id, unlike a result. Mirrors the old monitor_tool()'s
+// own event handling (remote_tools.cpp, untouched): 'message' is the
+// narration text (main's job to log/integrate_tool_result(), same as
+// monitor_tool() already does); 'action_tool'/'action_arguments' are the
+// optional structured follow-up (main's job to push onto its own
+// chat.pending_tool_calls, same as monitor_tool() already does) - empty
+// action_tool means no action, same convention REMOTE_TOOL_REGISTRATION's
+// own 'tools' field above uses (raw, not yet a ToolCall - this header can't
+// see ToolCall's full definition without an olla.h include that would
+// circle back here through system.h, and there's nothing here that needs
+// to correlate a result back to it the way a real dispatched call's id
+// would, so there's nothing lost by leaving it raw for whoever actually
+// dispatches it to turn into a real ToolCall).
+struct TOOL_EVENT
+{
+    std::string message;
+    std::string action_tool;
+    json action_arguments;
 };
 
 /**
@@ -105,6 +142,13 @@ class TOOL_REMOTE : public TOOL_BASE
         static constexpr int PING_INTERVAL_SECONDS = 5;
         static constexpr int DEAD_TIMEOUT_SECONDS = 15;
 
+        // poll_communications()-only state (see its own comment below) -
+        // the call_id it's currently waiting on a result for, if any. Where
+        // check() kept this on its own call stack across a blocking wait,
+        // poll_communications() never blocks, so this has to survive
+        // between ticks instead.
+        std::optional<std::string> awaiting_call_id;
+
         // Blocks up to timeout_ms waiting for one complete newline-
         // delimited line on fd (checking read_buffer for one already
         // waiting before touching the socket at all). Returns false on
@@ -140,8 +184,39 @@ class TOOL_REMOTE : public TOOL_BASE
 
         void configure(ollama_system& chat) override;
         void register_tool(ollama_system& chat, json& tools) override;
-        bool check(IO_WORKER_CLASS& io_worker, ollama_system& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms, const ToolCall& tc) override;
-        void monitor_tool(ollama_system& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms) override;
+        bool check(IO_WORKER_CLASS& io_worker, ollama_system& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const ToolCall& tc) override;
+        void monitor_tool(ollama_system& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms) override;
+
+        // New, alongside check()/monitor_tool() above - neither is touched.
+        // Not part of TOOL_BASE's virtual interface, so callers need this
+        // tool's concrete type - tool_worker.cpp's own tools_list is already
+        // typed as TOOL_REMOTE specifically (never holds a built-in), so it
+        // calls this directly with no cast needed. A deliberate, additive
+        // prototype rather than a change to the existing polymorphic path
+        // every tool still goes through today.
+        //
+        // Single non-blocking pass, no chat/comms needed at all (unlike
+        // both methods above): (1) service ping/pong; if a result arrives
+        // for whichever call_id we're currently awaiting, package it as a
+        // TOOL_RESULT into pending_results and clear awaiting_call_id; if
+        // an event arrives, package it as a TOOL_EVENT into pending_events
+        // - unlike a result, an event needs no awaiting_call_id match,
+        // since it isn't a response to anything; (2) if not already
+        // awaiting a result, send the oldest queued call in pending_calls
+        // addressed to this tool (matched against tool_defs, same as
+        // check()'s own is_mine check) and start awaiting its result.
+        // Never waits on the socket - check()'s own blocking
+        // read_line_blocking() loop is what this is meant to eventually
+        // replace.
+        void poll_communications(std::vector<ToolCall>& pending_calls, std::vector<TOOL_RESULT>& pending_results, std::vector<TOOL_EVENT>& pending_events);
+
+        // Read-only access to what this tool declared at registration - the
+        // same array register_tool() (above) re-emits into Ollama's own
+        // tools schema, for tool_worker.cpp to fold into its own
+        // registered_tool_defs digest instead (TOOL_WORKER_CLASS,
+        // tool_worker.h) now that registration doesn't route through
+        // register_tool()'s chat/tools-array path for tools that join here.
+        const json& get_tool_defs() const { return tool_defs; }
 
         // False once the connection's closed (monitor_tool() or check()
         // noticing a dead fd resets it to -1) - ollama_system::process()

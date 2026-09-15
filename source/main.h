@@ -20,6 +20,7 @@
 #include "stringthings.h"
 #include "sidetrack.h"
 #include "io_worker.h"
+#include "tool_worker.h"
 
 using json = nlohmann::json;
 

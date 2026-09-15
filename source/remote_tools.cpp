@@ -253,7 +253,7 @@ bool TOOL_REMOTE::read_line_blocking(std::string& out, int timeout_ms)
     }
 }
 
-bool TOOL_REMOTE::check(IO_WORKER_CLASS&, ollama_system& chat, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms, const ToolCall& tc)
+bool TOOL_REMOTE::check(IO_WORKER_CLASS&, ollama_system& chat, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>&, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const ToolCall& tc)
 {
     bool is_mine = false;
     for (auto& def : tool_defs) {
@@ -357,7 +357,7 @@ bool TOOL_REMOTE::check(IO_WORKER_CLASS&, ollama_system& chat, CLASS_SYSTEM*, st
                 std::string message = msg.value("message", "");
                 if (!message.empty()) {
                     chat.log("[RemoteTools] Event from remote tool: " + message + "\n");
-                    chat.integrate_tool_result(tools_list, comms, "", message);
+                    chat.integrate_tool_result(tool_worker, comms,"", message);
                 }
 
                 if (msg.contains("action") && msg["action"].is_object()) {
@@ -394,7 +394,7 @@ bool TOOL_REMOTE::check(IO_WORKER_CLASS&, ollama_system& chat, CLASS_SYSTEM*, st
     }
 
     chat.send_tool_result(tc.id, response_str);
-    chat.integrate_tool_result(tools_list, comms, special_instruction, response_str);
+    chat.integrate_tool_result(tool_worker, comms,special_instruction, response_str);
 
     return true;
 }
@@ -412,7 +412,7 @@ bool TOOL_REMOTE::check(IO_WORKER_CLASS&, ollama_system& chat, CLASS_SYSTEM*, st
 // cleanly closed connection, same as before the heartbeat existed - either
 // way, is_alive() flips to false, which ollama_system::process() (olla.cpp)
 // checks every tick to actually drop this instance from tools_list.
-void TOOL_REMOTE::monitor_tool(ollama_system& chat, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms)
+void TOOL_REMOTE::monitor_tool(ollama_system& chat, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>&, TOOL_WORKER_CLASS* tool_worker, COMMS& comms)
 {
     if (fd < 0) return;
 
@@ -479,7 +479,7 @@ void TOOL_REMOTE::monitor_tool(ollama_system& chat, CLASS_SYSTEM*, std::vector<s
                 std::string message = msg.value("message", "");
                 if (!message.empty()) {
                     chat.log("[RemoteTools] Event from remote tool: " + message + "\n");
-                    chat.integrate_tool_result(tools_list, comms, "", message);
+                    chat.integrate_tool_result(tool_worker, comms,"", message);
                 }
 
                 // Optional structured follow-up action, separate from
@@ -520,6 +520,140 @@ void TOOL_REMOTE::monitor_tool(ollama_system& chat, CLASS_SYSTEM*, std::vector<s
 
     if (std::chrono::duration_cast<std::chrono::seconds>(now - last_received).count() >= DEAD_TIMEOUT_SECONDS) {
         mark_dead();
+    }
+}
+
+// New, alongside check()/monitor_tool() above - see its own comment
+// (remote_tools.h) for why it's a separate, additive method rather than a
+// change to either. Never blocks: at most one read() this call, same as
+// monitor_tool()'s own.
+void TOOL_REMOTE::poll_communications(std::vector<ToolCall>& pending_calls, std::vector<TOOL_RESULT>& pending_results, std::vector<TOOL_EVENT>& pending_events)
+{
+    if (fd < 0) return;
+
+    // 1. Whatever arrived this tick, if anything - ping/pong and a
+    // matching result both handled inline, same shape as monitor_tool().
+    std::string line;
+    bool got_line = extract_line(read_buffer, line);
+
+    if (!got_line) {
+        char buf[4096];
+        ssize_t n = read(fd, buf, sizeof(buf));
+
+        if (n > 0) {
+            read_buffer.append(buf, static_cast<size_t>(n));
+            got_line = extract_line(read_buffer, line);
+        }
+        else if (n == 0) {
+            mark_dead(); // Peer closed the connection normally.
+            return;
+        }
+        // n < 0: EWOULDBLOCK/EAGAIN (normal) or a real error - either way no
+        // line arrived this tick; fall through to the heartbeat/send steps
+        // below regardless.
+    }
+
+    if (got_line) {
+        last_received = std::chrono::steady_clock::now();
+
+        json msg;
+        bool parsed_ok = true;
+        try {
+            msg = json::parse(line);
+        } catch (const std::exception&) {
+            parsed_ok = false; // malformed - still counts as proof of life
+        }
+
+        if (parsed_ok) {
+            std::string type = msg.value("type", "");
+            if (type == "ping") {
+                if (write_line(fd, json{{"type", "pong"}}.dump())) {
+                    last_sent = std::chrono::steady_clock::now();
+                } else {
+                    mark_dead();
+                    return;
+                }
+            }
+            else if (type == "result" && awaiting_call_id.has_value()
+                     && msg.value("call_id", "") == *awaiting_call_id) {
+                TOOL_RESULT result;
+                result.call_id = *awaiting_call_id;
+                if (msg.contains("error")) {
+                    result.response = "Error: " + msg.value("error", "unknown remote error");
+                } else {
+                    result.response = msg.value("result", "");
+                    result.special_instruction = msg.value("special_instruction", "");
+                }
+                pending_results.push_back(std::move(result));
+                awaiting_call_id.reset();
+            }
+            else if (type == "event") {
+                // Same fields the old monitor_tool() destructures from this
+                // same message shape (below) - both optional, independent
+                // of each other. Unlike a result, not matched against
+                // awaiting_call_id - an event isn't a response to anything,
+                // so it's queued regardless of whether a call is even in
+                // flight.
+                TOOL_EVENT event;
+                event.message = msg.value("message", "");
+                if (msg.contains("action") && msg["action"].is_object()) {
+                    event.action_tool = msg["action"].value("tool", "");
+                    event.action_arguments = msg["action"].value("arguments", json::object());
+                }
+                pending_events.push_back(std::move(event));
+            }
+            // A stale/mismatched result or a plain pong: the last_received
+            // update above is already all that happens.
+        }
+    }
+
+    // 2. Heartbeat - identical to monitor_tool()'s own.
+    auto now = std::chrono::steady_clock::now();
+
+    if (std::chrono::duration_cast<std::chrono::seconds>(now - last_sent).count() >= PING_INTERVAL_SECONDS) {
+        if (write_line(fd, json{{"type", "ping"}}.dump())) {
+            last_sent = now;
+        } else {
+            mark_dead();
+            return;
+        }
+    }
+
+    if (std::chrono::duration_cast<std::chrono::seconds>(now - last_received).count() >= DEAD_TIMEOUT_SECONDS) {
+        mark_dead();
+        return;
+    }
+
+    // 3. Send the oldest queued call addressed to this tool, if we're not
+    // already waiting on one - never more than one in flight at a time,
+    // same as check()'s own one-call-then-wait shape.
+    if (!awaiting_call_id.has_value()) {
+        for (auto it = pending_calls.begin(); it != pending_calls.end(); ++it) {
+            bool is_mine = false;
+            for (auto& def : tool_defs) {
+                if (def.value("name", "") == it->name) {
+                    is_mine = true;
+                    break;
+                }
+            }
+            if (!is_mine) continue;
+
+            json call_msg = {
+                {"type", "call"},
+                {"call_id", it->id},
+                {"name", it->name},
+                {"arguments", it->arguments}
+            };
+
+            if (write_line(fd, call_msg.dump())) {
+                last_sent = std::chrono::steady_clock::now();
+                awaiting_call_id = it->id;
+                pending_calls.erase(it);
+            } else {
+                mark_dead();
+            }
+            break;
+        }
     }
 }
 

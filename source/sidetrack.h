@@ -20,11 +20,15 @@ class SIDETRACK_CLASS
         // main_instance so this work never blocks, streams into, or
         // otherwise interferes with the real conversation. Its COMMS
         // (comms is no longer a member of ollama_system - see the
-        // COMMS-ownership move in olla.h) and its tools_list are built
-        // locally, on the fly, wherever they're actually needed (create(),
-        // and later whatever function actually calls .send()/.process()) -
-        // same pattern tools.cpp's task-runner automation instance uses -
-        // rather than kept as members here.
+        // COMMS-ownership move in olla.h) is built locally, on the fly,
+        // wherever it's actually needed (create(), and later whatever
+        // function actually calls .send()/.process()) - same pattern
+        // tools.cpp's task-runner automation instance uses - rather than
+        // kept as a member here. Unlike that automation instance's own
+        // built-ins-only tools_list, though, this one's second-guess review
+        // gets the real tools_list and tool_worker (both passed through
+        // from main.cpp, not a throwaway/nullptr) - see run_second_guess()'s
+        // own comment (sidetrack.cpp) for why.
         ollama_system SIDETRACK_CHAT_INSTANCE;
 
         int consolidation_stage = 0;
@@ -76,7 +80,7 @@ class SIDETRACK_CLASS
         TIMED_IS_READY_SIMPLE PERSISTENT_CHECK_TIMER;
         size_t MAX_CONTEXT_SIZE = 200; // messages - tune as needed
 
-        void run_second_guess(IO_WORKER_CLASS& io_worker, ollama_system& main_instance, COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, CLASS_SYSTEM* system);
+        void run_second_guess(IO_WORKER_CLASS& io_worker, ollama_system& main_instance, COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, CLASS_SYSTEM* system);
         void persistent_time_checks(ollama_system& main_instance);
         void run_consolidation(ollama_system& main_instance);
         void run_clear_context(ollama_system& main_instance);
@@ -88,7 +92,7 @@ class SIDETRACK_CLASS
         // which this uses and which forces LOAD_SAVE_HISTORY_ON_DISK off
         // (this instance's history is scratch, never the real history.json).
         void create(OLLAMA_SYSTEM_PROPERTIES Properties);
-        void check(IO_WORKER_CLASS& io_worker, ollama_system& main_instance, COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, CLASS_SYSTEM* system);
+        void check(IO_WORKER_CLASS& io_worker, ollama_system& main_instance, COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, CLASS_SYSTEM* system);
 
         // Test/debug hook - skips IDLE_WAIT_TIMER_FOR_CONSOLIDATION and runs
         // the consolidation pass immediately. The real check()-driven path

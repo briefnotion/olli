@@ -11,14 +11,14 @@
 // real main chat's own COMMS (passed through from check()), not a separate
 // one - see run_second_guess()'s own comment for the tradeoff that implies.
 static void start_second_guess_call(ollama_system& instance, COMMS& comms,
-                                     std::vector<std::unique_ptr<TOOL_BASE>>& tools_list)
+                                     TOOL_WORKER_CLASS* tool_worker)
 {
     instance.status.interrupt_signal = false;
     instance.is_processing = true;
     if (instance.chat_thread.joinable()) instance.chat_thread.join();
-    instance.chat_thread = std::thread([&instance, &tools_list, &comms]()
+    instance.chat_thread = std::thread([&instance, tool_worker, &comms]()
     {
-        instance.send(tools_list, comms, "user");
+        instance.send(tool_worker, comms, "user");
         instance.is_processing = false;
     });
 }
@@ -31,6 +31,7 @@ static void start_second_guess_call(ollama_system& instance, COMMS& comms,
 // call is still sitting there waiting to be dispatched or narrated."
 static bool poll_second_guess_call(IO_WORKER_CLASS& io_worker, ollama_system& instance, COMMS& comms,
                                     std::vector<std::unique_ptr<TOOL_BASE>>& tools_list,
+                                    TOOL_WORKER_CLASS* tool_worker,
                                     CLASS_SYSTEM* system)
 {
     // comms is the real main chat's own. ollama_system::input() (olla.cpp)
@@ -51,7 +52,7 @@ static bool poll_second_guess_call(IO_WORKER_CLASS& io_worker, ollama_system& in
         DEBUG_LOG_CLASS::instance().log_event("sidetrack-second-guess", "interrupted mid-response - stopping");
     }
 
-    instance.handle_instance_tools(io_worker, system, tools_list, comms);
+    instance.handle_instance_tools(io_worker, system, tools_list, tool_worker, comms);
 
     if (!instance.is_processing && instance.chat_thread.joinable())
     {
@@ -67,7 +68,7 @@ static bool poll_second_guess_call(IO_WORKER_CLASS& io_worker, ollama_system& in
     return !instance.is_processing && instance.last_received.tool_calls.empty();
 }
 
-void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ollama_system& main_instance, COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, CLASS_SYSTEM* system)
+void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ollama_system& main_instance, COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, CLASS_SYSTEM* system)
 {
     // A finished review (stage 100) otherwise has no way back to 0 - a new
     // ASSISTANT REPLY completing is what should make that happen, same idea
@@ -152,10 +153,10 @@ void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ollama_system
     {
         // Dumbest-form throwaway instance, same reasoning as consolidation's
         // (run_consolidation()'s own comment) - except thinking mode is on
-        // here, and it gets the real tools_list (passed in, not
-        // populate_default_tools()'s throwaway set) so it's actually
-        // capable of doing something about what it decides needs doing,
-        // not just talking about it.
+        // here, and it gets the real tool_worker (passed in, not nullptr
+        // like other sub-agent instances) so it's actually capable of doing
+        // something about what it decides needs doing, not just talking
+        // about it.
         SIDETRACK_CHAT_INSTANCE.PROPS.model = main_instance.PROPS.model;
         SIDETRACK_CHAT_INSTANCE.PROPS.host = main_instance.PROPS.host;
         SIDETRACK_CHAT_INSTANCE.PROPS.port = main_instance.PROPS.port;
@@ -191,7 +192,7 @@ void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ollama_system
         SIDETRACK_CHAT_INSTANCE.history.push_back(task_note);
 
         comms.INPUT_FROM_USER = "More needed to be done or said? Respond DONE if not.";
-        start_second_guess_call(SIDETRACK_CHAT_INSTANCE, comms, tools_list);
+        start_second_guess_call(SIDETRACK_CHAT_INSTANCE, comms, tool_worker);
 
         second_guess_stage = 3;
     }
@@ -201,7 +202,7 @@ void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ollama_system
         // dispatching/narrating any tool call it decides to make (e.g.
         // actually checking whether a light it claimed was turned on
         // really is).
-        if (!poll_second_guess_call(io_worker, SIDETRACK_CHAT_INSTANCE, comms, tools_list, system))
+        if (!poll_second_guess_call(io_worker, SIDETRACK_CHAT_INSTANCE, comms, tools_list, tool_worker, system))
         {
             return; // still working - try again next tick, do nothing else this one
         }
@@ -238,14 +239,14 @@ void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ollama_system
             // user should actually see/hear, unlike the DONE-check above.
             SIDETRACK_CHAT_INSTANCE.PROPS.stream_output = true;
             comms.INPUT_FROM_USER = "Go ahead - say or do what needs to happen.";
-            start_second_guess_call(SIDETRACK_CHAT_INSTANCE, comms, tools_list);
+            start_second_guess_call(SIDETRACK_CHAT_INSTANCE, comms, tool_worker);
             second_guess_stage = 5;
         }
     }
     else if (second_guess_stage == 5)
     {
         // Waiting on the second ("say/do it") call - same shape as stage 3.
-        if (!poll_second_guess_call(io_worker, SIDETRACK_CHAT_INSTANCE, comms, tools_list, system))
+        if (!poll_second_guess_call(io_worker, SIDETRACK_CHAT_INSTANCE, comms, tools_list, tool_worker, system))
         {
             return;
         }
@@ -419,7 +420,6 @@ void SIDETRACK_CLASS::run_consolidation(ollama_system& main_instance)
         // No tools, blank comms - this instance never calls a tool or
         // speaks/displays anything, it only ever answers one summarization
         // prompt at a time.
-        std::vector<std::unique_ptr<TOOL_BASE>> no_tools;
         COMMS blank_comms;
 
         for (size_t level = 0; level + 1 < levels.size(); ++level)
@@ -493,7 +493,7 @@ void SIDETRACK_CLASS::run_consolidation(ollama_system& main_instance)
                 "squashing " + std::to_string(overflow_count) + " messages at level " + std::to_string(level));
 
             blank_comms.INPUT_FROM_USER = "What happened in all your memory? Summarize it.";
-            SIDETRACK_CHAT_INSTANCE.send(no_tools, blank_comms, "system");
+            SIDETRACK_CHAT_INSTANCE.send(nullptr, blank_comms, "system");
 
             std::string summary_text = SIDETRACK_CHAT_INSTANCE.last_received.response;
             if (SIDETRACK_CHAT_INSTANCE.last_received.complete && !summary_text.empty())
@@ -578,7 +578,9 @@ void SIDETRACK_CLASS::create(OLLAMA_SYSTEM_PROPERTIES Properties)
     // Only needed transiently here, for open()'s own tool->configure(*this)
     // pass - not stored as a member (see SIDETRACK_CHAT_INSTANCE's own
     // comment in sidetrack.h). Whatever later calls .send()/.process() on
-    // SIDETRACK_CHAT_INSTANCE builds its own local tools_list the same way.
+    // SIDETRACK_CHAT_INSTANCE gets the real tools_list (passed in via
+    // check(), not this throwaway one) - see run_second_guess()'s own
+    // comment for why.
     std::vector<std::unique_ptr<TOOL_BASE>> tools_list;
     populate_default_tools(tools_list);
     SIDETRACK_CHAT_INSTANCE.debug_label = "sidetrack";
@@ -588,7 +590,7 @@ void SIDETRACK_CLASS::create(OLLAMA_SYSTEM_PROPERTIES Properties)
     PERSISTENT_CHECK_TIMER.set(PERSISTENT_CHECK_INTERVAL);
 }
 
-void SIDETRACK_CLASS::check(IO_WORKER_CLASS& io_worker, ollama_system& main_instance, COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, CLASS_SYSTEM* system)
+void SIDETRACK_CLASS::check(IO_WORKER_CLASS& io_worker, ollama_system& main_instance, COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, CLASS_SYSTEM* system)
 {
     // I'm trying to keep this function non blocking.
 
@@ -619,7 +621,7 @@ void SIDETRACK_CLASS::check(IO_WORKER_CLASS& io_worker, ollama_system& main_inst
 
 
     // Second Guess Routine
-    run_second_guess(io_worker, main_instance, comms, tools_list, system);
+    run_second_guess(io_worker, main_instance, comms, tools_list, tool_worker, system);
 
 
     // if all stages at 100, do not reset until something happens in main.

@@ -4,6 +4,7 @@
 #include "olla.h"
 #include "io_worker.h"
 #include "user_io.h"
+#include "tool_worker.h"
 #include <algorithm>
 
 // One instance of every TOOL_* class - callers populate their own tools_list
@@ -69,9 +70,9 @@ void ollama_system::open(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list)
         tool->configure(*this);
 
     // register_tool() itself is called from send() (below), not here - a
-    // remote tool (source/remote_tools.h) can join tools_list after open()
-    // already ran, so the tools array sent to Ollama needs rebuilding fresh
-    // on every request rather than fixed once at startup.
+    // remote tool joins tool_worker's own registry independently of open()
+    // entirely (tool_worker.cpp), so the tools array sent to Ollama needs
+    // rebuilding fresh on every request rather than fixed once at startup.
 
     if (PROPS.LOAD_SAVE_HISTORY_ON_DISK)
     {
@@ -137,7 +138,7 @@ string ollama_system::gather_history()
  * This function takes raw tool data and asks the model to "speak" it 
  * in the context of the current conversation/persona.
  */
-void ollama_system::integrate_tool_result(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms, std::string Special_Instruction, const std::string& raw_result)
+void ollama_system::integrate_tool_result(TOOL_WORKER_CLASS* tool_worker, COMMS& comms, std::string Special_Instruction, const std::string& raw_result)
 {
     //  Why this is the "Road Less Trodden"
 
@@ -207,7 +208,7 @@ void ollama_system::integrate_tool_result(std::vector<std::unique_ptr<TOOL_BASE>
         // This prevents the "What was the last thing I said?" confusion
         // because the model treats this as a 'state' rather than 'user input'.
         comms.INPUT_FROM_USER = prompt;
-        this->send(tools_list, comms, "system");
+        this->send(tool_worker, comms, "system");
 
         // 3. This DIRECTOR_NOTE, and the raw tool result send_tool_result()
         // pushed just before it, both stay in history now rather than being
@@ -273,7 +274,7 @@ static std::string summarize_tool_calls(const std::vector<ToolCall>& calls)
     return ss.str();
 }
 
-void ollama_system::send(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms, const std::string& role) {
+void ollama_system::send(TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const std::string& role) {
     std::string new_user_input = filter_non_printable(comms.INPUT_FROM_USER);
     
     // 1. Set initial states
@@ -332,20 +333,15 @@ void ollama_system::send(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, CO
     }
 
     // Rebuilt fresh every call (see the comment in open()) rather than
-    // fixed once at startup, so a tool that joined tools_list after open()
-    // - a remote tool connecting mid-session - shows up on the very next
-    // request instead of never.
-    tools = json::array();
-    {
-        // tools_list_mutex (olla.h) - this loop runs on whatever thread is
-        // driving this instance's own chat_thread, concurrently with
-        // process()'s erase of a dead TOOL_REMOTE (below) on the main
-        // thread. See tools_list_mutex's own comment for the crash this
-        // closes.
-        std::lock_guard<std::mutex> lock(tools_list_mutex);
-        for (auto& tool : tools_list)
-            tool->register_tool(*this, tools);
-    }
+    // fixed once at startup, so a remote tool connecting mid-session shows
+    // up on the very next request instead of never. tool_worker already
+    // hands this back in Ollama's final wrapped schema shape (its own
+    // registered_tool_defs, refreshed every tick on its own thread -
+    // tool_worker.h/.cpp) - nothing left to convert here. Includes the
+    // built-ins too (main.cpp seeds them into tool_worker's own registry at
+    // startup via add_manual_tool_def()), so this is only ever empty if
+    // tool_worker itself is null.
+    tools = tool_worker ? tool_worker->get_registered_tool_defs() : json::array();
 
     // Ollama's own streaming API is what makes either channel show up live
     // at all - needed whenever EITHER comms.INPUT_FROM_LLM (stream_output)
@@ -781,7 +777,7 @@ bool ollama_system::jump_input(COMMS& comms)
  * Updates the input method to return true when a chat response is complete.
  * This version preserves the original non-blocking logic and thread safety.
  */
-bool ollama_system::input(COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list)
+bool ollama_system::input(COMMS& comms, TOOL_WORKER_CLASS* tool_worker)
 {
     // 1. INTERRUPT - key_input.INTERRUPTED now lives on IO_WORKER_CLASS;
     // comms.INTERRUPTED is how it reaches here (relayed by
@@ -841,23 +837,24 @@ bool ollama_system::input(COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>&
             // Ensure we don't leak a thread if one was somehow left joinable
             if (chat_thread.joinable()) chat_thread.join();
 
-            // Launch the background thread exactly as before. tools_list
-            // captured by reference is safe here - it's the caller's own
-            // long-lived vector (main.cpp's real one for the main chat),
-            // which outlives this thread by construction. comms is also
-            // captured by reference - send() now reads its content from
-            // comms.INPUT_FROM_USER rather than taking it as its own
-            // parameter, so it has to be restored there first; locked
-            // since exchange() (io_worker.cpp) can write that same field
-            // from the main thread at the same time.
-            chat_thread = std::thread([this, tmp_line, &tools_list, &comms]()
+            // Launch the background thread exactly as before. tool_worker
+            // captured by value (a plain pointer, trivially copyable) is
+            // safe here - it's the caller's own long-lived object (main.cpp's
+            // real one for the main chat), which outlives this thread by
+            // construction, same reasoning tools_list's own reference
+            // capture used to have. comms is captured by reference - send()
+            // now reads its content from comms.INPUT_FROM_USER rather than
+            // taking it as its own parameter, so it has to be restored there
+            // first; locked since exchange() (io_worker.cpp) can write that
+            // same field from the main thread at the same time.
+            chat_thread = std::thread([this, tmp_line, tool_worker, &comms]()
             {
                 try {
                     {
                         std::lock_guard<std::mutex> lock(output_buffer_mutex);
                         comms.INPUT_FROM_USER = tmp_line;
                     }
-                    send(tools_list, comms, "user");
+                    send(tool_worker, comms, "user");
                 } catch (...) {
                     // Maintain existing safety
                 }
@@ -890,7 +887,7 @@ bool ollama_system::input(COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>&
  * 4. Trigger background consolidation (memory cleanup) every 60 seconds.
  */
 
-void ollama_system::process(IO_WORKER_CLASS& io_worker, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, COMMS& comms)
+void ollama_system::process(IO_WORKER_CLASS& io_worker, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms)
 {
     // ---------------------------------------------------------
     // PART 0: WRITE HISTORY TO FILE
@@ -915,7 +912,7 @@ void ollama_system::process(IO_WORKER_CLASS& io_worker, CLASS_SYSTEM* system, st
     // ---------------------------------------------------------
     // PART 1: PROCESS MAIN CHAT TOOLS
     // ---------------------------------------------------------
-    handle_instance_tools(io_worker, system, tools_list, comms);
+    handle_instance_tools(io_worker, system, tools_list, tool_worker, comms);
 
     // ---------------------------------------------------------
     // PART 2: MANAGE BACKGROUND TASKS
@@ -941,8 +938,9 @@ void ollama_system::process(IO_WORKER_CLASS& io_worker, CLASS_SYSTEM* system, st
         // next completion check below erases it. Reusing the parent's own
         // tools_list keeps this call always-valid without needing to keep a
         // second tools_list alive across ticks for an instance that's
-        // already done.
-        task_instance.handle_instance_tools(io_worker, system, tools_list, task_comms);
+        // already done. tool_worker stays nullptr for the same "nothing
+        // left pending" reason.
+        task_instance.handle_instance_tools(io_worker, system, tools_list, nullptr, task_comms);
 
         // B. Thread Management: Join finished network threads
         if (!task_instance.is_processing && task_instance.chat_thread.joinable()) {
@@ -959,7 +957,7 @@ void ollama_system::process(IO_WORKER_CLASS& io_worker, CLASS_SYSTEM* system, st
             if (!task_instance.last_received.response.empty()) {
                 std::string task_report = "[Task Update]: " + task_instance.last_received.response;
                 comms.INPUT_FROM_USER = task_report;
-                send(tools_list, comms, "system");
+                send(tool_worker, comms, "system");
             }
             
             // Remove from vector (unique_ptr automatically deletes the memory)
@@ -981,33 +979,50 @@ void ollama_system::process(IO_WORKER_CLASS& io_worker, CLASS_SYSTEM* system, st
     }
     
     // ---------------------------------------------------------
-    // PART 5: ACTIVE MONITORS
-    // Continuous checks for time-based triggers or hardware state.
+    // PART 5: REMOTE TOOL COMMUNICATIONS
+    // Used to loop tools_list calling monitor_tool() + erase dead
+    // TOOL_REMOTE entries here (flagged, now retired) - that whole routine
+    // only ran when process() happened to be called, the exact fragility
+    // TOOL_WORKER_CLASS exists to fix. Ping/pong, dead-connection cleanup,
+    // and the actual socket I/O all run continuously on tool_worker's own
+    // background thread now (tool_worker.cpp) regardless of what this
+    // instance is doing - this just drains whatever landed since last tick.
     // ---------------------------------------------------------
-    for (auto& tool : tools_list)
-        tool->monitor_tool(*this, system, tools_list, comms);
-
-    // Drop any tool that's no longer alive (currently only ever a
-    // TOOL_REMOTE whose connection closed - see is_alive()'s comment in
-    // tools.h) so it stops showing up in the tools array sent to Ollama.
-    // monitor_tool() above is what actually notices a closed connection and
-    // flips is_alive() to false; this is just where that gets acted on.
-    //
-    // tools_list_mutex (olla.h) guards just this erase, not the
-    // monitor_tool() loop above - monitor_tool() can recurse back into
-    // send() on this same thread (a pushed event -> integrate_tool_result()
-    // -> send()), which takes the same lock itself, and both only ever run
-    // on the main thread anyway so they were never racing each other.
+    if (tool_worker)
     {
-        std::lock_guard<std::mutex> lock(tools_list_mutex);
-        size_t before = tools_list.size();
-        tools_list.erase(
-            std::remove_if(tools_list.begin(), tools_list.end(),
-                [](const std::unique_ptr<TOOL_BASE>& tool) { return !tool->is_alive(); }),
-            tools_list.end());
-        size_t removed = before - tools_list.size();
-        if (removed > 0) {
-            log("[RemoteTools] Removed " + std::to_string(removed) + " disconnected tool(s)\n");
+        TOOL_RESULT result;
+        while (tool_worker->get_pending_result(result))
+        {
+            send_tool_result(result.call_id, result.response);
+            integrate_tool_result(tool_worker, comms, result.special_instruction, result.response);
+        }
+
+        // Same handling the old monitor_tool()'s own event branch had
+        // (remote_tools.cpp, untouched) - narration via
+        // integrate_tool_result(), an optional structured follow-up queued
+        // the same way a real model-issued call would be. A timestamp-based
+        // id (not a static counter - this project avoids hidden/global
+        // state) is enough since nothing needs to correlate a result back
+        // to it, same reasoning as TOOL_EVENT's own comment (remote_tools.h).
+        TOOL_EVENT event;
+        while (tool_worker->get_pending_event(event))
+        {
+            tool_calls_this_turn = 0;
+
+            if (!event.message.empty())
+            {
+                log("[RemoteTools] Event from remote tool: " + event.message + "\n");
+                integrate_tool_result(tool_worker, comms, "", event.message);
+            }
+
+            if (!event.action_tool.empty())
+            {
+                pending_tool_calls.push({
+                    "system_action_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()),
+                    event.action_tool,
+                    event.action_arguments
+                });
+            }
         }
     }
 

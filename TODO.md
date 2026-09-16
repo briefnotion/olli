@@ -2155,6 +2155,52 @@ it can actually act under its persona's judgment, not just talk about it.
 - Wake word is "olli" (`findWakeWord()`/`findSleepTrigger()`, now in
   `io_worker.cpp` - see "What we built today (2026-08-28)" below) - done, no
   longer "voca".
+- **Interrupt-burst spam right after a fresh session starts - root-caused
+  2026-09-16, fix deferred.** Confirmed live in a real `debug_full_history.txt`:
+  interrupting olli (a real spoken interrupt phrase) while it's speaking -
+  seen specifically while `sidetrack-second-guess`'s own TTS/thinking is
+  active, early in a session - produced **11 separate
+  `"interrupted mid-response - stopping"` log lines in ~2.2 seconds**
+  (120-500ms apart), instead of one clean interrupt. Confirmed by the user
+  to reproduce reliably as "the first interrupt of a session," then never
+  again for the rest of that same session.
+  - **Root cause, traced through real code, not the `comms.INTERRUPTED`-
+    stuck-true bug this looks like at first glance (that one's the
+    opposite failure - stuck permanently `true`; already fixed 2026-09-03,
+    see "Sidetrack rewrite" above) and not `io_worker.cpp`'s `onInterrupt`
+    callback pushing an empty-text `VOCA_EVENT` either (`io_worker.cpp:
+    967-973`) - that's deliberate design for a pure "stop now" signal, not
+    a bug.** The real chain: `busy_` (`Voca`, `io_worker.h:200`) means "TTS
+    is currently speaking," toggled by `adjust_audio_files()`
+    (`io_worker.cpp:809-831`) via `voca->pause()`/`resume()` purely so Voca
+    doesn't transcribe olli's own voice coming out of the speakers.
+    `handleTranscript()`'s interrupt branch (`io_worker.cpp:719-724`) fires
+    `onInterrupt` on *any* transcript segment that matches an interrupt
+    phrase while `busy_` is true - with no debounce. If TTS audio takes a
+    little while to actually finish draining out of the audio device after
+    `stop_speaking()` is called (buffered samples still playing), the mic
+    keeps picking up audio during that drain window, whisper keeps
+    producing new segments, and each one that still matches (or mishears
+    olli's own trailing audio) re-fires `onInterrupt` again - a burst, not
+    one clean signal. Matches the observed pattern: happens during a real
+    interrupt while TTS is speaking, stops once TTS audio actually finishes
+    draining and `resume()` clears `busy_`.
+  - **Not yet explained: why only the *first* interrupt of a session.** If
+    the re-fire were purely about drain-window timing, it should reproduce
+    on every interrupt, not just the first. Leading guess, unconfirmed -
+    one-time startup latency in the audio pipeline on `TextToSpeech`'s very
+    first utterance (device/stream init, first-call buffering) that later
+    calls don't pay. `TextToSpeech`'s own `stop()`/`isSpeaking()` haven't
+    been read yet to confirm.
+  - **Proposed fix, agreed but deliberately not yet implemented (deferred
+    at the user's request, 2026-09-16):** a simple debounce, not a chase
+    of the exact timing cause - a new bool (e.g.
+    `interrupt_already_signaled_`) on `Voca`, set the first time
+    `handleTranscript()`'s interrupt branch fires `onInterrupt` during one
+    busy period, checked before firing again, cleared in `resume()` so the
+    next real busy period starts fresh. Contained to `io_worker.h`/`.cpp`,
+    fixes the burst regardless of which subsystem is actually slow to
+    drain.
 
 ## Remote access
 

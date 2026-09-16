@@ -184,6 +184,7 @@ Menu:
 7) Search (find a passage)
 8) Search documents (survey a topic)
 9) View a document's full content
+10) Force resync (rebuild everything, even unchanged)
 0) Quit
 ```
 
@@ -208,6 +209,13 @@ No filtering by file type on a normal collection (anything readable as
 plain text in its folder gets imported - dropping something that isn't
 plain text in there is on you for now). `conversations` is the one
 exception - see "The conversations collection" above.
+
+"Update database" skips any document whose content hash hasn't changed -
+fine for normal use, but it means a change to the chunking/embedding/
+filtering logic itself (not the source files) never reaches already-
+imported documents. "Force resync" re-chunks and re-embeds everything
+regardless, so a logic change like that actually takes effect on existing
+data. Asks for confirmation first - can take a while on a large database.
 
 ## rag_tool - talking to it through olli
 

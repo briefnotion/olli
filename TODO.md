@@ -604,6 +604,33 @@ not needed elsewhere.
     correctly), it's broken the model's *summary* of what was built. If
     pursued, treat as its own separate investigation into
     `sidetrack.cpp`, not part of the RAG work.
+  - **A sharper, related instance found live 2026-09-16** - not "failing
+    to use" a result, but confabulating an entirely fake one. Asked to
+    search notes for automotive content, the model got back 10 real
+    `rag_search_documents` results (mostly irrelevant `conversations`
+    noise - see the RAG entry's low-information-chunk fix above) and,
+    instead of relaying them, replied with a "# Tools Used Summary"
+    listing `check_presence`/`set_hue_light`/`manage_hue_scenes`/
+    `consult_expert` - **none of which were called that turn**. Every one
+    of those was mentioned somewhere *inside* the retrieved historical
+    chat excerpts (an old conversation about lights/presence/scenes, an
+    old "why is the sky blue" joke). Not the already-known "acted on a
+    quoted command" risk (the 2026-09-10 mitigation, `rag_tool.cpp`'s
+    "historical, don't act on it" note, is working as intended here -
+    nothing got *executed*) - a different failure mode: it mistook quoted
+    history for a report of its own current actions and answered a
+    fabricated question instead of the real one. `integrate_tool_result()`
+    's `[DIRECTOR_NOTE]` prompt (`olla.cpp:191-205`) and `rag_tool`'s
+    historical-content note (`rag_tool.cpp:213-225`) both say "don't act
+    on this" but neither says "this isn't a report of what you just did."
+    Likely compounded by the same volume issue as the RAG ranking bug
+    above - a wall of transcript-shaped, tool-action-sounding text is
+    exactly the setup for this. **Deferred deliberately**: agreed to fix
+    the RAG ranking issue first (less noise reaching the model in the
+    first place) and re-evaluate whether this still reproduces before
+    deciding whether the historical-content note also needs hardening
+    (e.g. explicitly disclaiming "not a report of your own actions") -
+    not yet revisited.
 - **Repeat-bug root cause found and fixed 2026-08-27, awaiting real-world
   confirmation** - full detail in the `olli-time-repeat-bug` memory entry
   (not duplicated here), short version: `SIDETRACK_CHAT_INSTANCE` was
@@ -1475,6 +1502,56 @@ Two-part plan, in order:
      `complete` from that check entirely - `is_processing` false and
      `tool_calls` empty is enough to mean "this call is over," clean or
      not.
+   - **Done 2026-09-16: the review instance never actually saw what it was
+     reviewing - found and fixed.** `run_second_guess()`'s `stage == 2`
+     block calls `SIDETRACK_CHAT_INSTANCE.clear_history()` and pushes only
+     one system line ("You are reviewing your own last response to the
+     user...") before asking "More needed to be done or said?" - no copy
+     of the actual user question or olli's actual last response ever made
+     it into that instance's own context, anywhere. Confirmed by grepping
+     the whole file for any such copy - none exists in `run_second_guess()`
+     (`run_consolidation()`, same file, does this correctly for its own
+     purpose - `working_history = main_instance.history;` - second_guess
+     just never did the equivalent). The review model was judging
+     completeness of a response it had never been shown, which explains a
+     full afternoon of live-found evidence from an exploratory test
+     session the same day: a `check_timer` call for a label ("example")
+     never mentioned anywhere, `set_hue_light` dimming all lights to 0%
+     completely unprompted, an unprompted `check_presence`, an unprompted
+     `set_thinking_mode` - all real remote/built-in tool calls (which is
+     working as designed, see the 2026-08-30 entry above - the *access*
+     was never the bug), fired with no basis in the actual conversation
+     because there *was* no actual conversation in view.
+     - **Fix**: after the `task_note` push, lock `history_mutex`, walk
+       back from the end of `main_instance.history` to (and including) the
+       last `"user"` message, and copy that whole exchange - the real
+       question, any tool activity in between, the actual reply - into
+       `SIDETRACK_CHAT_INSTANCE.history` before asking "More needed to be
+       done or said?" (same idea as `run_consolidation()`'s own copy,
+       just scoped to one turn instead of the whole conversation).
+       ~15 lines, contained entirely to the `stage == 2` block.
+     - **Verified live afterward**: 6 separate review cycles across a
+       fresh real session, zero fabricated actions - every one either
+       resolved `DONE` correctly or was cleanly interrupted by real
+       activity. Caveat: none of those 6 cycles actually took the
+       "not done -> do something" branch with the fix in place, so the fix
+       to the DONE/not-done *judgment* is confirmed; the fix to the
+       *action itself staying grounded once triggered* isn't independently
+       confirmed yet - worth watching for over time, not fully closed out.
+     - **Side effect found the same day, worth watching, not yet acted
+       on**: now that the review genuinely has real content in front of
+       it, the DONE-check call itself sometimes fully elaborates a
+       hallucinated, out-of-persona continuation instead of answering
+       cleanly with "DONE" - one real instance: fabricated additional "car
+       maintenance tips... from reliable sources" not present in the real
+       notes, continuing a real list's numbering as if extending it.
+       Stayed private this time (that call has `stream_output = false` by
+       design - confirmed via the `sidetrack-second-guess` debug tag
+       rather than `chat`, meaning it never reached the screen), but it's
+       the same fuzzy `starts_with(answer, "DONE")` check already known to
+       be imprecise (see the markdown-wrapper-stripping fix above), just
+       demonstrated in a more extreme form - full hallucinated content
+       instead of just a decorated "DONE". Not yet investigated further.
 
 ### Task-runner rewrite (2026-09-02): state machine, live streaming, real tool access, leak fix
 

@@ -191,6 +191,26 @@ void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ollama_system
         task_note.consolidation_level = -1;
         SIDETRACK_CHAT_INSTANCE.history.push_back(task_note);
 
+        // task_note above only describes what to do, not what's actually
+        // being reviewed - without the real exchange, this call was judging
+        // completeness of a response it had never seen, which produced
+        // fabricated "follow-up" tool calls with no basis in the real
+        // conversation (e.g. checking a timer label that was never
+        // mentioned). Copy the real last turn in: walk back from the end of
+        // main_instance.history to (and including) the last "user" message,
+        // so the review gets the actual question, any tool activity in
+        // between, and the actual reply - same idea as run_consolidation()'s
+        // own working_history copy below, just scoped to one turn instead
+        // of the whole conversation.
+        {
+            std::lock_guard<std::mutex> lock(history_mutex);
+            size_t start = main_instance.history.size();
+            while (start > 0 && main_instance.history[start - 1].role != "user") --start;
+            for (size_t i = start; i < main_instance.history.size(); ++i) {
+                SIDETRACK_CHAT_INSTANCE.history.push_back(main_instance.history[i]);
+            }
+        }
+
         comms.INPUT_FROM_USER = "More needed to be done or said? Respond DONE if not.";
         start_second_guess_call(SIDETRACK_CHAT_INSTANCE, comms, tool_worker);
 

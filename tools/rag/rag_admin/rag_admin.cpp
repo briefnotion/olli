@@ -191,6 +191,45 @@ namespace {
 
         std::cout << "\nDone: " << stats.imported << " imported, " << stats.updated << " updated, "
                    << stats.unchanged << " unchanged, " << stats.removed << " removed.\n";
+
+        if (!stats.orphan_folders.empty()) {
+            std::cout << "\nNote: found folder(s) under collection/ with no matching collection, "
+                          "so their files were NOT imported - use \"Create collection\" with the "
+                          "matching name first:\n";
+            for (const auto& name : stats.orphan_folders) std::cout << "  " << name << "\n";
+        }
+    }
+
+    // Regular "Update database" skips anything whose content hash hasn't
+    // changed - fine when only source files change, but it means a change
+    // to the chunking/embedding/filtering logic itself (e.g.
+    // is_low_information_chunk()) never reaches already-imported documents,
+    // since their unchanged content keeps getting skipped forever. This
+    // re-chunks and re-embeds every document regardless, so a logic change
+    // like that actually takes effect on existing data, not just new
+    // imports - see sync_profile_collections()'s own force parameter.
+    void do_force_resync(RAG_DB& db, RAG_EMBEDDER& embedder, const std::string& profile_name)
+    {
+        std::string confirm = prompt_line("\nThis re-chunks and re-embeds every document, even unchanged "
+                                           "ones - can take a while on a large database. Continue? [y/N]: ");
+        if (confirm != "y" && confirm != "Y") { std::cout << "Cancelled.\n"; return; }
+
+        RAG_SYNC_STATS stats = sync_profile_collections(db, embedder, profile_name, /*verbose=*/true, /*force=*/true);
+
+        if (stats.skipped_busy) {
+            std::cout << "\nSync already in progress (rag_tool?) - try again in a moment.\n";
+            return;
+        }
+
+        std::cout << "\nDone: " << stats.imported << " imported, " << stats.updated << " updated, "
+                   << stats.unchanged << " unchanged, " << stats.removed << " removed.\n";
+
+        if (!stats.orphan_folders.empty()) {
+            std::cout << "\nNote: found folder(s) under collection/ with no matching collection, "
+                          "so their files were NOT imported - use \"Create collection\" with the "
+                          "matching name first:\n";
+            for (const auto& name : stats.orphan_folders) std::cout << "  " << name << "\n";
+        }
     }
 
     void do_list_documents(const RAG_DB& db)
@@ -317,6 +356,7 @@ namespace {
                       "7) Search (find a passage)\n"
                       "8) Search documents (survey a topic)\n"
                       "9) View a document's full content\n"
+                      "10) Force resync (rebuild everything, even unchanged)\n"
                       "0) Quit\n";
     }
 
@@ -371,6 +411,7 @@ int main(int argc, char* argv[])
         else if (choice == "7") do_search(db, embedder);
         else if (choice == "8") do_search_documents(db, embedder);
         else if (choice == "9") do_view_document(db);
+        else if (choice == "10") do_force_resync(db, embedder, profile_name);
         else if (choice == "0" || choice == "q" || choice == "Q") quit = true;
         else std::cout << "Unknown choice.\n";
     }

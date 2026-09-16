@@ -7,6 +7,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 #include "rag_db.hpp"
 #include "rag_embed.hpp"
@@ -20,6 +21,15 @@ struct RAG_SYNC_STATS {
     int updated = 0;
     int unchanged = 0;
     int removed = 0;
+
+    // Subfolder names under profile_collection_root_dir() that have no
+    // matching collection row (case-insensitively - same COLLATE NOCASE
+    // comparison RAG_DB::find_collection() itself uses), so their files
+    // were never synced anywhere. Doesn't create the collection or touch
+    // the folder - just surfaces it, since deciding to create a collection
+    // is deliberately a manual rag_admin action, not a side effect of
+    // syncing. Empty when profile_collection_root_dir() doesn't exist yet.
+    std::vector<std::string> orphan_folders;
 
     // True if another process already held the sync lock for this profile
     // and this call didn't run at all (every count above stays 0) - see
@@ -55,4 +65,9 @@ struct RAG_SYNC_STATS {
 // rag_tool already reports the same per-file information back to olli as
 // this function's summary result and its own activity-area line (see its
 // main()) instead.
-RAG_SYNC_STATS sync_profile_collections(RAG_DB& db, RAG_EMBEDDER& embedder, const std::string& profile_name, bool verbose = true);
+// force (default false): re-chunk and re-embed every document even when its
+// content hash is unchanged, instead of skipping it - for when the chunking/
+// embedding/filtering logic itself changed (e.g. is_low_information_chunk()),
+// not the source files, so the normal unchanged-content skip would otherwise
+// leave already-imported documents stuck on stale chunks forever.
+RAG_SYNC_STATS sync_profile_collections(RAG_DB& db, RAG_EMBEDDER& embedder, const std::string& profile_name, bool verbose = true, bool force = false);

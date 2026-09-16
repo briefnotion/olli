@@ -560,6 +560,10 @@ int main(int argc, char* argv[])
                     : (std::to_string(stats.imported) + " imported, " +
                        std::to_string(stats.updated) + " updated, " + std::to_string(stats.unchanged) +
                        " unchanged, " + std::to_string(stats.removed) + " removed"));
+            if (!stats.orphan_folders.empty()) {
+                sync_summary += " (" + std::to_string(stats.orphan_folders.size()) +
+                                 " folder(s) with no matching collection, not imported)";
+            }
             display.set_activity_line("sync", sync_summary);
         }
 

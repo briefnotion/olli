@@ -47,7 +47,7 @@ namespace {
     // sync (see sync_profile_collections() below) - a regular collection
     // leaves both at their defaults (no size filter, plain "{}" metadata).
     void sync_collection(RAG_DB& db, RAG_EMBEDDER& embedder, const RAG_COLLECTION& collection, const std::string& dir,
-                          int& imported, int& updated, int& unchanged, int& removed, bool verbose,
+                          int& imported, int& updated, int& unchanged, int& removed, bool verbose, bool force,
                           int min_words = 0,
                           const std::function<std::string(const std::string&)>& metadata_for = nullptr)
     {
@@ -79,12 +79,12 @@ namespace {
                 [&](const RAG_DOCUMENT& d) { return d.source == path; });
 
             if (existing_doc != existing.end()) {
-                if (existing_doc->content_hash == hash) {
+                if (existing_doc->content_hash == hash && !force) {
                     if (verbose) std::cout << "  " << filename << ": unchanged, skipping\n";
                     unchanged++;
                     continue;
                 }
-                if (verbose) std::cout << "  " << filename << ": changed, reimporting\n";
+                if (verbose) std::cout << "  " << filename << ": " << (existing_doc->content_hash == hash ? "unchanged, forcing reimport" : "changed, reimporting") << "\n";
                 db.delete_document(existing_doc->id);
                 updated++;
             } else {
@@ -101,7 +101,12 @@ namespace {
 
             std::vector<std::string> chunks = chunk_text(content);
             bool ok = true;
+            int stored_count = 0;
             for (size_t i = 0; i < chunks.size(); i++) {
+                if (is_low_information_chunk(chunks[i])) {
+                    if (verbose) std::cout << "    chunk " << i << ": low-information (mostly repeated text), skipping\n";
+                    continue;
+                }
                 std::vector<float> embedding = embedder.embed_document(chunks[i]);
                 if (embedding.empty()) {
                     if (verbose) std::cout << "    embedding failed on chunk " << i << ": " << embedder.last_error() << " - stopping this file\n";
@@ -113,8 +118,9 @@ namespace {
                     ok = false;
                     break;
                 }
+                stored_count++;
             }
-            if (verbose) std::cout << "    " << (ok ? "stored " : "partially stored ") << chunks.size() << " chunk(s)\n";
+            if (verbose) std::cout << "    " << (ok ? "stored " : "partially stored ") << stored_count << " chunk(s)\n";
         }
 
         for (const auto& d : existing) {
@@ -181,7 +187,7 @@ namespace {
     };
 }
 
-RAG_SYNC_STATS sync_profile_collections(RAG_DB& db, RAG_EMBEDDER& embedder, const std::string& profile_name, bool verbose)
+RAG_SYNC_STATS sync_profile_collections(RAG_DB& db, RAG_EMBEDDER& embedder, const std::string& profile_name, bool verbose, bool force)
 {
     RAG_SYNC_STATS stats;
 
@@ -204,7 +210,7 @@ RAG_SYNC_STATS sync_profile_collections(RAG_DB& db, RAG_EMBEDDER& embedder, cons
             RAG_COLLECTION conversations{conversations_id, "conversations", ""};
             if (verbose) std::cout << "\n[conversations] " << chat_logs_dir << "\n";
             sync_collection(db, embedder, conversations, chat_logs_dir, stats.imported, stats.updated, stats.unchanged, stats.removed,
-                             verbose, MIN_CHAT_LOG_WORDS, chat_log_metadata);
+                             verbose, force, MIN_CHAT_LOG_WORDS, chat_log_metadata);
         }
     }
 
@@ -219,7 +225,22 @@ RAG_SYNC_STATS sync_profile_collections(RAG_DB& db, RAG_EMBEDDER& embedder, cons
             continue;
         }
 
-        sync_collection(db, embedder, collection, dir, stats.imported, stats.updated, stats.unchanged, stats.removed, verbose);
+        sync_collection(db, embedder, collection, dir, stats.imported, stats.updated, stats.unchanged, stats.removed, verbose, force);
+    }
+
+    // Reverse direction from the loop above: a folder on disk with no
+    // matching collection row is otherwise invisible to sync (and to
+    // anyone looking) - nothing ever iterates the filesystem to find it,
+    // so its files just silently never get imported. This doesn't create
+    // the collection or touch the folder, just reports it - see
+    // RAG_SYNC_STATS::orphan_folders.
+    std::string collection_root = profile_collection_root_dir(profile_name);
+    if (std::filesystem::is_directory(collection_root)) {
+        for (const auto& entry : std::filesystem::directory_iterator(collection_root)) {
+            if (!entry.is_directory()) continue;
+            std::string folder_name = entry.path().filename().string();
+            if (!db.find_collection(folder_name)) stats.orphan_folders.push_back(folder_name);
+        }
     }
 
     return stats;

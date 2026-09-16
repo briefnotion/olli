@@ -38,6 +38,14 @@ std::string profile_db_path(const std::string& profile_name);
 // effect of merely computing where it would go.
 std::string profile_collection_dir(const std::string& profile_name, const std::string& collection_name);
 
+// The parent of every profile_collection_dir() above -
+// `~/olli_files_<profile_name>/collection/` (or `~/olli_files/collection/`
+// when empty) - for scanning what collection folders actually exist on
+// disk, rather than asking about one already-known name. Used by
+// sync_profile_collections() to spot a folder with no matching collection
+// row yet (rag_sync.hpp's RAG_SYNC_STATS::orphan_folders).
+std::string profile_collection_root_dir(const std::string& profile_name);
+
 // Where a profile's own chat_log files already live -
 // `~/olli_files_<profile_name>/chat_logs/` (or `~/olli_files/chat_logs/`
 // when empty) - olli itself creates and writes to this directory, not

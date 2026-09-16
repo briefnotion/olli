@@ -124,6 +124,11 @@ std::string profile_collection_dir(const std::string& profile_name, const std::s
     return profile_dir(profile_name) + "/collection/" + collection_name;
 }
 
+std::string profile_collection_root_dir(const std::string& profile_name)
+{
+    return profile_dir(profile_name) + "/collection";
+}
+
 std::string profile_chat_logs_dir(const std::string& profile_name)
 {
     return profile_dir(profile_name) + "/chat_logs";

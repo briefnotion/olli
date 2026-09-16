@@ -1,5 +1,7 @@
 #include "rag_chunk.hpp"
 
+#include <cctype>
+#include <set>
 #include <sstream>
 
 namespace {
@@ -73,4 +75,20 @@ std::vector<std::string> chunk_text(const std::string& text, int chunk_words, in
 
     if (!current_chunk.empty()) chunks.push_back(current_chunk);
     return chunks;
+}
+
+bool is_low_information_chunk(const std::string& text)
+{
+    std::istringstream stream(text);
+    std::set<std::string> distinct;
+    int total = 0;
+    std::string word;
+    while (stream >> word) {
+        total++;
+        std::string lower;
+        for (char c : word) lower += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        distinct.insert(lower);
+    }
+    if (total < 20) return false; // too few words for the ratio to mean anything
+    return (static_cast<double>(distinct.size()) / total) < 0.45;
 }

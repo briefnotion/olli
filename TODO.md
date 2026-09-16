@@ -356,6 +356,68 @@ not needed elsewhere.
       the profile's known, not after waiting a full 10 minutes), per
       design discussion; only while actually connected, since a
       disconnected `rag_tool` syncing in the background wasn't asked for.
+  - **Done 2026-09-16: sync now warns about a collection folder with no
+    matching collection row.** Real gap found live: `sync_profile_
+    collections()` only ever iterated existing DB collections against
+    their own folders - never the reverse. A folder dropped under
+    `collection/` without running "Create collection" first was
+    completely invisible to sync: no error, no warning, its files just
+    silently never got imported. Confirmed live against a test profile
+    whose `Notes`/`help` folders sat fully populated on disk but unsynced
+    - a RAG query confidently reported "no info" on content that was
+    right there in the file. New `profile_collection_root_dir()`
+    (`rag_db.hpp`/`.cpp`, mirrors the existing `profile_chat_logs_dir()`)
+    plus `RAG_SYNC_STATS::orphan_folders` (`rag_sync.hpp`) -
+    `sync_profile_collections()` now also scans the profile's `collection/`
+    root and reports any subfolder with no matching collection
+    (case-insensitively, via `db.find_collection()`, so it doesn't create
+    or touch anything - deciding to create a collection stays a deliberate
+    manual action). `rag_admin`'s "Update database" and `rag_tool`'s
+    periodic sync status line both surface it. Verified live: created a
+    throwaway orphan folder, confirmed the warning named it and only it,
+    then removed the test folder.
+  - **Done 2026-09-16: filtered out low-information chunks that were
+    outranking real content, plus a "Force resync" to apply the change to
+    already-imported data.** Real live finding, on `ron`'s actual
+    database, not a synthetic test: `rag_search` for "automotive" ranked a
+    `conversations` chunk at 0.62 - pure repeated boilerplate ("that's a
+    bad taste in the matrix... something's fked up with that remote end."
+    repeated 4x, a leftover from an earlier remote-tool-reconnect failure
+    loop) - *ahead* of `car_maintenance.txt`'s genuine, on-topic content
+    at 0.56. New `is_low_information_chunk()` (`rag_chunk.hpp`/`.cpp`)
+    flags a chunk whose distinct-word ratio falls below 0.45 (calibrated
+    against real data: legitimate notes/conversation chunks measured
+    0.58-0.94, the offending chunk measured 0.26), with a 20-word floor so
+    a short chunk isn't falsely flagged on ratio noise. Wired into
+    `sync_collection()` (`rag_sync.cpp`) before embedding, so a flagged
+    chunk is never even stored.
+    - **Doesn't help already-imported data on its own** - the normal
+      unchanged-content-hash skip means an existing document never gets
+      re-chunked just because the chunking *logic* changed, only when its
+      source file does. New `force` parameter threaded through
+      `sync_collection()`/`sync_profile_collections()` (default `false`,
+      so `rag_tool`'s automatic background sync is entirely unaffected)
+      bypasses that skip - re-chunks and re-embeds every document
+      regardless. New `rag_admin` menu option "10) Force resync (rebuild
+      everything, even unchanged)", with a confirmation prompt since it's
+      a bigger operation than a normal sync.
+    - Verified on a **disposable copy** of `ron`'s real database first
+      (never production directly): confirmed the specific offending chunk
+      was gone, and that a specific query ("tire rotation schedule") now
+      correctly lands `car_maintenance.txt` at the top, clearly relevant.
+      Applied live afterward via the new menu option, then reconfirmed
+      directly against the database (not just trusting the tool's own
+      report): `conversations` 952 -> 901 chunks, the specific offending
+      document down to 2 chunks from 5.
+    - **Only closes the clear-cut anomaly, not the deeper volume-imbalance
+      effect** - `conversations` still has ~75x `Notes`' chunk count
+      (901 vs. 12), so a vague single-word query ("automotive" alone,
+      with no specific phrase to match) still leans toward `conversations`
+      purely on volume, even with the anomaly gone; a specific phrase
+      ("tire rotation schedule") now works cleanly. A second option was
+      discussed and deliberately deferred, not built: collection-aware
+      tie-breaking at query time (prefer `Notes`/`help` over
+      `conversations` when scores are close).
 - **Tools rework - mostly done now** (started 2026-08-21). Pulled every
   `TOOL_*` class out of `olla.h`/`olla.cpp` into their own `tools.h`/
   `tools.cpp`; gave every tool the same `configure`/`register_tool`/`check`/

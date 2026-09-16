@@ -24,3 +24,16 @@
 // Smaller chunks keep each markdown subsection (a natural semantic unit in
 // most imported content) closer to its own chunk.
 std::vector<std::string> chunk_text(const std::string& text, int chunk_words = 150, int overlap_words = 20);
+
+// True if a chunk is dominated by a small number of distinct words repeated
+// many times - found live in a real chat_log (a remote-tool error message,
+// logged, then repeated near-verbatim several times before the next real
+// exchange): such a chunk carries almost no real signal, but its embedding
+// still scored anomalously well against unrelated queries, outranking a
+// genuinely on-topic document for a real search ("automotive" scored 0.62
+// on a 4x-repeated error message vs. 0.56 on the actual on-topic note).
+// Threshold picked from real data: legitimate notes/conversation chunks
+// measured 0.58-0.94 distinct-word ratio; the offending chunk measured
+// 0.26. The word-count floor avoids flagging a short chunk where a low
+// ratio is just sampling noise on few words, not real repetition.
+bool is_low_information_chunk(const std::string& text);

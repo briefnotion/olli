@@ -113,103 +113,108 @@ std::string TOOL_WEB_SEARCH::strip_html_tags(std::string html) {
     return html;
 }
 
-std::string TOOL_WEB_SEARCH::perform_actual_search(const std::string& query, COMMS& comms) {
-    CURL* curl;
-    CURLcode res;
-    std::string readBuffer;
+std::pair<bool, std::string> TOOL_WEB_SEARCH::curl_get(const std::string& url, long timeout_seconds, const std::string& user_agent) {
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        CURL* curl = curl_easy_init();
+        if (!curl) return {false, "Error: Could not initialize libcurl."};
 
-    curl = curl_easy_init();
-    if (curl) {
-
-        char* output = curl_easy_escape(curl, query.c_str(), static_cast<int>(query.length()));
-        std::string encodedQuery(output);
-        curl_free(output);
-
-        std::string url = "https://serpapi.com/search.json?q=" + encodedQuery + "&api_key=" + apiKey;
+        std::string readBuffer;
+        char errbuf[CURL_ERROR_SIZE];
+        errbuf[0] = '\0';
 
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_seconds);
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, CONNECT_TIMEOUT_SECONDS);
         curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+        curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, errbuf);
+        if (!user_agent.empty())
+            curl_easy_setopt(curl, CURLOPT_USERAGENT, user_agent.c_str());
 
-        res = curl_easy_perform(curl);
+        CURLcode res = curl_easy_perform(curl);
         curl_easy_cleanup(curl);
 
-        if (res != CURLE_OK) {
-            return "Error: libcurl failed (" + std::string(curl_easy_strerror(res)) + ")";
-        }
+        if (res == CURLE_OK) return {true, readBuffer};
 
-        try {
-            auto data = json::parse(readBuffer);
+        // Only a timeout gets a second attempt - a slow DNS/TLS/server
+        // hiccup can easily resolve itself a moment later, but a bad
+        // URL/connection-refused/host-not-found will just fail identically
+        // again, so retrying those would only double the wait for nothing.
+        if (res == CURLE_OPERATION_TIMEDOUT && attempt == 0) continue;
 
-            if (data.contains("error")) {
-                return "Search API Error: " + data["error"].get<std::string>();
-            }
-
-            std::string summary = "SEARCH_RESULTS_START\n";
-
-            if (data.contains("organic_results") && data["organic_results"].is_array()) {
-                int count = 0;
-                for (auto& item : data["organic_results"]) {
-                    if (count++ >= 3) break;
-                    std::string link = item.value("link", "");
-                    std::string title = item.value("title", "No Title");
-
-                    summary += "RESULT_ITEM:\n";
-                    summary += "[TITLE]: " + title + "\n";
-                    summary += "[SNIPPET]: " + item.value("snippet", "No description") + "\n";
-                    summary += "[SOURCE_URL]: " + link + "\n\n";
-
-                    if (!link.empty())
-                    {
-                        std::lock_guard<std::mutex> lock(output_buffer_mutex);
-                        comms.TOOL_ATTACHMENTS.emplace_back("link", title, link);
-                    }
-                }
-            } else {
-                summary = "No specific snippets found.";
-            }
-            summary += "SEARCH_RESULTS_END";
-            return summary;
-        } catch (const std::exception& e) {
-            return "Error: Failed to parse search engine response: " + std::string(e.what());
-        }
+        std::string detail = errbuf[0] != '\0' ? std::string(": ") + errbuf : "";
+        return {false, "Error: libcurl failed (" + std::string(curl_easy_strerror(res)) + ")" + detail};
     }
-    return "Error: Could not initialize libcurl.";
+
+    return {false, "Error: libcurl failed (unreachable)."};
 }
 
-std::string TOOL_WEB_SEARCH::fetch_url_content(const std::string& url, COMMS& comms) {
-    CURL* curl;
-    CURLcode res;
-    std::string readBuffer;
+std::pair<bool, std::string> TOOL_WEB_SEARCH::perform_actual_search(const std::string& query, COMMS& comms) {
+    CURL* escape_handle = curl_easy_init();
+    if (!escape_handle) return {false, "Error: Could not initialize libcurl."};
 
-    curl = curl_easy_init();
-    if (curl) {
-        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
-        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-        curl_easy_setopt(curl, CURLOPT_USERAGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
+    char* output = curl_easy_escape(escape_handle, query.c_str(), static_cast<int>(query.length()));
+    std::string encodedQuery(output);
+    curl_free(output);
+    curl_easy_cleanup(escape_handle);
 
-        res = curl_easy_perform(curl);
-        curl_easy_cleanup(curl);
+    std::string url = "https://serpapi.com/search.json?q=" + encodedQuery + "&api_key=" + apiKey;
 
-        if (res != CURLE_OK) return "Error fetching content.";
+    auto [ok, body] = curl_get(url, SEARCH_TIMEOUT_SECONDS);
+    if (!ok) return {false, body};
 
-        {
-            std::lock_guard<std::mutex> lock(output_buffer_mutex);
-            comms.TOOL_ATTACHMENTS.emplace_back("link", url, url);
+    try {
+        auto data = json::parse(body);
+
+        if (data.contains("error")) {
+            return {false, "Search API Error: " + data["error"].get<std::string>()};
         }
 
-        // Strip HTML noise so the model isn't parsing markup as content
-        std::string cleanText = strip_html_tags(readBuffer);
+        std::string summary = "SEARCH_RESULTS_START\n";
 
-        if (cleanText.length() > 4000) return cleanText.substr(0, 4000) + "... [truncated]";
-        return cleanText;
+        if (data.contains("organic_results") && data["organic_results"].is_array()) {
+            int count = 0;
+            for (auto& item : data["organic_results"]) {
+                if (count++ >= 3) break;
+                std::string link = item.value("link", "");
+                std::string title = item.value("title", "No Title");
+
+                summary += "RESULT_ITEM:\n";
+                summary += "[TITLE]: " + title + "\n";
+                summary += "[SNIPPET]: " + item.value("snippet", "No description") + "\n";
+                summary += "[SOURCE_URL]: " + link + "\n\n";
+
+                if (!link.empty())
+                {
+                    std::lock_guard<std::mutex> lock(output_buffer_mutex);
+                    comms.TOOL_ATTACHMENTS.emplace_back("link", title, link);
+                }
+            }
+        } else {
+            summary = "No specific snippets found.";
+        }
+        summary += "SEARCH_RESULTS_END";
+        return {true, summary};
+    } catch (const std::exception& e) {
+        return {false, "Error: Failed to parse search engine response: " + std::string(e.what())};
     }
-    return "Error initializing curl.";
+}
+
+std::pair<bool, std::string> TOOL_WEB_SEARCH::fetch_url_content(const std::string& url, COMMS& comms) {
+    auto [ok, body] = curl_get(url, FETCH_TIMEOUT_SECONDS, "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
+    if (!ok) return {false, body};
+
+    {
+        std::lock_guard<std::mutex> lock(output_buffer_mutex);
+        comms.TOOL_ATTACHMENTS.emplace_back("link", url, url);
+    }
+
+    // Strip HTML noise so the model isn't parsing markup as content
+    std::string cleanText = strip_html_tags(body);
+
+    if (cleanText.length() > 4000) return {true, cleanText.substr(0, 4000) + "... [truncated]"};
+    return {true, cleanText};
 }
 
 void TOOL_WEB_SEARCH::register_tool(ollama_system&, json& tools) {
@@ -244,31 +249,49 @@ void TOOL_WEB_SEARCH::register_tool(ollama_system&, json& tools) {
 }
 
 void TOOL_WEB_SEARCH::handle_tool(ollama_system& chat, std::vector<std::unique_ptr<TOOL_BASE>>&, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const std::string& name, const json& args, const std::string& tc_id) {
+    // integrate_tool_result()'s default framing ("report this real result...
+    // without changing the facts") reads the same whether the tool
+    // succeeded or not, so a plain curl/API error used to get relayed as if
+    // it were a normal answer. This override tells the model plainly it
+    // isn't real data, and trusts it to explain the raw error text (e.g.
+    // "Timeout was reached") in its own words rather than us translating it.
+    static const std::string failure_instruction =
+        "This attempt did NOT succeed - it is an error, not real data. Tell "
+        "the user plainly, in your own words, that it failed and what "
+        "likely went wrong. Do not present this as a real answer to their "
+        "question.";
+
     if (name == "web_search") {
         if (!args.contains("query")) {
             std::string err = "Error: Missing query.";
             chat.send_tool_result(tc_id, err);
-            chat.integrate_tool_result(tool_worker, comms, "", err);
+            chat.integrate_tool_result(tool_worker, comms, failure_instruction, err);
             return;
         }
         std::string query = args.at("query").get<std::string>();
-        std::string result = perform_actual_search(query, comms);
+        auto [ok, result] = perform_actual_search(query, comms);
 
         chat.send_tool_result(tc_id, result);
-        chat.integrate_tool_result(tool_worker, comms, "", "Search results for '" + query + "': " + result);
+        if (ok)
+            chat.integrate_tool_result(tool_worker, comms, "", "Search results for '" + query + "': " + result);
+        else
+            chat.integrate_tool_result(tool_worker, comms, failure_instruction, "The web search for '" + query + "' failed: " + result);
     }
     else if (name == "fetch_website_content") {
         if (!args.contains("url")) {
             std::string err = "Error: Missing URL.";
             chat.send_tool_result(tc_id, err);
-            chat.integrate_tool_result(tool_worker, comms, "", err);
+            chat.integrate_tool_result(tool_worker, comms, failure_instruction, err);
             return;
         }
         std::string url = args.at("url").get<std::string>();
-        std::string result = fetch_url_content(url, comms);
+        auto [ok, result] = fetch_url_content(url, comms);
 
         chat.send_tool_result(tc_id, "Cleaned Page Content from " + url + ":\n" + result);
-        chat.integrate_tool_result(tool_worker, comms, "", "I have fetched and processed the content from " + url + ". Here is the information retrieved: " + result);
+        if (ok)
+            chat.integrate_tool_result(tool_worker, comms, "", "I have fetched and processed the content from " + url + ". Here is the information retrieved: " + result);
+        else
+            chat.integrate_tool_result(tool_worker, comms, failure_instruction, "Fetching content from " + url + " failed: " + result);
     }
     else {
         chat.send_tool_result(tc_id, "Error: Unknown tool.");

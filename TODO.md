@@ -461,6 +461,53 @@ not needed elsewhere.
       them - a pre-existing characteristic (the old `monitor_tool()` had the
       same race), not a regression. Plan is script-defined behavior for an
       out-of-script tool event/result, not yet designed.
+  - **Done 2026-09-16: `TOOL_WEB_SEARCH` curl timeout tuning + honest
+    failure framing.** Real, live-caught bug: `web_search`/
+    `fetch_website_content` return "Error: libcurl failed (...)" whenever
+    curl's own timeout fires - confirmed from `debug_full_history.txt`, a
+    real SF-weather search timed out at exactly 10.02s against
+    serpapi.com, matching the old hardcoded `CURLOPT_TIMEOUT, 10L` to the
+    millisecond. Considered (and rejected) making the tool a remote tool
+    instead, on the theory async would fix it - it wouldn't: curl's own
+    clock runs the same either way, moving the wait to another thread
+    doesn't make serpapi answer faster, and it would've been a whole new
+    subsystem (own process, own PROTOCOL.md registration, its own "is it
+    even running" failure mode) to fix a value that just needed tuning.
+    - **`perform_actual_search()`/`fetch_url_content()`'s duplicated curl
+      setup collapsed into one new private helper, `curl_get()`**
+      (`tools.h`/`.cpp`) - timeout raised from 10s/15s to 20s/25s, a new
+      separate `CURLOPT_CONNECTTIMEOUT` (5s) so a slow DNS/TLS handshake
+      can't eat the whole budget before the real request starts, one
+      retry gated specifically on `CURLE_OPERATION_TIMEDOUT` (a bad
+      URL/host-not-found won't succeed on a blind retry, so those still
+      fail immediately), and `CURLOPT_ERRORBUFFER` for the specific
+      failure detail beyond `curl_easy_strerror()`'s generic category.
+    - **Honest failure framing, found from a different live gap**:
+      `integrate_tool_result()`'s default `[DIRECTOR_NOTE]` framing
+      ("report this real result... without changing the facts") reads
+      identically whether the tool succeeded or not, so a raw curl error
+      used to get narrated with the same instructions as a real answer.
+      `perform_actual_search()`/`fetch_url_content()` now return
+      `std::pair<bool, std::string>` instead of a bare string, so
+      `handle_tool()` can tell success from failure directly rather than
+      guessing from an "Error:" prefix, and passes a distinct
+      `Special_Instruction` on failure telling the model plainly it's not
+      real data and to explain what went wrong in its own words - no
+      error-code translation table needed, the model handles that fine on
+      its own once it knows it's looking at a failure. Reuses
+      `integrate_tool_result()`'s existing `Special_Instruction` parameter
+      (same mechanism `rag_get_document` already uses for its own
+      verbatim-relay case) rather than touching the shared function itself
+      - every other tool is unaffected.
+    - Verified live, twice: a non-routable IP (`http://10.255.255.1`) hit
+      the real timeout+retry path and got "That URL didn't respond. The
+      connection timed out, so it's either down or blocked." - exactly the
+      intended honest framing. A fake domain
+      (`this-domain-does-not-exist-asdkjh123.com`) turned out to test
+      something else entirely - the model declined to even call the tool
+      ("I don't have permission to visit external sites without a valid
+      reason"), a hallucinated restriction that doesn't exist anywhere in
+      the code, not something this fix touches or could fix.
 
 ## Session & model behavior
 

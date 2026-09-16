@@ -6,6 +6,7 @@
 #include <vector>
 #include <memory>
 #include <filesystem>
+#include <utility>
 
 #include <nlohmann/json.hpp>
 
@@ -131,8 +132,12 @@ class TOOL_WEB_SEARCH : public TOOL_BASE
 
         std::string strip_html_tags(std::string html);
 
-        std::string perform_actual_search(const std::string& query, COMMS& comms);
-        std::string fetch_url_content(const std::string& url, COMMS& comms);
+        // {true, result-text} on success, {false, failure-text} otherwise -
+        // handle_tool() uses this (not the text itself) to decide whether
+        // integrate_tool_result() gets the normal "report this real result"
+        // framing or the distinct failure framing (tools.cpp).
+        std::pair<bool, std::string> perform_actual_search(const std::string& query, COMMS& comms);
+        std::pair<bool, std::string> fetch_url_content(const std::string& url, COMMS& comms);
 
         void handle_tool(ollama_system& chat, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const std::string& name, const json& args, const std::string& tc_id);
 
@@ -140,6 +145,24 @@ class TOOL_WEB_SEARCH : public TOOL_BASE
             static_cast<std::string*>(userp)->append(static_cast<const char*>(contents), size * nmemb);
             return size * nmemb;
         }
+
+        // Shared by perform_actual_search()/fetch_url_content() - the only
+        // difference between the two curl calls used to be timeout value and
+        // an optional user-agent string, so both now funnel through here.
+        // Returns {true, body} on success, {false, "Error: ..."} on failure
+        // (curl_easy_strerror()'s category plus whatever detail
+        // CURLOPT_ERRORBUFFER captured, if anything). Retries exactly once,
+        // and only for a timeout specifically - a slow DNS/TLS/server
+        // hiccup is common enough to be worth one more attempt, but a bad
+        // URL/connection-refused/host-not-found won't succeed on a blind
+        // retry, so those fail immediately instead of doubling the wait for
+        // no benefit. CONNECT_TIMEOUT_SECONDS bounds DNS+connect+TLS
+        // handshake on its own, so a slow handshake can't eat the entire
+        // overall timeout before the actual request even starts.
+        static constexpr long SEARCH_TIMEOUT_SECONDS = 20;
+        static constexpr long FETCH_TIMEOUT_SECONDS = 25;
+        static constexpr long CONNECT_TIMEOUT_SECONDS = 5;
+        std::pair<bool, std::string> curl_get(const std::string& url, long timeout_seconds, const std::string& user_agent = "");
 
         std::string apiKey = "Enter_API_key_for_serpapi.com";
 

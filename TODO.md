@@ -570,6 +570,105 @@ not needed elsewhere.
       ("I don't have permission to visit external sites without a valid
       reason"), a hallucinated restriction that doesn't exist anywhere in
       the code, not something this fix touches or could fix.
+  - **Done 2026-09-17: a persistent keyboard-state bug, and a real per-line
+    delay mechanism for task-runner scripts, both found via live use.**
+    - **Enter-keypress silently dropped in a fast burst - real bug, not a
+      tmux artifact.** `KEYBOARD_INPUT::keyboard_input()` (`user_io.cpp`)
+      used to track "was the last processed byte also Enter-class" as a
+      class member (`last_char_was_enter`), meant only to stop a genuine
+      `\r\n` pair (two bytes, one keypress) from double-submitting. Bug:
+      being a class member, it persisted across completely unrelated
+      keypress events, not just within one physical Enter's own byte pair
+      - submitting a real message (ending in Enter) left it `true`, and the
+      *next*, entirely separate Enter (e.g. a `[PAUSE]` prompt's "press
+      Enter to continue") got silently swallowed, needing a second press to
+      register. Fixed by making it a local variable inside
+      `keyboard_input()`, reset fresh every call - a genuine `\r\n` pair
+      still arrives and drains together in one call, but a later, distinct
+      keypress no longer inherits stale state from an unrelated earlier one.
+    - **`TASK_SIMPLE::delay_tool_returns` (default `true`) + a new
+      `[WAIT_FOR_RESULT]` script command**, `tools_helper.h`/`.cpp` and
+      `TOOL_TASK_RUNNER::handle_tool()`'s own while loop (`tools.cpp`) -
+      see the entry above (2026-09-16, tool_worker rewrite) for the
+      out-of-script routing race this is the first real fix for. While a
+      script runs with `delay_tool_returns` set, its own
+      `instance.process()` calls stop draining `tool_worker`'s pending
+      results/events entirely (drained manually into local
+      `held_results`/`held_events` instead, right before that same call, so
+      nothing is lost - just not narrated live through the script's own
+      throwaway context/persona) - everything held gets replayed on
+      `instance` once the script's own command list finishes, right before
+      its final report. A held event's follow-up action goes onto `chat`'s
+      own `pending_tool_calls`, not `instance`'s - confirmed via
+      `process()`'s own PART 2 comment (`olla.cpp`) that a background task
+      instance gets `tool_worker` forced to `nullptr` on every tick once
+      it's marked complete, so anything still sitting in `instance`'s own
+      queue by then could never actually reach a real tool.
+      `[WAIT_FOR_RESULT]` is the opt-in escape hatch for a specific line
+      that needs its answer *now* instead of at the end (new
+      `SCRIPT_STATE::WAIT_TOOL_RESULT`, `tools_task_script.h`/`.cpp` -
+      `advance_script_state()`'s own case for it is a no-op, resolved
+      entirely in `handle_tool()`'s loop, so `tools_task_script.*` never
+      needs to know `held_results` exists at all).
+      - **First implementation attempt reintroduced the exact CPU-pegging
+        bug this session's own tool_worker rewrite had already hit once**
+        (see the 2026-09-14/15 entry) - `TOOL_TASK_RUNNER::handle_tool()`'s
+        while loop turned out to have *no pacing of its own at all*, ever;
+        it was silently leaning on `tool_worker`'s own atomics-rendezvous
+        wait (inside `instance.process()`'s old draining call) as an
+        accidental throttle. Skipping that draining call removed the only
+        thing keeping the loop from spinning as fast as the CPU allowed -
+        confirmed live (one core pegged at 100% the whole time a script
+        ran). Fixed with a plain, explicit `sleep_for(20ms)` at the bottom
+        of the loop, matching `tool_worker`'s/`io_worker`'s own cadence -
+        first case found this session of two *different* features
+        independently uncovering the same "this loop has always
+        implicitly depended on someone else's side effect for its own
+        pacing" fragility.
+      - **`[WAIT_FOR_RESULT]`'s own first two implementations were both
+        wrong, both found and fixed via live testing against the exact
+        race they were meant to solve** (a 30-second timer set earlier in
+        `system_test.task`, deliberately timed to still be running when
+        the script reaches "what time is it?"): (1) naively taking
+        `held_results.front()` grabbed an *earlier*, unrelated command's
+        own still-unclaimed result (e.g. "turn off all the lights"'
+        confirmation) instead of the clock's answer - fixed by capturing
+        how many results were already queued before the wait started
+        (`wait_baseline_results`) and only accepting something arriving
+        *past* that point, leaving the stale backlog untouched for the
+        normal end-of-script replay. (2) That baseline was still captured
+        too late - at the moment `[WAIT_FOR_RESULT]` itself is reached,
+        which can be several ticks after the triggering command's own
+        dispatch - so a fast-answering tool's real result (a local clock,
+        answering in about a second) could already be sitting in the queue
+        by the time the marker line was reached, getting wrongly folded
+        into "already there" instead of recognized as the answer. Fixed by
+        capturing the baseline at the one tick `EXECUTE_COMMAND` actually
+        runs (inherently transient, always moving straight to
+        `WAIT_RESPONSE`) - the exact instant the triggering command's own
+        request goes out, not whenever the script happens to reach the
+        marker afterward. Separately, checking `held_events` in this same
+        wait was *also* wrong even before that timing fix - a completely
+        unrelated background event (that same 30-second timer's own
+        expiry, unprompted, mid-wait) satisfied the wait instead of the
+        clock's real answer, confirmed live. An event is by definition
+        unsolicited, never a direct response to anything a script line
+        asked for, so `[WAIT_FOR_RESULT]` now only ever watches
+        `held_results` - an event landing during the wait just joins the
+        normal backlog instead.
+      - **Considered and explicitly rejected**: matching a held result to
+        its triggering command by the call's own id, instead of by timing/
+        position - more robust in principle (sidesteps every race above by
+        construction), but the id isn't visible from outside
+        `ollama_system::process()`/`dispatch_tool_call()` without touching
+        them, which would have broken this feature's own scope (confined
+        entirely to `tools.cpp`/`tools_task_script.cpp`, deliberately, per
+        the isolation `tools_task_script.*`'s own functions already have).
+        Chose to keep the isolation and accept the more intricate
+        timing-based correlation instead - a real, acknowledged trade-off,
+        not an oversight. Revisit if more edge cases turn up.
+    - Both applied to `system_test.task` and live-tested against real
+      `ron`/`claude` profile runs, not just compiled.
 
 ## Session & model behavior
 

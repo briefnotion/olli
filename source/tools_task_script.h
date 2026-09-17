@@ -27,6 +27,16 @@ enum class SCRIPT_STATE
     WAIT_RESPONSE,  // drain the LLM's turn (incl. any tool calls) to completion
     WAIT_ENTER,     // [PAUSE] - pure local pause, no LLM involved
     WAIT_ASK,       // [ASK] - same wait, but the typed answer becomes the next input
+
+    // [WAIT_FOR_RESULT] - pause until the remote-tool call the previous
+    // line triggered actually answers, instead of the default (a script's
+    // held results/events all wait until the whole run is done - see
+    // TASK_SIMPLE::delay_tool_returns, tools_helper.h). advance_script_
+    // state()'s own case for this is a no-op - resolving it needs
+    // TOOL_TASK_RUNNER::handle_tool()'s own held_results/held_events
+    // (tools.cpp), which this file deliberately has no access to.
+    WAIT_TOOL_RESULT,
+
     DONE
 };
 
@@ -59,6 +69,12 @@ std::string sanitize_path_segment(const std::string& raw);
 // commands run, not around every single one of them.
 void command_pause(SCRIPT_STATE& state, COMMS& instance_comms, bool& keyboard_was_enabled);
 void command_ask(SCRIPT_STATE& state, COMMS& instance_comms, const std::string& command, bool& keyboard_was_enabled);
+
+// [WAIT_FOR_RESULT] - just the state transition; no keyboard_was_enabled
+// save/restore needed (unlike command_pause/command_ask above), nothing
+// here waits on a human. See SCRIPT_STATE::WAIT_TOOL_RESULT's own comment
+// for why resolving the wait itself happens outside this file entirely.
+void command_wait_for_result(SCRIPT_STATE& state);
 void command_print(size_t& i, COMMS& instance_comms, const std::string& command);
 void command_file_in(SCRIPT_STATE& state, std::string& current_input, COMMS& instance_comms, const std::string& command, const std::filesystem::path& files_dir, bool& keyboard_was_enabled);
 void command_file_append(size_t& i, ollama_system& instance, const std::string& command, const std::filesystem::path& files_dir);

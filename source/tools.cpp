@@ -2,6 +2,7 @@
 #define tools_cpp
 
 #include <regex>
+#include <thread>
 
 #include <curl/curl.h>
 
@@ -668,6 +669,38 @@ void TOOL_TASK_RUNNER::handle_tool(IO_WORKER_CLASS& io_worker, ollama_system& ch
         size_t i = 0;
         std::string current_input;
 
+        // Held here (this function's own stack, nothing new on tool_worker
+        // or the instance) instead of letting instance.process() drain them
+        // live, when found_task.delay_tool_returns (the default) - a stray
+        // remote-tool event/result mid-script (a timer firing, presence
+        // changing) used to get absorbed into this throwaway instance and
+        // narrated under its own system prompt, out of context, instead of
+        // ever reaching the real conversation. Replayed once the script's
+        // own command list is done, below.
+        std::vector<TOOL_RESULT> held_results;
+        std::vector<TOOL_EVENT> held_events;
+
+        // [WAIT_FOR_RESULT] support. wait_baseline_results is how many
+        // items were already sitting in held_results before the command
+        // this marker is waiting on even started - captured in
+        // pre_command_result_baseline at the one tick EXECUTE_COMMAND runs
+        // (see below), NOT when the marker itself is later reached. That
+        // distinction matters: a fast remote tool (a local clock, say) can
+        // answer within a tick or two, well before the script even gets to
+        // its own [WAIT_FOR_RESULT] line - capturing "late" would fold that
+        // already-arrived answer into the baseline instead of catching it,
+        // confirmed live (the wait just hung, waiting for a second answer
+        // that was never coming). Anything already queued before the
+        // triggering command even started (e.g. an earlier, unmarked
+        // command's own result) is a stale backlog item, not what this
+        // wait is for - left completely alone, still reported normally in
+        // the end-of-script replay below. held_events is deliberately not
+        // part of this at all, see the WAIT_TOOL_RESULT handling below for
+        // why.
+        size_t pre_command_result_baseline = 0;
+        size_t wait_baseline_results = 0;
+        bool wait_baseline_set = false;
+
         // Save slot for ENABLE_KEYBOARD_INPUT, persistent across whatever
         // multi-tick WAIT_ENTER/WAIT_ASK wait is currently in progress - see
         // command_pause()'s own comment (tools_task_script.h) for what this
@@ -685,6 +718,38 @@ void TOOL_TASK_RUNNER::handle_tool(IO_WORKER_CLASS& io_worker, ollama_system& ch
         // while-loops each spinning their own exchange() calls.
         while (state != SCRIPT_STATE::DONE)
         {
+            // EXECUTE_COMMAND is transient - one tick only, always moving
+            // straight to WAIT_RESPONSE before the loop comes back around
+            // (command_execute_command(), tools_task_script.cpp) - so
+            // catching state here, before this same tick's own pre-drain
+            // below runs, is exactly "held_results.size() the instant
+            // before this command's own request goes out". See
+            // pre_command_result_baseline's own comment above for why this
+            // has to happen here and not when [WAIT_FOR_RESULT] is reached.
+            if (state == SCRIPT_STATE::EXECUTE_COMMAND)
+            {
+                pre_command_result_baseline = held_results.size();
+            }
+
+            // Taken out from under instance.process()'s own PART 5 (olla.cpp)
+            // before it runs, so there's nothing left for it to drain/narrate
+            // live this tick - held_results/held_events above just accumulate
+            // whatever shows up, tool_worker's own buffering unaffected
+            // either way. instance.process() itself is called completely
+            // unchanged right after (see its own comment below) - this
+            // doesn't touch its signature or behavior at all, so the loop
+            // keeps whatever incidental pacing it already had from that call.
+            if (found_task.delay_tool_returns && tool_worker)
+            {
+                TOOL_RESULT held_result;
+                while (tool_worker->get_pending_result(held_result))
+                    held_results.push_back(held_result);
+
+                TOOL_EVENT held_event;
+                while (tool_worker->get_pending_event(held_event))
+                    held_events.push_back(held_event);
+            }
+
             // nullptr, not the real CLASS_SYSTEM: this automation instance
             // is isolated from the real system's, same reasoning as
             // sidetrack.cpp's own nullptr call site (see TOOL_BASE::check()'s
@@ -694,7 +759,52 @@ void TOOL_TASK_RUNNER::handle_tool(IO_WORKER_CLASS& io_worker, ollama_system& ch
             // do something under its own judgment, not just talk about it.
             instance.process(io_worker, nullptr, tools_list, tool_worker, instance_comms);
 
-            advance_script_state(state, i, current_input, found_task, instance, instance_comms, tool_worker, files_dir, keyboard_was_enabled);
+            // [WAIT_FOR_RESULT] - advance_script_state()'s own case for this
+            // state is a no-op (tools_task_script.cpp); resolving it needs
+            // held_results, which only this loop has. Waits specifically for
+            // a result arriving after the triggering command started
+            // (wait_baseline_results, copied from pre_command_result_
+            // baseline above - not re-captured here, see its own comment for
+            // why), not just whatever's at the front - an earlier, unmarked
+            // command's own stale result sitting ahead of it in the queue is
+            // left untouched, still reported normally in the end-of-script
+            // replay below, not mistaken for the answer this particular
+            // wait is for. held_events is deliberately never
+            // checked here at all - an event is by definition unsolicited
+            // (a timer firing on its own, presence changing), never a direct
+            // response to anything this script just asked, so one landing
+            // during the wait (confirmed live: a timer set earlier in the
+            // same script expiring mid-wait) must not be mistaken for the
+            // answer either - it just joins the normal backlog like any
+            // other event would. Narrates the real result immediately,
+            // in-context, instead of holding it that long. Nothing new yet
+            // just means staying in this state and checking again next tick;
+            // tool_worker's own CALL_TIMEOUT_SECONDS (tool_worker.h) already
+            // bounds how long that can go on for, so this can't hang forever
+            // on a broken remote tool.
+            if (state == SCRIPT_STATE::WAIT_TOOL_RESULT)
+            {
+                if (!wait_baseline_set)
+                {
+                    wait_baseline_results = pre_command_result_baseline;
+                    wait_baseline_set = true;
+                }
+
+                if (held_results.size() > wait_baseline_results)
+                {
+                    TOOL_RESULT result = held_results[wait_baseline_results];
+                    held_results.erase(held_results.begin() + static_cast<std::ptrdiff_t>(wait_baseline_results));
+                    instance.send_tool_result(result.call_id, result.response);
+                    instance.integrate_tool_result(tool_worker, instance_comms, result.special_instruction, result.response);
+                    ++i;
+                    state = SCRIPT_STATE::GET_COMMAND;
+                    wait_baseline_set = false;
+                }
+            }
+            else
+            {
+                advance_script_state(state, i, current_input, found_task, instance, instance_comms, tool_worker, files_dir, keyboard_was_enabled);
+            }
 
             io_worker.exchange(instance_comms, tool_worker);
 
@@ -711,6 +821,14 @@ void TOOL_TASK_RUNNER::handle_tool(IO_WORKER_CLASS& io_worker, ollama_system& ch
                 instance_comms.EXIT_REQUESTED = false;
                 state = SCRIPT_STATE::DONE;
             }
+
+            // This loop has no pacing of its own otherwise - every call in
+            // it (instance.process(), advance_script_state(), exchange())
+            // can in principle return almost immediately, so without this
+            // it can spin as fast as the CPU allows instead of ticking at a
+            // sane rate. Same ~20ms cadence as tool_worker's own thread_main()
+            // (tool_worker.cpp) and IO_WORKER_CLASS's main loop (main.cpp).
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
 
         // Safety net - WAIT_RESPONSE already joins instance.chat_thread once
@@ -719,6 +837,50 @@ void TOOL_TASK_RUNNER::handle_tool(IO_WORKER_CLASS& io_worker, ollama_system& ch
         if (instance.chat_thread.joinable())
         {
             instance.chat_thread.join();
+        }
+
+        // Replay whatever got held above, on instance/instance_comms - same
+        // treatment instance.process()'s own PART 5 (olla.cpp) would have
+        // given each one live, just deferred to here so it happens in the
+        // script's own voice/context instead of interleaved with whatever
+        // command was running when it actually arrived. send()/
+        // integrate_tool_result() block until the model's reply is fully
+        // generated (no internal threading), so each of these completes
+        // before the next starts - no separate wait loop needed for them.
+        for (auto& result : held_results)
+        {
+            instance.send_tool_result(result.call_id, result.response);
+            instance.integrate_tool_result(tool_worker, instance_comms, result.special_instruction, result.response);
+        }
+
+        for (auto& event : held_events)
+        {
+            if (!event.message.empty())
+            {
+                instance.integrate_tool_result(tool_worker, instance_comms, "", event.message);
+            }
+
+            // NOT instance.pending_tool_calls - instance is a background_
+            // tasks entry (chat.spawn_background_task()) that gets erased
+            // once this function marks it complete below, and process()'s
+            // own PART 2 (olla.cpp) explicitly passes nullptr for tool_worker
+            // on every tick after that (by design - a background task is
+            // assumed fully drained by the time handle_tool() returns), so
+            // anything still sitting in instance's own queue by then could
+            // never actually reach a real remote tool. chat.pending_tool_
+            // calls is the real, long-lived conversation's own queue - its
+            // regular ticking (main.cpp) picks this up and dispatches it
+            // for real, whenever tool_worker's response actually arrives,
+            // same as any other out-of-band event already does today.
+            if (!event.action_tool.empty())
+            {
+                chat.tool_calls_this_turn = 0;
+                chat.pending_tool_calls.push({
+                    "system_action_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()),
+                    event.action_tool,
+                    event.action_arguments
+                });
+            }
         }
 
         // WAIT_RESPONSE resets this to false right after each command

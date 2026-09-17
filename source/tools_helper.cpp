@@ -73,6 +73,8 @@ void TASK_SIMPLE_MANAGER::load_all_task(const std::filesystem::path& scripts_dir
                     tmp_task.TASK_PURPOSE = value;
                 else if (parse_header_line(line, "DIRECTORY", value))
                     tmp_task.TASK_DIRECTORY = value;
+                else if (parse_header_line(line, "DELAY_TOOL_RETURNS", value))
+                    tmp_task.delay_tool_returns = (value != "false");
             }
             else if (!line.empty())
             {

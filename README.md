@@ -162,6 +162,22 @@ script only needs one `[KEYBOARD_INPUT:off]` near the top, not one around
 every command that needs input. `[TTS_OUTPUT]` has no such auto-restore;
 turn it back on explicitly wherever the script should start talking again.
 
+A fourth, optional header line, `DELAY_TOOL_RETURNS: false`, controls when a
+remote tool's answer (a clock, a light, anything not answered directly by
+the model) actually gets narrated. It defaults to `true` - every such answer
+is held until the whole script finishes, then reported all at once, right
+before the final completion summary - so a background timer firing midway
+through a long script doesn't interrupt whatever command happens to be
+running with an out-of-context announcement. If a specific line's answer
+matters immediately (e.g. "what time is it?" as an actual question the
+script needs answered now, not minutes from now), follow that line with
+`[WAIT_FOR_RESULT]` - it pauses the script until that line's own tool call
+answers, narrates it right there, then continues; only that one command's
+answer jumps the queue, everything else still waits for the end.
+`[WAIT_FOR_RESULT]` only makes sense after a line that calls a *remote*
+tool (clock/lights/etc.) - a plain question or a built-in tool (like
+`web_search`) already answers inline, with nothing to wait for.
+
 Every task gets its own folder under the profile's `files/` directory -
 `~/olli_files_<name>/files/<dir>/`, where `<dir>` is the `.task` file's own
 `DIRECTORY:` name if it set one, or its `NAME:` otherwise (either way, run

@@ -388,12 +388,23 @@ void KEYBOARD_INPUT::keyboard_input()
     {
         char ch;
 
+        // True if the previous byte drained in THIS pass was also an
+        // Enter-class byte (10/13/'\r') - lets a genuine \r\n pair (two
+        // bytes, one keypress) submit exactly once. Local, not a class
+        // member that would persist across separate calls - a \r\n pair
+        // from one physical keypress arrives together and drains in the
+        // same pass through this loop, but a later, distinct keypress
+        // (even a fresh Enter at a totally different prompt) doesn't, so
+        // it needs a fresh start every call. Keeping this as a class
+        // member instead was a real bug: a stray leftover 'true' from
+        // submitting a message earlier silently swallowed the very next
+        // unrelated Enter (e.g. a [PAUSE] prompt's "press Enter to
+        // continue"), requiring a second press to get through.
+        bool last_char_was_enter = false;
 
         // read() will now return 0 if no character is waiting
         while (read(STDIN_FILENO, &ch, 1) > 0)
         {
-
-            double gap_time = enter_ready.elapsed_time();
 
             //std::cout << static_cast<int>(ch) << std::endl;
             if (ch == 3) // Ctrl+C (ETX) - see EXIT_REQUESTED's comment in user_io.h
@@ -406,7 +417,17 @@ void KEYBOARD_INPUT::keyboard_input()
                 {
                     LINE += '\n';
                     if (PROPS.RAW_ECHO) std::cout << "\r\n" << std::flush;
-                    if (gap_time > 0.1)
+                    // A real \r\n-terminated Enter delivers two Enter-class
+                    // bytes for one keypress - only the first should submit.
+                    // Gating on a minimum time gap since the last byte of
+                    // ANY kind (the old approach) also swallowed a genuine
+                    // Enter that arrived quickly after other input - e.g. a
+                    // burst-sent tmux send-keys "text" Enter, where the
+                    // whole line and the Enter land back-to-back with no
+                    // natural typing gap. Gating on "was the immediately
+                    // preceding byte also Enter-class" instead only
+                    // suppresses the actual duplicate-byte case.
+                    if (!last_char_was_enter)
                     {
                         INTERRUPTED = true;
                         ENTER_PRESSED = true;
@@ -513,7 +534,7 @@ void KEYBOARD_INPUT::keyboard_input()
             }
 
 
-            enter_ready.start_timer(); // Reset the timer on each key press
+            last_char_was_enter = (ch == 10 || ch == 13 || ch == '\r');
         }
 
         // Voca (speech-to-text) input is drained separately in

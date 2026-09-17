@@ -38,6 +38,11 @@ void command_pause(SCRIPT_STATE& state, COMMS& instance_comms, bool& keyboard_wa
     state = SCRIPT_STATE::WAIT_ENTER;
 }
 
+void command_wait_for_result(SCRIPT_STATE& state)
+{
+    state = SCRIPT_STATE::WAIT_TOOL_RESULT;
+}
+
 void command_ask(SCRIPT_STATE& state, COMMS& instance_comms, const std::string& command, bool& keyboard_was_enabled)
 {
     keyboard_was_enabled = instance_comms.ENABLE_KEYBOARD_INPUT;
@@ -140,6 +145,10 @@ void command_get_command(SCRIPT_STATE& state, size_t& i, std::string& current_in
     else if (starts_with(command, "[ASK]"))
     {
         command_ask(state, instance_comms, command, keyboard_was_enabled);
+    }
+    else if (starts_with(command, "[WAIT_FOR_RESULT]"))
+    {
+        command_wait_for_result(state);
     }
     else if (starts_with(command, "[PRINT]"))
     {
@@ -393,6 +402,13 @@ void advance_script_state(SCRIPT_STATE& state, size_t& i, std::string& current_i
 
         case SCRIPT_STATE::WAIT_RESPONSE:
             command_wait_response(state, i, instance);
+            break;
+
+        // No-op here on purpose - see SCRIPT_STATE::WAIT_TOOL_RESULT's own
+        // comment (tools_task_script.h). TOOL_TASK_RUNNER::handle_tool()'s
+        // own loop (tools.cpp) checks for this state itself and resolves it
+        // once something lands in its held_results/held_events.
+        case SCRIPT_STATE::WAIT_TOOL_RESULT:
             break;
 
         case SCRIPT_STATE::DONE:

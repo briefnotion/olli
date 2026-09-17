@@ -17,6 +17,18 @@ struct TASK_SIMPLE
         std::string TASK_NAME = "";
         std::string TASK_PURPOSE = "";
         std::string TASK_DIRECTORY = "";
+
+        // Optional "DELAY_TOOL_RETURNS: false" header line - defaults true
+        // since a stray remote-tool event/result landing mid-script (a
+        // timer firing, presence changing) used to get absorbed into this
+        // script's own throwaway instance and narrated under its system
+        // prompt instead of ever reaching the real conversation - true
+        // unless a script has a specific reason to see live returns as it
+        // runs, so an unwritten script can't regress into that by default.
+        // See TOOL_TASK_RUNNER::handle_tool()'s own use of this
+        // (tools.cpp) for where it's actually applied.
+        bool delay_tool_returns = true;
+
         std::vector<std::string> COMMANDS;
         void clear();
 };

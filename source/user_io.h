@@ -65,7 +65,6 @@ class KEYBOARD_INPUT
     private:
 
         struct termios oldt, newt;
-        EFFICIANTCY_TIMER_EASY enter_ready;
 
     public:
 

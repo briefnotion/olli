@@ -984,6 +984,48 @@ not needed elsewhere.
     `crash_log.txt` in the profile's `olli_files_<name>/` directory directly
     - durable regardless of terminal/screen state or OS crash-reporting
     config, which core dumps and `std::cerr` messages both are not.
+  - **Still unexplained as of 2026-09-17** - kept recurring this week
+    (`ron`'s `crash_log.txt`: 3x on 2026-09-13, 2026-09-16 17:12,
+    2026-09-17 00:47, and twice back-to-back at 01:29:39, which is what
+    actually took olli down overnight - it sat dead until manually
+    restarted ~2.5 hours later since the third auto-restart attempt never
+    got logged as a further crash, so something outside olli itself must
+    have relaunched it). All of these are `SIGABRT` (signal 6), not
+    `SIGSEGV` - consistent with glibc detecting heap corruption
+    (double-free / invalid pointer) or a hard assert, not a slow leak.
+    Still no stack trace, since apport's unpackaged-binary gap (above)
+    was never actually worked around.
+  - **Backtraces added 2026-09-17**: `main()` now installs a real signal
+    handler (`crash_signal_handler`/`install_crash_handler`, main.cpp) for
+    `SIGSEGV`/`SIGABRT`/`SIGFPE`/`SIGILL`/`SIGBUS`, registered fresh on
+    every `execv()`'d restart same as `SIGPIPE`'s `SIG_IGN` just above it.
+    On a crash it writes a `backtrace_symbols_fd()` dump straight into
+    `crash_log.txt` via a raw fd opened ahead of time in
+    `install_crash_handler()` - no `std::ofstream`/`std::string` work
+    inside the handler itself, since the heap or libc's own locks could be
+    in a corrupted state exactly when this fires (see `man 7
+    signal-safety`). `backtrace()` is warmed up once at startup so its
+    first real (lazy-allocating) call isn't the one happening mid-signal.
+    After writing the backtrace it restores the signal's default
+    disposition and re-raises, so `main()`'s supervisor still sees a real
+    `WIFSIGNALED()`/`WTERMSIG()` termination and its own crash-loop
+    logging/give-up behavior is unchanged. `source/CMakeLists.txt` also
+    now adds `-g` (debug info, zero runtime cost) and `-rdynamic` (so
+    `backtrace_symbols_fd()` can resolve olli's own function names, not
+    just bare addresses) to the non-MSVC build. Tested with the existing
+    `--debug-crash` hook run inside a real tmux pty (the sandbox's fake
+    `$TERM` masks it, same gotcha noted in the 2026-08-23 entry above):
+    all 3 crash-loop attempts produced a correct backtrace pointing at
+    `main_process()`, and the give-up-after-3 behavior was unaffected.
+    Installed to `~/olli` via `install_to_home.sh`; the already-running
+    `ron`/`claude` sessions won't have this until their next restart
+    (crash or manual) picks up the new binary. Function names in the
+    trace are still C++-mangled (e.g. `_Z12main_process...`) - pipe a
+    line through `c++filt` to read it; not demangled in the handler
+    itself since `abi::__cxa_demangle()` allocates, which is exactly what
+    the handler otherwise avoids. Root cause of the `SIGABRT`s themselves
+    is still not diagnosed - this only means the *next* one leaves real
+    evidence instead of just a signal name.
 - **Found and fixed 2026-09-04: `qwen3:8b` silently refusing to call
   `run_automation_task` for an unfamiliar task name.** After adding a new
   `.task` file (`print test`) to a profile's `scripts/` directory, saying

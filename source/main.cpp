@@ -10,6 +10,8 @@
 #include <cstring>
 #include <curl/curl.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <execinfo.h>
 #include <sys/wait.h>
 #include <sys/resource.h>
 
@@ -86,6 +88,84 @@ namespace {
             // Best-effort only.
         }
     }
+
+    // A SIGSEGV/SIGABRT/etc. crash bypasses main_process()'s try/catch
+    // entirely (signals aren't C++ exceptions) and, until now, left nothing
+    // behind but the supervisor's own "terminated by signal N" line in
+    // crash_log.txt - true for every one of the still-undiagnosed crashes in
+    // TODO.md's "Unexplained crash" entry. Ubuntu's apport drops core dumps
+    // for locally-built binaries like this one (also in TODO.md), so a real
+    // core file isn't a reliable fallback here either. This writes an actual
+    // backtrace into crash_log.txt itself instead, from inside the crashing
+    // process, right as it dies.
+    //
+    // Raw fd + write()/backtrace_symbols_fd() only, no std::ofstream/iostream
+    // and no std::string building - a signal handler can fire with the heap
+    // or libc's internal locks in an arbitrary, possibly corrupted state, so
+    // it sticks to the small set of calls conventionally treated as safe
+    // enough for this (see `man 7 signal-safety`); backtrace_symbols_fd()
+    // specifically exists, instead of backtrace_symbols(), to avoid an
+    // internal malloc() here. g_crash_log_fd is opened once, in
+    // main_process(), long before any crash - never inside the handler.
+    int g_crash_log_fd = -1;
+    volatile std::sig_atomic_t g_in_crash_handler = 0;
+
+    void crash_write(const char* text)
+    {
+        if (g_crash_log_fd >= 0)
+        {
+            [[maybe_unused]] ssize_t ignored = write(g_crash_log_fd, text, std::strlen(text));
+        }
+    }
+
+    extern "C" void crash_signal_handler(int sig)
+    {
+        // A fault inside this handler itself (e.g. a stack overflow) would
+        // otherwise recurse forever - bail out immediately on re-entry.
+        if (g_in_crash_handler)
+        {
+            _exit(128 + sig);
+        }
+        g_in_crash_handler = 1;
+
+        crash_write("\n[CRASH] signal ");
+        crash_write(strsignal(sig));
+        crash_write(" - backtrace:\n");
+
+        void* frames[64];
+        int frame_count = backtrace(frames, 64);
+        backtrace_symbols_fd(frames, frame_count, g_crash_log_fd);
+
+        crash_write("[CRASH] end of backtrace\n");
+        if (g_crash_log_fd >= 0) fsync(g_crash_log_fd);
+
+        // Restore the default disposition and re-raise rather than _exit()
+        // here - main()'s supervisor identifies *how* the child died via
+        // WIFSIGNALED()/WTERMSIG() on the real termination signal, and that
+        // logic (and its "was terminated by signal N" crash_log.txt line)
+        // shouldn't have to change just because a backtrace also got written.
+        std::signal(sig, SIG_DFL);
+        std::raise(sig);
+    }
+
+    // Registered once per process (including every supervisor restart, since
+    // execv() resets signal dispositions same as it does for SIGPIPE above).
+    // backtrace() lazily loads/allocates the unwind machinery on its very
+    // first call - doing one throwaway call here, outside of any signal
+    // context, means that allocation is already done by the time a real
+    // crash needs it from inside the handler.
+    void install_crash_handler(const std::string& profile_name)
+    {
+        std::filesystem::path dir = resolve_olli_files_dir(profile_name);
+        std::filesystem::create_directories(dir);
+        g_crash_log_fd = open((dir / "crash_log.txt").c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
+
+        void* warmup[1];
+        backtrace(warmup, 1);
+
+        for (int sig : {SIGSEGV, SIGABRT, SIGFPE, SIGILL, SIGBUS})
+            std::signal(sig, crash_signal_handler);
+    }
 }
 
 /**
@@ -154,6 +234,7 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         std::cout << "olli build: " << __DATE__ << " " << __TIME__ << "\n";
 
         std::signal(SIGPIPE, SIG_IGN);
+        install_crash_handler(profile_name);
 
         // TOOL_WEB_SEARCH (tools.cpp) calls curl_easy_init() directly
         // without ever calling this first - libcurl does its own lazy

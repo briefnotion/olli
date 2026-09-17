@@ -211,6 +211,19 @@ endif()
 # 6. Link libraries
 target_link_libraries(olli PRIVATE Threads::Threads CURL::libcurl whisper PkgConfig::PORTAUDIO ${NCURSES_PANEL_LIBRARY} ${NCURSES_LIBRARY})
 
+if(NOT MSVC)
+    # -g: keeps debug info in the Release binary (no runtime cost - it's
+    # metadata, not codegen) so backtrace_symbols_fd()'s crash-time addresses
+    # (main.cpp's crash_signal_handler) can be turned into real file/line
+    # info afterward with addr2line -e olli <address>, not just raw hex.
+    # -rdynamic: without it, backtrace_symbols_fd() can only resolve
+    # addresses against the dynamic symbol table, which by default holds
+    # none of olli's own functions - it would print bare addresses for every
+    # frame instead of function names.
+    target_compile_options(olli PRIVATE -g)
+    target_link_options(olli PRIVATE -rdynamic)
+endif()
+
 # fitter (an experimental, separate program that reads a profile's chat_logs/
 # and writes scripts/fitter_status.task) used to build here as a second
 # target - moved out to ../../fitter (its own standalone CMakeLists.txt)

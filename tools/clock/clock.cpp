@@ -1,14 +1,15 @@
 // The real networked clock (see ../PROTOCOL.md) - connects to olli's
-// remote-tool listener, registers get_clock_time/set_timer/check_timer, and
-// answers each "call" (the current time, or a named countdown - see the
-// Timers section below). The big ASCII-art digital display (classic
-// "tty-clock" style) runs independently of olli's lifecycle: this program
-// can start before olli does, keeps ticking while disconnected, notices
-// when olli becomes reachable and registers, and if olli goes away
-// (cleanly or not) just falls back to "disconnected, retrying" and keeps
-// ticking rather than exiting - see the heartbeat/reconnect note in
-// ../PROTOCOL.md. Timers themselves keep running through a disconnect too;
-// only the eventual expiry alert waits for a live connection to send on.
+// remote-tool listener, registers get_clock_time/set_timer/check_timer/
+// cancel_timer/list_timers, and answers each "call" (the current time, or
+// a named countdown - see the Timers section below). The big ASCII-art
+// digital display (classic "tty-clock" style) runs independently of
+// olli's lifecycle: this program can start before olli does, keeps
+// ticking while disconnected, notices when olli becomes reachable and
+// registers, and if olli goes away (cleanly or not) just falls back to
+// "disconnected, retrying" and keeps ticking rather than exiting - see
+// the heartbeat/reconnect note in ../PROTOCOL.md. Timers themselves keep
+// running through a disconnect too; only the eventual expiry alert waits
+// for a live connection to send on.
 //
 // Controls: 'q' or Ctrl+C to quit (restores the terminal cleanly either
 // way - closing the connection this way is exactly what exercises olli's
@@ -34,6 +35,7 @@
 #include <vector>
 #include <map>
 #include <algorithm>
+#include <cctype>
 
 #include <sys/select.h>
 #include <netinet/in.h>
@@ -68,6 +70,15 @@ namespace {
         bool event_sent = false; // whether the expiry `event` line has gone out to olli yet
         bool blinked = false;    // whether the local screen-flash (see below) has fired yet
 
+        // Set by cancel_timer - same "never pruned" philosophy as a
+        // finished timer (see active_timers' own comment): a canceled
+        // timer stays right where it is, queryable indefinitely, instead
+        // of being erased outright. handle_expired_timers() skips a
+        // canceled timer entirely regardless of its deadline, so neither
+        // the local screen-flash nor the real `[TIMER EXPIRED]` event/
+        // linked action ever fires for it, however long ago it was set.
+        bool cancelled = false;
+
         // Optional real follow-up action, separate from `reminder`'s plain
         // narration text - see ../PROTOCOL.md's `event` shape and
         // set_timer's registered description below for why this exists
@@ -76,6 +87,27 @@ namespace {
         // the usual narration.
         std::string on_expire_tool;
         json on_expire_arguments = json::object();
+    };
+
+    // Case-insensitive so "Test_Timer" and "test_timer" refer to the same
+    // timer - confirmed live as a real problem, not hypothetical: a model
+    // set a timer with one casing, then tried to cancel it with another,
+    // and a plain case-sensitive lookup reported "no timer found" even
+    // though the timer was right there. Same reasoning as olli's own RAG
+    // system normalizing collection-name casing for the same kind of
+    // model inconsistency. Only affects lookup/ordering - the label text
+    // itself (used in every message below) is stored and echoed back
+    // exactly as first given, never forced to a particular case; a later
+    // call using different casing for the same (equivalent) label reaches
+    // the same entry but doesn't rewrite its stored casing.
+    struct CaseInsensitiveLess {
+        bool operator()(const std::string& a, const std::string& b) const {
+            return std::lexicographical_compare(
+                a.begin(), a.end(), b.begin(), b.end(),
+                [](unsigned char c1, unsigned char c2) {
+                    return std::tolower(c1) < std::tolower(c2);
+                });
+        }
     };
 
     // Keyed by label; set_timer overwrites an existing label outright - a
@@ -87,7 +119,7 @@ namespace {
     // confirmation (seen firsthand in a real history.json). Leaving
     // finished timers in place, queryable indefinitely, fixes that; nothing
     // here accumulates fast enough for the lack of pruning to matter.
-    std::map<std::string, ActiveTimer> active_timers;
+    std::map<std::string, ActiveTimer, CaseInsensitiveLess> active_timers;
 
     // Who's currently running olli, per its own "identity" message (see
     // ../PROTOCOL.md and handle_identity() below) - empty means either not
@@ -120,6 +152,7 @@ namespace {
     {
         auto now = std::chrono::steady_clock::now();
         for (auto& [label, timer] : active_timers) {
+            if (timer.cancelled) continue;
             if (now < timer.deadline) continue;
 
             if (!timer.blinked) {
@@ -278,6 +311,7 @@ namespace {
     {
         auto now = std::chrono::steady_clock::now();
         for (auto& [label, timer] : active_timers) {
+            if (timer.cancelled) continue;
             if (now >= timer.deadline) continue;
 
             int total_seconds = static_cast<int>(std::chrono::duration<double>(timer.deadline - now).count() + 0.5);
@@ -356,7 +390,7 @@ namespace {
     // above, which owns the whole screen via cursor positioning, so a plain
     // std::cout print here would corrupt it the same way an unmanaged write
     // corrupts olli's own ncurses display (see TODO.md's history on that).
-    std::string handle_call(OLLI_LINK& link, const json& msg)
+    std::string handle_call(OLLI_LINK& link, OLLI_DISPLAY& display, const json& msg)
     {
         std::string call_id = msg.value("call_id", "");
         std::string name = msg.value("name", "");
@@ -415,6 +449,8 @@ namespace {
             auto it = active_timers.find(label);
             if (it == active_timers.end()) {
                 res = "Error: No timer found with label '" + label + "'.";
+            } else if (it->second.cancelled) {
+                res = "The timer '" + label + "' was canceled.";
             } else {
                 auto now = std::chrono::steady_clock::now();
                 if (now >= it->second.deadline) {
@@ -429,6 +465,65 @@ namespace {
             }
 
             link.send_result(call_id, res);
+            status = "Call answered: " + name;
+        } else if (name == "cancel_timer") {
+            std::string label;
+            if (msg.contains("arguments")) {
+                label = msg["arguments"].value("label", "");
+            }
+
+            std::string res;
+            auto it = active_timers.find(label);
+            if (it == active_timers.end()) {
+                res = "Error: No timer found with label '" + label + "'.";
+            } else if (it->second.cancelled) {
+                res = "The timer '" + label + "' was already canceled.";
+            } else if (std::chrono::steady_clock::now() >= it->second.deadline) {
+                // Already finished - cancelling it now wouldn't stop
+                // anything (handle_expired_timers() already ran its course
+                // for this one), so say so plainly rather than claiming a
+                // cancel that has no real effect.
+                res = "The timer '" + label + "' already finished - nothing to cancel.";
+            } else {
+                it->second.cancelled = true;
+                res = "The timer '" + label + "' has been canceled.";
+
+                // Replaces whatever countdown line update_running_timer_
+                // lines() had been showing for this label - same 30s
+                // auto-clear as handle_expired_timers()'s own "went off
+                // at..." line, so this doesn't linger on screen forever.
+                display.set_activity_line(label, "Timer '" + label + "' canceled.", 30);
+            }
+
+            link.send_result(call_id, res);
+            status = "Call answered: " + name;
+        } else if (name == "list_timers") {
+            // No arguments - lists everything, same "never pruned" set
+            // check_timer/cancel_timer already see (finished and canceled
+            // timers stay listed too, not just running ones), so this is a
+            // genuine full picture, not just what's still counting down.
+            if (active_timers.empty()) {
+                link.send_result(call_id, "No timers are currently set.");
+            } else {
+                auto now = std::chrono::steady_clock::now();
+                std::stringstream res;
+                bool first = true;
+                for (auto& [label, timer] : active_timers) {
+                    if (!first) res << "\n";
+                    first = false;
+
+                    res << "Timer '" << label << "': ";
+                    if (timer.cancelled) {
+                        res << "canceled.";
+                    } else if (now >= timer.deadline) {
+                        res << "FINISHED.";
+                    } else {
+                        double remaining = std::chrono::duration<double>(timer.deadline - now).count();
+                        res << std::fixed << std::setprecision(1) << remaining << "s remaining.";
+                    }
+                }
+                link.send_result(call_id, res.str());
+            }
             status = "Call answered: " + name;
         } else {
             link.send_error(call_id, "Unknown tool name: " + name);
@@ -478,6 +573,26 @@ namespace {
                             {"label", {{"type", "string"}, {"description", "The name of the timer to check"}}}
                         }},
                         {"required", json::array({"label"})}
+                    }}
+                },
+                {
+                    {"name", "cancel_timer"},
+                    {"description", "Cancels a specific named timer on the networked clock before it finishes - it will not go off, and any linked action will not run. Always execute this tool call for every cancellation request - never claim a timer was canceled without actually calling it."},
+                    {"parameters", {
+                        {"type", "object"},
+                        {"properties", {
+                            {"label", {{"type", "string"}, {"description", "The name of the timer to cancel"}}}
+                        }},
+                        {"required", json::array({"label"})}
+                    }}
+                },
+                {
+                    {"name", "list_timers"},
+                    {"description", "Lists every timer currently known to the networked clock, running, finished, or canceled, with its status. Use this when the user asks what timers exist or wants an overview, rather than guessing a label to check_timer."},
+                    {"parameters", {
+                        {"type", "object"},
+                        {"properties", json::object()},
+                        {"required", json::array()}
                     }}
                 }
             })}
@@ -569,7 +684,7 @@ int main(int argc, char* argv[])
             json msg;
             while (link.next_message(msg)) {
                 std::string type = msg.value("type", "");
-                if (type == "call") tool_status = handle_call(link, msg);
+                if (type == "call") tool_status = handle_call(link, display, msg);
                 else if (type == "identity") handle_identity(msg);
             }
 

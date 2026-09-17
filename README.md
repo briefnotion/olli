@@ -100,148 +100,24 @@ Edit it to enable the optional tools:
 - **Hue lights** need your bridge's IP and an
   [application key](https://developers.meethue.com/develop/get-started-2/).
 
-Which tools are available is set in `main.cpp` (`chat.TOOL_PERMISSIONS.*`), as
-is the model, thinking mode, and persona (`OLLAMA_OPENING`).
+Every internal tool is always available - there's no permissions/allowlist
+mechanism gating them. Which remote tools are available is just whatever's
+currently connected. The model, default thinking-mode setting, and persona
+(`OLLAMA_OPENING`) are set in `main.cpp`.
 
 ---
 
 ## Tools
 
-| Tool | What it does |
-|------|--------------|
-| `set_hue_light` | Turns lights on/off, sets brightness, colour (preset, hex, or xy), alerts/flashes. `light_id: "all"` targets every light. |
-| `list_hue_lights` | Reports the current state of every connected light. |
-| `manage_hue_scenes` | Save / load / remove / list local light scenes (stored in `scenes.json`). |
-| `set_thinking_mode` | Toggles the model's internal reasoning stream at runtime. |
-| `web_search` / `fetch_website_content` | SerpAPI search and page-text extraction (via libcurl), cleaned for the model. |
-| `run_automation_task` | Runs a scripted, multi-step macro (see below). |
+olli acts in the world through internal tools (compiled into its core) and
+remote tools (standalone programs that connect over TCP at runtime, no
+rebuild needed - things like the clock, Hue lights, presence detection, and
+the RAG knowledge base). Full breakdown of both kinds, what each one does,
+and how to write a new remote tool: **[TOOLS.md](TOOLS.md)**.
 
-### Automations (Task Runner)
-
-`run_automation_task` matches a spoken intent to a named script loaded from
-disk. Scripts are plain `.task` files under a profile's own
-`scripts/` directory (`~/olli_files_<name>/scripts/*.task`,
-`TASK_SIMPLE_MANAGER::load_all_task` in `tools_helper.cpp`) - reloaded fresh
-on every `run_automation_task` call, so adding, editing, or removing a
-`.task` file takes effect immediately, no restart needed.
-
-A `.task` file looks like:
-
-```
-NAME: system test
-PURPOSE: This is a series of a few simple questions to check responses.
-DIRECTORY: system_test
----
-what time is it?
-[ASK]What is a name for a dog?
-[PAUSE]
-Announce the system test is complete.
-```
-
-Three header lines (`NAME:`/`PURPOSE:`/`DIRECTORY:`), a `---` separator, then
-one command per line, sent to a background instance in order. A line
-starting with `#` is a comment - skipped entirely when the script loads, so
-it never runs and never counts as a command. Special line-prefixes:
-`[ASK]<text>` pauses and shows `<text>` as a request, then feeds whatever
-the user types back in as the next line; `[PAUSE]` just waits for Enter, no
-LLM involved; `[PRINT]<text>` displays `<text>` verbatim with no LLM call
-and immediately continues (handy for several lines of narration back to
-back, with nothing printed between them); `[FILE_IN:name]` reads `name` in
-from the task's own files folder (see below) and feeds its contents in as
-the next line, same as a typed line would be; `[FILE_APPEND:name]` appends
-whatever the *previous* line's response was to `name` in that same folder
-(creating it if needed) and continues immediately, no LLM call;
-`[KEYBOARD_INPUT:on]`/`[KEYBOARD_INPUT:off]` and `[TTS_OUTPUT:on]`/
-`[TTS_OUTPUT:off]` turn typed input and spoken responses on or off for the
-rest of the script (or until toggled again) - handy for a run that
-shouldn't be interrupted by a stray keystroke, or one that shouldn't talk
-over itself. `[ASK]` and `[PAUSE]` each save whatever `[KEYBOARD_INPUT]` is
-set to, force it on for themselves (they inherently need a keypress no
-matter the current setting), then restore the saved value once done - so a
-script only needs one `[KEYBOARD_INPUT:off]` near the top, not one around
-every command that needs input. `[TTS_OUTPUT]` has no such auto-restore;
-turn it back on explicitly wherever the script should start talking again.
-
-A fourth, optional header line, `DELAY_TOOL_RETURNS: false`, controls when a
-remote tool's answer (a clock, a light, anything not answered directly by
-the model) actually gets narrated. It defaults to `true` - every such answer
-is held until the whole script finishes, then reported all at once, right
-before the final completion summary - so a background timer firing midway
-through a long script doesn't interrupt whatever command happens to be
-running with an out-of-context announcement. If a specific line's answer
-matters immediately (e.g. "what time is it?" as an actual question the
-script needs answered now, not minutes from now), follow that line with
-`[WAIT_FOR_RESULT]` - it pauses the script until that line's own tool call
-answers, narrates it right there, then continues; only that one command's
-answer jumps the queue, everything else still waits for the end.
-`[WAIT_FOR_RESULT]` only makes sense after a line that calls a *remote*
-tool (clock/lights/etc.) - a plain question or a built-in tool (like
-`web_search`) already answers inline, with nothing to wait for.
-
-Every task gets its own folder under the profile's `files/` directory -
-`~/olli_files_<name>/files/<dir>/`, where `<dir>` is the `.task` file's own
-`DIRECTORY:` name if it set one, or its `NAME:` otherwise (either way, run
-through a sanitizer that strips `/`/`\` and swaps spaces for underscores, so
-it can never point outside that folder). `FILE_IN`/`FILE_APPEND`'s own
-`name` argument gets the same treatment - both commands only ever read or
-write flat filenames confined to that one folder, nothing else on disk is
-reachable from a script. Unlike the task's other scratch directory (created
-only when `DIRECTORY:` is set, and deleted once the script finishes), this
-one is never cleaned up - anything a script writes there via `FILE_APPEND`
-stays for as long as you want it to, across runs.
-
-If `FILE_IN` can't find/read `name`, it doesn't abort the script - it falls
-back to the same pause-and-prompt behavior as `[ASK]`, so you can paste the
-content in by hand and the script continues from there.
-
-Sample scripts (`system test`, `process resume`, `print test`, and an
-original creative one, `fitter status`) live under `sample_scripts/` in this
-repo - copy whichever ones you want into a profile's own `scripts/`
-directory to use them.
-
----
-
-## Remote tools
-
-Beyond the built-in tools above, olli can load tools from **standalone
-external programs** at runtime — no recompiling or restarting olli required.
-Each one is its own independent process with its own build and its own
-lifecycle: it connects to olli over a small TCP protocol, registers whatever
-it wants to expose exactly the way a built-in tool would (`TOOL_REMOTE`,
-`source/remote_tools.h`/`.cpp`, never knows or cares what program it's
-proxying for), and can run before olli even starts, keep going if olli isn't
-reachable, and reconnect automatically once it is. All of this - listening
-for new connections, polling each one, matching calls to results - runs on
-`TOOL_WORKER_CLASS`'s own background thread (`source/tool_worker.h`/`.cpp`),
-independent of whatever the main chat thread is doing. Full wire protocol in
-[`tools/PROTOCOL.md`](tools/PROTOCOL.md).
-
-olli listens for these on **port 47601**, loopback-only for now (see
-`tools/PROTOCOL.md`'s Scope section).
-
-### Try the example
-
-[`tools/clock/`](tools/clock) is a full worked example — a big ASCII-art
-digital clock running in its own terminal that registers `get_clock_time`,
-`set_timer`, and `check_timer` with olli (named countdown timers with an
-optional follow-up action; olli announces expiry in-character):
-
-```bash
-cd tools/clock
-make
-./clock          # connects to olli on this machine (127.0.0.1)
-./clock <ip>      # connects to olli on another machine
-./clock --help
-```
-
-### Write your own
-
-Start from [`tools/template/`](tools/template) rather than from scratch —
-copy the directory, fill in the two spots marked `CUSTOMIZE #1` (what your
-tool is called and what it does), and everything else — connecting,
-registering, heartbeat, automatic reconnect — is already there, working.
-See [`tools/template/README.md`](tools/template/README.md) for the exact
-steps.
+`run_automation_task`, one of the internal tools, runs scripted multi-step
+macros from a profile's own `.task` files - the full format is in
+**[AUTOMATIONS.md](AUTOMATIONS.md)**.
 
 ---
 
@@ -373,7 +249,7 @@ of) the ncurses/keyboard session, not replacing it. `WEB_SERVER_CLASS`
 (`source/web_server.h`/`.cpp`) owns a small embedded HTTP server
 (cpp-httplib, the same header-only dependency [olla.cpp](source/olla.cpp)
 already uses as a client) on its own background thread, listening on
-**port 47602** (separate from the [remote tools](#remote-tools) protocol's
+**port 47602** (separate from the [remote tools](TOOLS.md#remote-tools) protocol's
 47601) and bound to every network interface rather than loopback-only,
 since the whole point is reaching it from another machine. No
 authentication - trusted home LAN only, same trust boundary as remote

@@ -610,6 +610,11 @@ void SIDETRACK_CLASS::create(OLLAMA_SYSTEM_PROPERTIES Properties)
     PERSISTENT_CHECK_TIMER.set(PERSISTENT_CHECK_INTERVAL);
 }
 
+void SIDETRACK_CLASS::shutdown()
+{
+    SIDETRACK_CHAT_INSTANCE.request_exit();
+}
+
 void SIDETRACK_CLASS::check(IO_WORKER_CLASS& io_worker, ollama_system& main_instance, COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, CLASS_SYSTEM* system)
 {
     // I'm trying to keep this function non blocking.

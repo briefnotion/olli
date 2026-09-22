@@ -466,6 +466,19 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
 
+        // Joins anything still mid-response before it's torn down - a
+        // task-runner automation/consult_expert delegation still streaming
+        // (chat.background_tasks) or a sidetrack review pass still streaming
+        // (SIDETRACK_CHAT_INSTANCE) used to leave its own chat_thread
+        // joinable with nothing left to join it once the main loop above
+        // stops calling chat.process()/sidetrack.check() - a real, live
+        // std::terminate/SIGABRT crash confirmed via a real backtrace. Done
+        // before io_worker/tool_worker's own thread_stop() below, while
+        // both are still fully alive, in case anything still in flight
+        // needs them.
+        chat.shutdown_background_tasks();
+        sidetrack.shutdown();
+
         // io_worker owns key_input/output/audio exclusively - its thread
         // must be fully stopped (joined) before anything else touches them
         // again, including the end_ncurses()/close_chat_log() calls right
@@ -503,9 +516,6 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         chat.unload_model();
 
         system.setings_vars.save_settings();
-
-        // sidetrack is being reworked - commented out for now.
-        //sidetrack.thread_stop();
 
         // Matches curl_global_init() near the top of this function - safe to
         // call now that every thread that could have touched curl

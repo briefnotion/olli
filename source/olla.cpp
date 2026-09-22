@@ -566,6 +566,14 @@ void ollama_system::request_exit()
     if (chat_thread.joinable()) chat_thread.join();
 }
 
+void ollama_system::shutdown_background_tasks()
+{
+    for (auto& task_pair : background_tasks)
+    {
+        task_pair.first->request_exit();
+    }
+}
+
 /**
  * Updates the internal status struct by scanning the history.
  */

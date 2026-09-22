@@ -1080,12 +1080,52 @@ not needed elsewhere.
       `install_to_home.sh` has actually been run before assuming a live
       session has this fix.
     - **Separate, pre-existing bug found incidentally while testing
-      shutdown, not fixed here**: a clean `bye`/`quit` exit can abort,
-      consistent with an `ollama_system`'s `chat_thread` (`olla.cpp`)
-      still being joinable when its owner is destroyed. Confirmed this
-      reproduces on the *old*, pre-mutex binary too, so it's unrelated
-      to this fix - just surfaced by the same testing pass. Not yet
-      fixed or sequenced against deployment.
+      shutdown - root-caused and fixed 2026-09-22.** A clean `bye`/`quit`
+      exit could abort, confirmed reproducing on the *old*, pre-mutex
+      binary too, so unrelated to the mutex fix above - just surfaced by
+      the same testing pass. Two independent sources of the identical
+      `std::terminate`/`SIGABRT` crash (same backtrace signature both
+      times), both the same structural gap: `ollama_system::
+      request_exit()` (`olla.cpp`) already does exactly the right thing
+      - interrupt any in-flight response, then join `chat_thread` - but
+      it was only ever called on the *main* `chat` object
+      (`main.cpp`). Two other things own their own `ollama_system`
+      (and thus their own `chat_thread`) and got no such treatment:
+      1. **`chat.background_tasks`** - each task-runner automation or
+         `consult_expert` delegation is its own instance. Normally
+         `process()`'s PART 2 joins a finished one's thread each tick,
+         but once `bye` sets `running = false`, the main loop never
+         calls `chat.process()` again, so that cleanup simply stops
+         running. Anything still mid-response at that exact moment sat
+         there, still joinable, until `chat` itself was destroyed at the
+         end of `main_process()`.
+      2. **`sidetrack`'s own `SIDETRACK_CHAT_INSTANCE`** (`sidetrack.h`)
+         - same shape: its own `chat_thread`, spawned per second-guess/
+         consolidate cycle, never explicitly joined at shutdown
+         (`sidetrack.thread_stop()` was commented out in `main.cpp` - a
+         stale leftover from when sidetrack had a dedicated thread of
+         its own, which it hasn't since the 2026-08-29 rewrite; removed
+         as dead code in this same change). If a review pass happened to
+         still be streaming when `bye` landed - which can happen at
+         essentially any moment, since second-guess runs automatically,
+         unprompted, after nearly every turn - same crash.
+      - **Fix**: two small new public methods, each just looping the
+        already-correct `request_exit()` over what they own -
+        `ollama_system::shutdown_background_tasks()` (`olla.h`/`.cpp`)
+        and `SIDETRACK_CLASS::shutdown()` (`sidetrack.h`/`.cpp`). Both
+        called from `main.cpp`'s shutdown sequence, *before*
+        `io_worker.thread_stop()`/`tool_worker.thread_stop()` - so
+        anything still mid-flight gets torn down while its dependencies
+        are still alive, not after. No new state, no new locking -
+        `request_exit()`'s own existing logic (already used correctly
+        for the main `chat` instance) is just reused per-instance.
+      - **Verified live**: ~9 rapid "chat, then immediately `bye`"
+        attempts across several fresh sessions, deliberately timed to
+        land while a sidetrack review pass was confirmed actively
+        streaming (polled `debug_full_history.txt` for "review started"
+        before sending `bye`) - every attempt exited cleanly (`chat /
+        EVENT: instance closed`, no new `crash_log.txt` entry), where
+        the identical timing reliably crashed before this fix.
 - **Found and fixed 2026-09-04: `qwen3:8b` silently refusing to call
   `run_automation_task` for an unfamiliar task name.** After adding a new
   `.task` file (`print test`) to a profile's `scripts/` directory, saying

@@ -429,6 +429,19 @@ class ollama_system {
         // false directly.
         void request_exit();
 
+        // Same crash request_exit() guards against, for background_tasks
+        // instead of this instance itself - a task-runner automation or
+        // consult_expert delegation still mid-response when the whole
+        // program exits used to leave its own chat_thread joinable with
+        // nothing left to join it (process()'s own PART 2 only runs while
+        // the main loop is still calling process() at all - once running
+        // is false, it never gets another tick), so it stayed joinable
+        // right up until background_tasks itself got destroyed - a real,
+        // live std::terminate/SIGABRT crash, confirmed via a real backtrace.
+        // Called from main.cpp's shutdown sequence, before this instance's
+        // own destruction.
+        void shutdown_background_tasks();
+
         /**
          * Updates the internal status struct by scanning the history.
          */

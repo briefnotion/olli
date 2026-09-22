@@ -94,6 +94,14 @@ class SIDETRACK_CLASS
         void create(OLLAMA_SYSTEM_PROPERTIES Properties);
         void check(IO_WORKER_CLASS& io_worker, ollama_system& main_instance, COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, CLASS_SYSTEM* system);
 
+        // Same crash ollama_system::request_exit()/shutdown_background_tasks()
+        // guard against, for SIDETRACK_CHAT_INSTANCE - if a second-guess/
+        // consolidate pass is still mid-response when the whole program
+        // exits, its own chat_thread was left joinable with nothing left to
+        // join it, right up until this instance's own destruction. Called
+        // from main.cpp's shutdown sequence.
+        void shutdown();
+
         // Test/debug hook - skips IDLE_WAIT_TIMER_FOR_CONSOLIDATION and runs
         // the consolidation pass immediately. The real check()-driven path
         // (main.cpp) never needs this; it always gets to stage 2 eventually

@@ -42,9 +42,8 @@ void TOOL_WORKER_CLASS::thread_main()
     RUN = true;
     while (RUN)
     {
-        if (!INTERUPTED.load())
         {
-            PROCESSING.store(true);
+            std::lock_guard<std::mutex> lock(state_mutex);
 
             // Non-blocking, same call main.cpp makes on its own
             // remote_tools (main.cpp) - just polled every tick here instead
@@ -116,11 +115,11 @@ void TOOL_WORKER_CLASS::thread_main()
                 it = call_deadlines.erase(it);
             }
 
-            // No mutex here - this tools_list is this thread's own local
-            // variable that nothing else touches directly; anything from
-            // outside only ever reaches this thread's state through the
-            // INTERUPTED/PROCESSING rendezvous (put_pending_call() and the
-            // other cross-thread functions below), never tools_list itself.
+            // tools_list itself still needs no separate locking - it's this
+            // thread's own local variable that nothing else touches
+            // directly; anything from outside only ever reaches this
+            // thread's state through state_mutex (put_pending_call() and
+            // the other cross-thread functions below), never tools_list.
             tools_list.erase(
                 std::remove_if(tools_list.begin(), tools_list.end(),
                     [](const std::unique_ptr<TOOL_REMOTE>& tool) { return !tool->is_alive(); }),
@@ -141,8 +140,6 @@ void TOOL_WORKER_CLASS::thread_main()
             for (auto& tool : tools_list)
                 for (auto& def : tool->get_tool_defs())
                     add_tool(registered_tool_defs, def.value("name", ""), def.value("description", ""), def.value("parameters", json::object()));
-
-            PROCESSING.store(false);
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -151,16 +148,9 @@ void TOOL_WORKER_CLASS::thread_main()
 
 void TOOL_WORKER_CLASS::add_manual_tool_def(const json& def)
 {
-    INTERUPTED.store(true);
-
-    while (PROCESSING.load())
-    {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    std::lock_guard<std::mutex> lock(state_mutex);
 
     manual_tool_defs.push_back(def);
-
-    INTERUPTED.store(false);
 }
 
 void TOOL_WORKER_CLASS::register_local_tools(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, ollama_system& chat)
@@ -174,43 +164,22 @@ void TOOL_WORKER_CLASS::register_local_tools(std::vector<std::unique_ptr<TOOL_BA
 
 void TOOL_WORKER_CLASS::set_identity(const USER_IDENTITY& user_identity)
 {
-    INTERUPTED.store(true);
-
-    while (PROCESSING.load())
-    {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    std::lock_guard<std::mutex> lock(state_mutex);
 
     identity = user_identity;
-
-    INTERUPTED.store(false);
 }
 
 void TOOL_WORKER_CLASS::put_pending_call(const ToolCall& call)
 {
-    INTERUPTED.store(true);
-
-    // Wait out any background pass already in flight - INTERUPTED only
-    // stops a NEW pass from starting, it doesn't abort one already running.
-    while (PROCESSING.load())
-    {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    std::lock_guard<std::mutex> lock(state_mutex);
 
     pending_calls.push_back(call);
     call_deadlines.emplace_back(call.id, std::chrono::steady_clock::now());
-
-    INTERUPTED.store(false);
 }
 
 bool TOOL_WORKER_CLASS::get_pending_result(TOOL_RESULT& out)
 {
-    INTERUPTED.store(true);
-
-    while (PROCESSING.load())
-    {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    std::lock_guard<std::mutex> lock(state_mutex);
 
     bool got_one = false;
     if (!pending_results.empty())
@@ -220,19 +189,12 @@ bool TOOL_WORKER_CLASS::get_pending_result(TOOL_RESULT& out)
         got_one = true;
     }
 
-    INTERUPTED.store(false);
-
     return got_one;
 }
 
 bool TOOL_WORKER_CLASS::get_pending_event(TOOL_EVENT& out)
 {
-    INTERUPTED.store(true);
-
-    while (PROCESSING.load())
-    {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    std::lock_guard<std::mutex> lock(state_mutex);
 
     bool got_one = false;
     if (!pending_events.empty())
@@ -242,23 +204,12 @@ bool TOOL_WORKER_CLASS::get_pending_event(TOOL_EVENT& out)
         got_one = true;
     }
 
-    INTERUPTED.store(false);
-
     return got_one;
 }
 
 json TOOL_WORKER_CLASS::get_registered_tool_defs()
 {
-    INTERUPTED.store(true);
+    std::lock_guard<std::mutex> lock(state_mutex);
 
-    while (PROCESSING.load())
-    {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-
-    json result = registered_tool_defs;
-
-    INTERUPTED.store(false);
-
-    return result;
+    return registered_tool_defs;
 }

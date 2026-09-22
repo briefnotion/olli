@@ -1026,6 +1026,66 @@ not needed elsewhere.
     the handler otherwise avoids. Root cause of the `SIGABRT`s themselves
     is still not diagnosed - this only means the *next* one leaves real
     evidence instead of just a signal name.
+  - **Root cause found and fixed 2026-09-22, for a separate `SIGSEGV`
+    (not the `SIGABRT`s above) - `TOOL_WORKER_CLASS`'s own
+    `INTERUPTED`/`PROCESSING` rendezvous had a real gap.** The new
+    backtrace handler (above) caught two identical real crashes, 4 days
+    apart, both inside an `nlohmann::json` copy constructor reached from
+    `TOOL_WORKER_CLASS::thread_main()`'s own `registered_tool_defs =
+    manual_tool_defs;` (`tool_worker.cpp`) - a classic torn read: one
+    thread mutating the same `json`/`std::map`/`std::vector` storage
+    while another copy-constructed from it. A second, independent agent
+    (no access to the first one's hypothesis) investigated the same two
+    backtraces from scratch and reached the identical root cause, which
+    is what gave real confidence before touching anything.
+    - **Why the original rendezvous (see the tool_worker + internal
+      tools restoration entry, 2026-09-14/15 above) wasn't actually
+      enough**: it only ever excluded `thread_main()` from *one* caller
+      at a time - `PROCESSING` is exclusively set by `thread_main()`
+      itself, never by a caller, and `INTERUPTED` is a single shared
+      flag any finishing caller clears unconditionally, with no
+      awareness of whether a *different* caller thread is still
+      mid-access. Traced as genuinely reachable, not theoretical: the
+      main loop's own tick, a task-runner script's own spawned
+      `chat_thread` (`tools.cpp`), and `TOOL_DELEGATOR`'s own spawned
+      `chat_thread` all call `tool_worker`'s accessors independently -
+      two of those overlapping is what actually crashed it live.
+    - **Fix: `state_mutex` (a real `std::mutex`), replacing the
+      `INTERUPTED`/`PROCESSING` atomics pair entirely** - every accessor
+      (`put_pending_call()`, `get_pending_result()`,
+      `get_pending_event()`, `get_registered_tool_defs()`,
+      `add_manual_tool_def()`, `set_identity()`) and `thread_main()`'s
+      own tick now just take `state_mutex` for as long as they touch
+      shared state, instead of doing the busy-wait dance. A deliberate,
+      explicitly-discussed exception to "no program-wide mutexes" (the
+      original constraint for this whole rewrite, see the 2026-09-14/15
+      entry) - raised openly rather than slipped past it: the
+      alternative (a lock-free atomic-swap/RCU-style publish for the
+      `json` snapshot, a real lock-free MPMC queue for the FIFOs) avoids
+      blocking entirely but is meaningfully more new, hand-rolled
+      complexity in exactly the area that just produced a subtle
+      concurrency bug, for critical sections that are short and
+      low-contention (not a hot path) - blocking costs nothing
+      measurable here, and a mutex is far easier to verify correct by
+      inspection. User's own call, made with that tradeoff in front of
+      them.
+    - Verified live: clean build under `-Wall -Wextra -Wconversion`
+      etc., a real interactive session with tool registration/dispatch/
+      streaming all confirmed working, including deliberately exercising
+      the exact concurrent-access shape that used to race (a
+      task-runner script's own instance running while the main chat and
+      sidetrack's second-guess pass are also active) - no deadlock, no
+      hang, no crash.
+    - **Not yet deployed to `~/olli`** as of this entry - confirm
+      `install_to_home.sh` has actually been run before assuming a live
+      session has this fix.
+    - **Separate, pre-existing bug found incidentally while testing
+      shutdown, not fixed here**: a clean `bye`/`quit` exit can abort,
+      consistent with an `ollama_system`'s `chat_thread` (`olla.cpp`)
+      still being joinable when its owner is destroyed. Confirmed this
+      reproduces on the *old*, pre-mutex binary too, so it's unrelated
+      to this fix - just surfaced by the same testing pass. Not yet
+      fixed or sequenced against deployment.
 - **Found and fixed 2026-09-04: `qwen3:8b` silently refusing to call
   `run_automation_task` for an unfamiliar task name.** After adding a new
   `.task` file (`print test`) to a profile's `scripts/` directory, saying

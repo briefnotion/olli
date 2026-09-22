@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -21,18 +22,25 @@
  * flows are independent and arrive at different rhythms - a call only
  * happens when the LLM issues one, a result only when one's ready - so
  * they get their own small functions instead: put_pending_call() and
- * get_pending_result(). Each does its own INTERUPTED/PROCESSING rendezvous
- * (same shape as IO_WORKER_CLASS::exchange() - sets INTERUPTED so
- * thread_main() won't start a new tick, waits for PROCESSING to clear,
- * then it's safe to touch this worker's own state directly with no mutex
- * over the data itself) rather than sharing one combined call.
+ * get_pending_result(). Each just locks state_mutex for as long as it takes
+ * to touch this worker's own state directly, same as thread_main() does for
+ * its own tick - a real mutex, not sharing one combined call.
+ *
+ * Was an INTERUPTED/PROCESSING flag pair (still IO_WORKER_CLASS's scheme,
+ * io_worker.h) until a live crash (TODO.md, SIGSEGV inside thread_main()'s
+ * own json copy) showed it only ever excluded thread_main() from a single
+ * caller - nothing stopped two callers (e.g. the main chat's process() and
+ * a task-runner script's own instance.process(), running on different
+ * threads) from being in their own "critical sections" at the same time,
+ * since PROCESSING is only ever set by thread_main() and INTERUPTED is one
+ * shared flag any finishing caller clears unconditionally, whether or not
+ * another caller is still mid-access.
  */
 class TOOL_WORKER_CLASS
 {
     private:
         THREADING_INFO THREAD_CONTROL;
-        std::atomic<bool> INTERUPTED{false};
-        std::atomic<bool> PROCESSING{false};
+        std::mutex state_mutex;
 
         bool RUN = false;
 

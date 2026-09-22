@@ -1,6 +1,7 @@
 #ifndef tools_cpp
 #define tools_cpp
 
+#include <algorithm>
 #include <regex>
 #include <thread>
 
@@ -741,9 +742,28 @@ void TOOL_TASK_RUNNER::handle_tool(IO_WORKER_CLASS& io_worker, ollama_system& ch
             // keeps whatever incidental pacing it already had from that call.
             if (found_task.delay_tool_returns && tool_worker)
             {
+                // Only claims results for calls this instance itself
+                // dispatched (instance.outstanding_tool_call_ids, olla.h) -
+                // the old blind get_pending_result(out) drained whatever
+                // was oldest in tool_worker's shared queue regardless of
+                // which instance it actually belonged to, which could (and
+                // did) steal a different instance's own result out from
+                // under it. held_events is left as a blind drain for now -
+                // events have no call_id to match against at all yet (see
+                // TODO.md's event/result correlation entry).
                 TOOL_RESULT held_result;
-                while (tool_worker->get_pending_result(held_result))
-                    held_results.push_back(held_result);
+                for (auto it = instance.outstanding_tool_call_ids.begin(); it != instance.outstanding_tool_call_ids.end(); )
+                {
+                    if (tool_worker->get_pending_result(*it, held_result))
+                    {
+                        held_results.push_back(held_result);
+                        it = instance.outstanding_tool_call_ids.erase(it);
+                    }
+                    else
+                    {
+                        ++it;
+                    }
+                }
 
                 TOOL_EVENT held_event;
                 while (tool_worker->get_pending_event(held_event))
@@ -857,7 +877,17 @@ void TOOL_TASK_RUNNER::handle_tool(IO_WORKER_CLASS& io_worker, ollama_system& ch
         {
             if (!event.message.empty())
             {
-                instance.integrate_tool_result(tool_worker, instance_comms, "", event.message);
+                // Same is_own framing distinction instance.process()'s own
+                // PART 5 (olla.cpp) would apply - DELIBERATELY not acted on
+                // right now, for the same reason: it reliably provoked a
+                // follow-up tool call that then collided with a live,
+                // reproduced full-program hang. See olla.cpp's PART 5
+                // comment (same event-narration code, just here for the
+                // task-runner's own end-of-script replay) for the full
+                // writeup - not repeated here.
+                std::string framing = "";
+
+                instance.integrate_tool_result(tool_worker, instance_comms, framing, event.message);
             }
 
             // NOT instance.pending_tool_calls - instance is a background_
@@ -981,6 +1011,8 @@ void ollama_system::dispatch_tool_call(IO_WORKER_CLASS& io_worker, const ToolCal
     }
 
     if (!handled && tool_worker) {
+        outstanding_tool_call_ids.push_back(tc.id);
+        owned_tool_call_ids.push_back(tc.id);
         tool_worker->put_pending_call(tc);
         handled = true;
     }

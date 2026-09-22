@@ -1126,6 +1126,133 @@ not needed elsewhere.
         before sending `bye`) - every attempt exited cleanly (`chat /
         EVENT: instance closed`, no new `crash_log.txt` entry), where
         the identical timing reliably crashed before this fix.
+- **Found and fixed 2026-09-22: `tool_worker`'s shared result/event queue
+  had no correlation to which conversation was actually waiting - three
+  independent live bugs, all one root cause.** Found via a 90-minute
+  exploratory testing round (following the pattern from the 2026-09-16/17
+  rounds): `cancel_timer` silently producing no result under rapid-fire
+  input, a task-runner's "turn off all the lights" line firing its action
+  but narrating it as the answer to a later, unrelated `[ASK]` prompt, and
+  a task-runner's own timer event leaking into the main chat after the
+  script that set it had already closed - three different-looking
+  symptoms, traced back to one thing: `TOOL_WORKER_CLASS`'s
+  `pending_results`/`pending_events` (`tool_worker.h`) are a single shared
+  queue, and every `ollama_system` instance that shares this one worker
+  (main chat, a task-runner's own instance, a delegate's own instance)
+  used to just claim whichever result was oldest, with nothing recording
+  which instance actually dispatched which call.
+  - **Phase 1 - results, fixed and shipped**: `TOOL_RESULT` already
+    carried `call_id` (`remote_tools.h`) - the data needed for correct
+    correlation already existed, it just wasn't used. Fix: `ollama_system`
+    gained `outstanding_tool_call_ids` (`olla.h`) - ids this instance has
+    dispatched but not yet claimed a result for, pushed in
+    `dispatch_tool_call()` (`tools.cpp`) right before `put_pending_call()`.
+    `TOOL_WORKER_CLASS::get_pending_result()` gained an id-aware overload
+    (`tool_worker.h`/`.cpp`) that claims one specific call's result
+    instead of blindly popping the front; `process()`'s own PART 5
+    (`olla.cpp`) and the task-runner's own `DELAY_TOOL_RETURNS` pre-drain
+    loop (`tools.cpp`, `TOOL_TASK_RUNNER::handle_tool()`) both switched to
+    it, so an instance only ever claims its own. No global state, no new
+    mutex - `outstanding_tool_call_ids` is a plain per-instance member;
+    the existing `state_mutex` (2026-09-22 entry above) already covers
+    the new id-aware accessor the same way it covers every other one.
+    - **Leak found by review, fixed same day**: claiming-by-id meant a
+      result nobody ever asks for again just sits in `pending_results`
+      forever - and a background task/delegate instance can finish (its
+      own script doesn't wait for every call it fired) while one of its
+      calls is still outstanding, about to be destroyed with nobody left
+      to claim its eventual result. Fixed with
+      `TOOL_WORKER_CLASS::abandon_call(call_id)` - marks an id so
+      `thread_main()`'s existing per-tick pass drops a matching result
+      instead of keeping it, called right before `background_tasks.erase()`
+      (`olla.cpp` PART 2) for every id still outstanding on the instance
+      about to be destroyed. Bounded: every dispatched call already gets a
+      `call_deadlines` entry and is guaranteed *some* eventual
+      `pending_results` entry (a real answer or the existing
+      `CALL_TIMEOUT_SECONDS` timeout's own synthesized one), so an
+      abandoned id can't wait longer than that before being cleaned up.
+    - Two independent code-review passes (fresh subagents, no access to
+      each other's findings) confirmed: no globals, no new mutexes beyond
+      the one sanctioned exception, no signature changes to `process()`/
+      `dispatch_tool_call()`/`thread_main()` - only new methods/members
+      added, exactly the "functions only call variables passed through
+      their own signatures" scope this was built to.
+    - **Verified live**: re-ran the exact `cancel_timer`/rapid-fire-input
+      repro and `system_test.task`'s "turn off all the lights" line
+      end-to-end against the fixed binary - both confirmed correct every
+      time, no more stray content masquerading as a different call's
+      answer.
+  - **Phase 2 - events, data plumbing shipped, behavior change disabled
+    pending further investigation.** An event (a timer expiring) has no
+    `call_id` at all, unlike a result - nothing asked for it. Design
+    (agreed with the user before building): reuse the *originating* call's
+    id as the event's own "birth certificate" when one exists (a timer
+    remembers the `call_id` of the `set_timer` call that created it,
+    stamps it on the eventual expiry event); a reserved sentinel id,
+    `EVENT_NO_ORIGIN_ID = "no_origin_call"`
+    (`tools/olli_link/olli_link.hpp`, mirrored independently in
+    `source/remote_tools.h` - the two builds don't share headers, see
+    `tools/PROTOCOL.md`'s "Repo / build layout") for an event with no
+    originating call at all (ambient - `presence`). One uniform lookup
+    either way, no missing-field special case.
+    - Wire protocol: `event` messages gained `origin_id`
+      (`tools/PROTOCOL.md`). `OLLI_LINK::send_event()` gained a defaulted
+      third parameter, so `presence.cpp`'s existing call site needed zero
+      changes - the default *is* the correct value for it.
+      `tools/clock/clock.cpp`'s `ActiveTimer` gained `origin_call_id`, set
+      from `set_timer`'s own `call_id`, stamped onto the expiry event.
+    - `ollama_system` gained `owned_tool_call_ids` (`olla.h`) - every call
+      id an instance has *ever* dispatched, for its whole life, unlike
+      `outstanding_tool_call_ids` above (never pruned - a remote tool's
+      standing state can outlive the immediate call by a long time, same
+      "never pruned" tradeoff `active_timers` itself already accepts,
+      `clock.cpp`).
+    - All of the above is fully wired, code-reviewed, and confirmed
+      correct - `EVENT_NO_ORIGIN_ID` verified to match byte-for-byte
+      between its two independent copies, `origin_call_id` confirmed
+      always populated, both draining sites confirmed to check the
+      correct instance's own list.
+    - **What's NOT enabled**: actually *using* `owned_tool_call_ids` to
+      change how an unowned event gets narrated (`process()`'s PART 5,
+      `olla.cpp`; the task-runner's own end-of-script replay,
+      `tools.cpp`). A "this wasn't triggered by anything you asked"
+      `Special_Instruction` reliably provoked the model into issuing a
+      follow-up tool call instead of replying in plain text, far more
+      often than the default framing ever did - and that collided, live,
+      reproduced 3 of 4 attempts, with a **pre-existing** race: a timer's
+      `on_expire_tool` action dispatches through the separate
+      `pending_tool_calls` queue (`handle_instance_tools()`, `tools.cpp`),
+      while the model's own reactive tool call goes through
+      `last_received.tool_calls` - and `pending_tool_calls`' own comment
+      in `olla.h` already documented the underlying gap ("`last_received`
+      gets reset at the top of every `send()` call, so anything sitting
+      in it could be silently dropped if a new turn started first").
+      Worse than a dropped call: `integrate_tool_result()`'s own call to
+      `send()` is fully synchronous, blocking whichever thread is running
+      `process()` on the HTTP round-trip to Ollama - when this went wrong
+      live, the *entire program* stopped ticking for minutes, not just
+      one narration. Root cause not confirmed - no `ptrace`/`gdb` access
+      in the sandbox this was investigated in, only `/proc`-level thread
+      state (consistently `futex_do_wait`, not conclusive on its own).
+      Reverted to the plain default framing (identical to what's run all
+      session without incident) rather than ship something that can
+      freeze the whole program. Whoever picks this back up: the `is_own`
+      lookup itself (`std::find` against `owned_tool_call_ids`) is
+      trivial and already proven correct - the fix needed is on the
+      `pending_tool_calls`/`last_received` race and/or making
+      `integrate_tool_result()`'s `send()` non-blocking, not in the
+      origin_id plumbing itself. A real debugger (not blocked by sandbox
+      `ptrace` restrictions) would likely resolve this quickly.
+  - **Also fixed same session, unrelated root cause**: `set_hue_light`'s
+    own result string embedded the Hue bridge's raw native 0-254
+    brightness value verbatim (`tools/hue/hue.cpp`) - the *input*-side
+    percent-to-raw conversion was already fixed (an earlier session), but
+    nothing converted the *output* back, so a model told to report a
+    result "without changing the facts" read a requested 30% back as
+    "76%". Fixed by rewriting every `/bri` leaf in the bridge's own
+    success-response JSON, in place, using the same
+    `bri_to_brightness_percent()` `list_hue_lights` already had. Verified
+    live: requested 30% -> bridge reports 30 -> narrated correctly.
 - **Found and fixed 2026-09-04: `qwen3:8b` silently refusing to call
   `run_automation_task` for an unfamiliar task name.** After adding a new
   `.task` file (`print test`) to a profile's `scripts/` directory, saying

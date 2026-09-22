@@ -68,6 +68,14 @@ class TOOL_WORKER_CLASS
         // separate since an event isn't a response to any call_id.
         std::vector<TOOL_EVENT> pending_events;
 
+        // Call ids passed to abandon_call() above - checked against every
+        // fresh pending_results entry each thread_main() tick (both a real
+        // answer and a timeout-sweep-synthesized one), dropping a match
+        // instead of leaving it stranded. An id only leaves this list once
+        // its matching result has actually shown up and been dropped, so a
+        // slow answer (up to CALL_TIMEOUT_SECONDS) still gets caught.
+        std::vector<std::string> abandoned_call_ids;
+
         // How long a call gets to produce a real result before thread_main()
         // gives up on it and synthesizes an error TOOL_RESULT instead -
         // covers both a call nothing ever claims (no connected tool
@@ -162,10 +170,32 @@ class TOOL_WORKER_CLASS
         // Queues one call for this worker to dispatch.
         void put_pending_call(const ToolCall& call);
 
-        // Pops the oldest available result, if any - false (and 'out'
-        // untouched) if nothing's ready yet. Same shape as
-        // IO_WORKER_CLASS::popVocaEvent() (io_worker.h).
-        bool get_pending_result(TOOL_RESULT& out);
+        // Claims one specific call's result, if it's ready - false (and
+        // 'out' untouched) otherwise. Every ollama_system instance sharing
+        // this one worker (main chat, a task-runner's own instance, a
+        // delegate's own instance) needs to ask by id, not just take
+        // whatever's oldest: dispatching a call and blindly popping
+        // "whatever's next" back is only correct when exactly one instance
+        // is ever waiting at a time, which stopped being true the moment
+        // more than one of them could have a call in flight together (see
+        // TODO.md's tool_worker event/result correlation entry - this
+        // replaced an earlier blind get_pending_result(TOOL_RESULT&) for
+        // exactly that reason).
+        bool get_pending_result(const std::string& call_id, TOOL_RESULT& out);
+
+        // Marks one call's eventual result (whether a real answer or a
+        // CALL_TIMEOUT_SECONDS-triggered synthesized error) to be silently
+        // dropped by thread_main() instead of kept in pending_results
+        // forever - for when the ollama_system instance that dispatched
+        // the call is being destroyed with that call still outstanding
+        // (see olla.cpp PART 2's own call site: a background task/delegate
+        // instance can finish without ever waiting for every call it
+        // fired). Without this, get_pending_result(call_id, ...) above
+        // would never be asked for that id again - nothing's
+        // outstanding_tool_call_ids (olla.h) would still contain it - so
+        // the result would sit in pending_results with no one left to
+        // ever claim it.
+        void abandon_call(const std::string& call_id);
 
         // Same shape as get_pending_result(), for pending_events instead.
         bool get_pending_event(TOOL_EVENT& out);

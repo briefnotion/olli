@@ -274,10 +274,10 @@ void OLLI_LINK::send_error(const std::string& call_id, const std::string& error)
     last_sent = std::chrono::steady_clock::now();
 }
 
-void OLLI_LINK::send_event(const std::string& message, const json& action)
+void OLLI_LINK::send_event(const std::string& message, const json& action, const std::string& origin_id)
 {
     if (sock_fd < 0) return;
-    json msg{{"type", "event"}, {"message", message}};
+    json msg{{"type", "event"}, {"message", message}, {"origin_id", origin_id}};
     if (action.is_object() && !action.empty()) msg["action"] = action;
     send_line(sock_fd, msg.dump());
     last_sent = std::chrono::steady_clock::now();

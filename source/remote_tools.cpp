@@ -600,6 +600,11 @@ void TOOL_REMOTE::poll_communications(std::vector<ToolCall>& pending_calls, std:
                     event.action_tool = msg["action"].value("tool", "");
                     event.action_arguments = msg["action"].value("arguments", json::object());
                 }
+                // Defaults to EVENT_NO_ORIGIN_ID (remote_tools.h) for a
+                // tool that hasn't been updated to send this field yet -
+                // treated the same as a genuinely ownerless event, which is
+                // the safe assumption when it's simply unknown.
+                event.origin_id = msg.value("origin_id", EVENT_NO_ORIGIN_ID);
                 pending_events.push_back(std::move(event));
             }
             // A stale/mismatched result or a plain pong: the last_received

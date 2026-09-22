@@ -87,6 +87,15 @@ namespace {
         // the usual narration.
         std::string on_expire_tool;
         json on_expire_arguments = json::object();
+
+        // The call_id of the set_timer call that created this timer -
+        // stamped onto the eventual expiry `event` (see
+        // handle_expired_timers() below) as its origin_id
+        // (../PROTOCOL.md, OLLI_LINK::send_event()), so olli can
+        // recognize which conversation actually asked for this timer
+        // instead of narrating the expiry as if it just answered whatever
+        // happens to be current when it fires.
+        std::string origin_call_id;
     };
 
     // Case-insensitive so "Test_Timer" and "test_timer" refer to the same
@@ -188,7 +197,7 @@ namespace {
                 };
             }
 
-            link.send_event(ss.str(), action);
+            link.send_event(ss.str(), action, timer.origin_call_id);
             timer.event_sent = true;
             status = "Timer '" + label + "' expired.";
         }
@@ -423,6 +432,7 @@ namespace {
             timer.reminder = reminder;
             timer.on_expire_tool = on_expire_tool;
             timer.on_expire_arguments = on_expire_arguments;
+            timer.origin_call_id = call_id;
             active_timers[label] = timer;
 
             // Plain `<<` rather than std::to_string(), which always pads to

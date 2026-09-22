@@ -375,7 +375,39 @@ class ollama_system {
         // sensor.
         int tool_calls_this_turn = 0;
 
-        ollama_system_status status;    
+        // Ids of tool calls this instance has dispatched to tool_worker but
+        // not yet claimed a result for - pushed in dispatch_tool_call()
+        // right before put_pending_call() (tools.cpp), erased once
+        // process()'s own PART 5 (olla.cpp) successfully claims that id's
+        // result. Every ollama_system instance shares the same tool_worker
+        // (main chat, a task-runner's own instance, a delegate's own
+        // instance), so without this, whichever instance's process() tick
+        // happens to run next would blindly claim whatever result is
+        // sitting oldest in tool_worker's queue - including one that
+        // belongs to a completely different instance. This is what lets
+        // each instance claim only its own.
+        std::vector<std::string> outstanding_tool_call_ids;
+
+        // Every call id this instance has EVER dispatched, for its whole
+        // life - unlike outstanding_tool_call_ids above, never pruned once
+        // a result comes in. A remote tool's own standing state (e.g.
+        // clock's timers, tools/clock/clock.cpp) can outlive the call that
+        // created it by a long time, and stamps that call's own id back
+        // onto whatever unsolicited TOOL_EVENT it eventually produces
+        // (origin_id, remote_tools.h) - checked against this list in
+        // process()'s own PART 5 (olla.cpp) so an instance can tell "this
+        // event traces back to something I asked for" from "this is a
+        // leftover from somewhere else, or purely ambient", instead of
+        // narrating every event as if it just answered whatever's
+        // currently being discussed. Unbounded growth here is the same
+        // accepted tradeoff active_timers' own "never pruned" comment
+        // (clock.cpp) already makes for the same reason - nothing in
+        // normal use accumulates fast enough for it to matter, and a
+        // short-lived background task/delegate instance never grows this
+        // far regardless.
+        std::vector<std::string> owned_tool_call_ids;
+
+        ollama_system_status status;
 
         std::vector<Message> history;
         ChatResult last_received;

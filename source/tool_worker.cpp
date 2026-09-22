@@ -115,6 +115,27 @@ void TOOL_WORKER_CLASS::thread_main()
                 it = call_deadlines.erase(it);
             }
 
+            // Drops any pending_results entry (whether just landed via
+            // poll_communications() above, or just synthesized by the
+            // timeout sweep above) that abandon_call() marked - its
+            // dispatching instance no longer exists to ever claim it via
+            // get_pending_result(call_id, ...). Only removed from
+            // abandoned_call_ids once its matching result is actually
+            // found, so a slower answer is still caught on a later tick.
+            if (!abandoned_call_ids.empty())
+            {
+                pending_results.erase(
+                    std::remove_if(pending_results.begin(), pending_results.end(),
+                        [this](const TOOL_RESULT& result)
+                        {
+                            auto match = std::find(abandoned_call_ids.begin(), abandoned_call_ids.end(), result.call_id);
+                            if (match == abandoned_call_ids.end()) return false;
+                            abandoned_call_ids.erase(match);
+                            return true;
+                        }),
+                    pending_results.end());
+            }
+
             // tools_list itself still needs no separate locking - it's this
             // thread's own local variable that nothing else touches
             // directly; anything from outside only ever reaches this
@@ -177,19 +198,28 @@ void TOOL_WORKER_CLASS::put_pending_call(const ToolCall& call)
     call_deadlines.emplace_back(call.id, std::chrono::steady_clock::now());
 }
 
-bool TOOL_WORKER_CLASS::get_pending_result(TOOL_RESULT& out)
+bool TOOL_WORKER_CLASS::get_pending_result(const std::string& call_id, TOOL_RESULT& out)
 {
     std::lock_guard<std::mutex> lock(state_mutex);
 
-    bool got_one = false;
-    if (!pending_results.empty())
+    for (auto it = pending_results.begin(); it != pending_results.end(); ++it)
     {
-        out = std::move(pending_results.front());
-        pending_results.erase(pending_results.begin());
-        got_one = true;
+        if (it->call_id == call_id)
+        {
+            out = std::move(*it);
+            pending_results.erase(it);
+            return true;
+        }
     }
 
-    return got_one;
+    return false;
+}
+
+void TOOL_WORKER_CLASS::abandon_call(const std::string& call_id)
+{
+    std::lock_guard<std::mutex> lock(state_mutex);
+
+    abandoned_call_ids.push_back(call_id);
 }
 
 bool TOOL_WORKER_CLASS::get_pending_event(TOOL_EVENT& out)

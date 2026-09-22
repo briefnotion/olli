@@ -50,12 +50,30 @@ struct TOOL_RESULT
 // to correlate a result back to it the way a real dispatched call's id
 // would, so there's nothing lost by leaving it raw for whoever actually
 // dispatches it to turn into a real ToolCall).
+//
+// 'origin_id' (2026-09-22) - which call originally set up whatever just
+// produced this event (e.g. the call_id of the set_timer call a timer
+// expiry traces back to), or EVENT_NO_ORIGIN_ID below for an event with no
+// such call at all (a purely ambient one, like presence). Lets whichever
+// ollama_system instance drains this (olla.cpp PART 5) tell its own
+// dispatched work apart from someone else's/nothing's, instead of
+// narrating every event as if it just answered whatever's currently being
+// discussed - it's still not a call_id in TOOL_RESULT's sense (nothing
+// here is "the response to" this id), just a birth certificate.
 struct TOOL_EVENT
 {
     std::string message;
     std::string action_tool;
     json action_arguments;
+    std::string origin_id;
 };
+
+// Matches tools/olli_link/olli_link.hpp's own EVENT_NO_ORIGIN_ID exactly -
+// two independent copies (this side and every remote tool's own binary
+// don't share a header, see tools/PROTOCOL.md's "Repo / build layout"
+// section), kept in sync by convention/documentation, not by compiling
+// against one shared definition.
+inline const std::string EVENT_NO_ORIGIN_ID = "no_origin_call";
 
 /**
  * REMOTE_TOOL_LISTENER

@@ -368,13 +368,42 @@ or, on failure:
 ### `event` (tool -> olli, unsolicited - not a response to any `call`)
 
 ```json
-{"type": "event", "message": "Alarm: wake up!"}
+{"type": "event", "message": "Alarm: wake up!", "origin_id": "abc123"}
 ```
 
 - `TOOL_REMOTE::monitor_tool()` polls its socket each tick; if an `event`
   line is waiting, `message` gets forwarded into `chat.integrate_tool_result()`
   unprompted, asking the model to narrate/acknowledge it in persona - e.g.
   `tools/clock/clock.cpp`'s `set_timer` noticing an expired timer.
+
+- `origin_id` (2026-09-22) - a "birth certificate" for this event: which
+  `call`'s own `call_id` set up whatever just produced it, if anything did.
+  `tool_worker`'s queues (`source/tool_worker.h`) are shared by every
+  `ollama_system` instance in the program (the main chat, a task-runner
+  script's own instance, a delegate's own instance), and an event has no
+  natural way to say who it's *for* - unlike a `result`, nothing asked for
+  it. Reusing the id of whatever call originally created the standing
+  state behind it (e.g. the `set_timer` call a timer's later expiry traces
+  back to - see `tools/clock/clock.cpp`'s `ActiveTimer::origin_call_id`)
+  lets whichever instance drains this event (`source/olla.cpp`'s
+  `process()`, PART 5) recognize "this is mine" from "this is a leftover
+  from somewhere else" and narrate it honestly either way, instead of
+  always implying it just answered whatever the current conversation
+  happens to be about. Required, not optional - a tool with no
+  originating call at all (a purely ambient one, e.g. `presence`'s
+  arrival/departure) sends the reserved `EVENT_NO_ORIGIN_ID` value instead
+  of omitting the field, so there's always exactly one lookup to do, never
+  a missing-field special case: `"no_origin_call"`
+  (`tools/olli_link/olli_link.hpp`'s `EVENT_NO_ORIGIN_ID`, mirrored by
+  `source/remote_tools.h`'s own copy of the same constant - see the
+  "Repo / build layout" section for why these are two independent copies,
+  not one shared definition). `OLLI_LINK::send_event()` defaults to it
+  automatically, so a tool with nothing to say here needs no code change
+  at all. This does not yet *redirect* an event to its rightful owner if
+  that's a different, still-live instance than whichever happened to drain
+  it first - only lets the draining instance narrate honestly about
+  whether it's actually its own. Real redirection is a bigger, still-open
+  question (see `TODO.md`'s tool_worker event/result correlation entry).
 
 - Optional `action` field - a real tool call for olli to execute itself,
   separate from (and in addition to) `message`'s narration:

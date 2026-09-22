@@ -782,6 +782,34 @@ namespace {
                 }
             }
 
+            // The bridge's own success response reports "bri" back on its
+            // native 0-254 scale, not the 0-100 percentage the model sent -
+            // same mismatch bri_to_brightness_percent() already corrects for
+            // list_hue_lights' own display. Left as-is here, a model told
+            // (via DIRECTOR_NOTE) to report this "without changing the
+            // facts/values" would read a requested 30% back as "76%" - seen
+            // live. Rewrite every "/bri" leaf in place before it's handed
+            // back, same conversion, same rounding.
+            try {
+                json res_json = json::parse(res);
+                if (res_json.is_array()) {
+                    for (auto& entry : res_json) {
+                        if (!entry.is_object() || !entry.contains("success")) continue;
+                        json& success = entry["success"];
+                        if (!success.is_object()) continue;
+                        for (auto& [path, value] : success.items()) {
+                            if (path.size() >= 4 && path.compare(path.size() - 4, 4, "/bri") == 0 && value.is_number()) {
+                                value = bri_to_brightness_percent(value.get<int>());
+                            }
+                        }
+                    }
+                    res = res_json.dump();
+                }
+            } catch (...) {
+                // Malformed/unexpected shape - fall back to the raw
+                // response rather than losing the result entirely.
+            }
+
             std::string summary = "Light command for " + target + " processed. Result: " + res;
             link.send_result(call_id, summary);
             return "Call answered: set_hue_light (" + target + ")";

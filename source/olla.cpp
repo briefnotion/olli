@@ -967,9 +967,22 @@ void ollama_system::process(IO_WORKER_CLASS& io_worker, CLASS_SYSTEM* system, st
                 comms.INPUT_FROM_USER = task_report;
                 send(tool_worker, comms, "system");
             }
-            
+
+            // task_instance is finished, but a call it dispatched can still
+            // be outstanding (nothing forces a task/delegate script to wait
+            // for every call it fired before ending) - about to destroy
+            // the only thing that was ever going to claim that id's
+            // result, so tell tool_worker to drop it instead of keeping it
+            // forever with no one left to ask (see abandon_call()'s own
+            // comment, tool_worker.h).
+            if (tool_worker) {
+                for (const std::string& call_id : task_instance.outstanding_tool_call_ids) {
+                    tool_worker->abandon_call(call_id);
+                }
+            }
+
             // Remove from vector (unique_ptr automatically deletes the memory)
-            it = background_tasks.erase(it); 
+            it = background_tasks.erase(it);
         } else {
             ++it; // Move to next task
         }
@@ -998,11 +1011,27 @@ void ollama_system::process(IO_WORKER_CLASS& io_worker, CLASS_SYSTEM* system, st
     // ---------------------------------------------------------
     if (tool_worker)
     {
+        // Only ever claims results for calls THIS instance dispatched
+        // (outstanding_tool_call_ids, olla.h) - tool_worker's queue is
+        // shared by every ollama_system instance (main chat, a
+        // task-runner's own instance, a delegate's own instance), so
+        // blindly popping "whatever's oldest" here would sometimes hand
+        // this instance a different instance's own result. An id still
+        // outstanding after this just means its result isn't ready yet;
+        // it stays in the list for a future tick to claim.
         TOOL_RESULT result;
-        while (tool_worker->get_pending_result(result))
+        for (auto it = outstanding_tool_call_ids.begin(); it != outstanding_tool_call_ids.end(); )
         {
-            send_tool_result(result.call_id, result.response);
-            integrate_tool_result(tool_worker, comms, result.special_instruction, result.response);
+            if (tool_worker->get_pending_result(*it, result))
+            {
+                send_tool_result(result.call_id, result.response);
+                integrate_tool_result(tool_worker, comms, result.special_instruction, result.response);
+                it = outstanding_tool_call_ids.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
         }
 
         // Same handling the old monitor_tool()'s own event branch had
@@ -1012,6 +1041,16 @@ void ollama_system::process(IO_WORKER_CLASS& io_worker, CLASS_SYSTEM* system, st
         // id (not a static counter - this project avoids hidden/global
         // state) is enough since nothing needs to correlate a result back
         // to it, same reasoning as TOOL_EVENT's own comment (remote_tools.h).
+        //
+        // Still drained by whichever instance's process() tick happens to
+        // run next, same as before - this doesn't redirect an event to its
+        // rightful owner elsewhere (a bigger, still-open question, see
+        // TODO.md). What origin_id (remote_tools.h) does let this instance
+        // do is tell honestly whether the event is actually its own -
+        // owned_tool_call_ids (olla.h) is this instance's own record of
+        // every call it's ever dispatched - and frame the narration
+        // accordingly instead of always implying it just answered whatever
+        // the current conversation happens to be about.
         TOOL_EVENT event;
         while (tool_worker->get_pending_event(event))
         {
@@ -1020,7 +1059,35 @@ void ollama_system::process(IO_WORKER_CLASS& io_worker, CLASS_SYSTEM* system, st
             if (!event.message.empty())
             {
                 log("[RemoteTools] Event from remote tool: " + event.message + "\n");
-                integrate_tool_result(tool_worker, comms, "", event.message);
+
+                // origin_id (remote_tools.h) and owned_tool_call_ids
+                // (olla.h) are fully wired end-to-end and verified correct -
+                // DELIBERATELY not yet acted on here. An is_own-based
+                // "this wasn't triggered by anything you asked" framing
+                // reliably provoked the model into issuing its own follow-up
+                // tool call (instead of plain text) far more often than the
+                // default framing ever did, and that collided - live,
+                // reproduced 3 of 4 attempts - with the pre-authored
+                // on_expire_tool action from the SAME event, which dispatches
+                // through the separate pending_tool_calls queue
+                // (handle_instance_tools(), tools.cpp). integrate_tool_result()
+                // -> send() below is a fully synchronous, blocking call on
+                // whichever thread is running process() - olla.h's own
+                // comment on pending_tool_calls already documents the
+                // underlying gap ("last_received gets reset at the top of
+                // every send() call, so anything sitting in it could be
+                // silently dropped if a new turn started first" - a
+                // PRE-EXISTING race, not introduced here) - when it hung,
+                // the entire program stopped ticking for minutes, not just a
+                // narration quality issue. Root cause not confirmed (no
+                // ptrace access in the sandbox this was investigated in) -
+                // revisit once it can be debugged properly with a real
+                // debugger, then compute is_own again here and restore the
+                // framing distinction (see git history around 2026-09-22 for
+                // the removed version).
+                std::string framing = "";
+
+                integrate_tool_result(tool_worker, comms, framing, event.message);
             }
 
             if (!event.action_tool.empty())

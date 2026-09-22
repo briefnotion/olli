@@ -37,6 +37,17 @@ struct OLLI_ATTACHMENT {
     std::string content;
 };
 
+// Reserved origin_id (see send_event() below and ../PROTOCOL.md's `event`
+// message shape) for an event with no originating call at all - a purely
+// ambient one (presence's arrival/departure), as opposed to one that
+// traces back to something this tool was asked to do (clock's timers).
+// Deliberately a plain word, not opaque/generated the way a real
+// ToolCall::id (source/olla.h) always is, so there's no ambiguity by
+// construction. Same independent-copy convention as OLLI_ATTACHMENT above
+// - source/remote_tools.h keeps its own matching copy, not a shared
+// header, per ../PROTOCOL.md's "Repo / build layout" section.
+inline const std::string EVENT_NO_ORIGIN_ID = "no_origin_call";
+
 class OLLI_LINK {
     public:
         // host_display is what shows up in status text ("...at 127.0.0.1");
@@ -94,7 +105,14 @@ class OLLI_LINK {
         void send_error(const std::string& call_id, const std::string& error);
         // action: the optional real tool-call payload described in
         // ../PROTOCOL.md's `event` message shape - omit for narration-only.
-        void send_event(const std::string& message, const nlohmann::json& action = nullptr);
+        //
+        // origin_id: which call set up whatever just produced this event
+        // (e.g. the call_id of the set_timer call this expiry traces back
+        // to) - lets olli recognize which conversation actually asked for
+        // this instead of narrating it as if it just answered whatever's
+        // currently being discussed. Defaults to the reserved
+        // EVENT_NO_ORIGIN_ID above for an event with no such call at all.
+        void send_event(const std::string& message, const nlohmann::json& action = nullptr, const std::string& origin_id = EVENT_NO_ORIGIN_ID);
 
         // Connection status text for display - what just happened to the
         // connection this tick (connecting/registered/disconnected/timed

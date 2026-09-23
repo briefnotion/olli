@@ -702,6 +702,23 @@ void TOOL_TASK_RUNNER::handle_tool(IO_WORKER_CLASS& io_worker, ollama_system& ch
         size_t wait_baseline_results = 0;
         bool wait_baseline_set = false;
 
+        // How long a single [WAIT_FOR_RESULT] line gets before giving up -
+        // deliberately its own, much shorter bound than tool_worker's own
+        // general CALL_TIMEOUT_SECONDS (300s, tool_worker.h), which is what
+        // this state used to lean on with no bound of its own. This whole
+        // while loop runs synchronously on whatever thread dispatched this
+        // script (the main thread, for a script the main chat itself
+        // kicked off) - nothing else in the program can run until it
+        // returns, so a stuck wait doesn't just stall this one script, it
+        // freezes the entire program for as long as it waits. Confirmed
+        // live (2026-09-23): a call that never got a real answer left the
+        // whole chat channel unresponsive - bye included - for the full
+        // multi-minute stretch. 30s is generous for any tool that's
+        // actually connected and working; a call that hasn't answered by
+        // then almost certainly never will this session.
+        constexpr int WAIT_FOR_RESULT_TIMEOUT_SECONDS = 30;
+        std::chrono::steady_clock::time_point wait_deadline;
+
         // Save slot for ENABLE_KEYBOARD_INPUT, persistent across whatever
         // multi-tick WAIT_ENTER/WAIT_ASK wait is currently in progress - see
         // command_pause()'s own comment (tools_task_script.h) for what this
@@ -808,6 +825,7 @@ void TOOL_TASK_RUNNER::handle_tool(IO_WORKER_CLASS& io_worker, ollama_system& ch
                 {
                     wait_baseline_results = pre_command_result_baseline;
                     wait_baseline_set = true;
+                    wait_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(WAIT_FOR_RESULT_TIMEOUT_SECONDS);
                 }
 
                 if (held_results.size() > wait_baseline_results)
@@ -816,6 +834,26 @@ void TOOL_TASK_RUNNER::handle_tool(IO_WORKER_CLASS& io_worker, ollama_system& ch
                     held_results.erase(held_results.begin() + static_cast<std::ptrdiff_t>(wait_baseline_results));
                     instance.send_tool_result(result.call_id, result.response);
                     instance.integrate_tool_result(tool_worker, instance_comms, result.special_instruction, result.response);
+                    ++i;
+                    state = SCRIPT_STATE::GET_COMMAND;
+                    wait_baseline_set = false;
+                }
+                else if (std::chrono::steady_clock::now() >= wait_deadline)
+                {
+                    // Gave up - see WAIT_FOR_RESULT_TIMEOUT_SECONDS's own
+                    // comment above for why this can't just keep waiting
+                    // indefinitely. A synthetic call_id (no real call ever
+                    // answered) - same "descriptive, not a real id" pattern
+                    // pending_tool_calls' own action follow-ups already use
+                    // (olla.cpp's "system_action_" + timestamp) - narrated
+                    // the same honest way a real timeout error already is,
+                    // so the script's own next line (and whoever's reading
+                    // the transcript) knows this one didn't come back, not
+                    // that it silently succeeded.
+                    std::string timeout_message = "Error: no response within " +
+                        std::to_string(WAIT_FOR_RESULT_TIMEOUT_SECONDS) + " seconds.";
+                    instance.send_tool_result("wait_for_result_timeout", timeout_message);
+                    instance.integrate_tool_result(tool_worker, instance_comms, "", timeout_message);
                     ++i;
                     state = SCRIPT_STATE::GET_COMMAND;
                     wait_baseline_set = false;

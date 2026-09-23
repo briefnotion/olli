@@ -2920,11 +2920,44 @@ it can actually act under its persona's judgment, not just talk about it.
   Not a hang, milder than the disabled Phase 2 framing change's own failure
   mode, but a real, live-caught symptom of the same underlying fragility -
   not investigated further.
-- **Found 2026-09-23, not reproduced: one real crash with no backtrace.**
-  `crash_log.txt`: "olli was exited abnormally (code 134)" (SIGABRT) right
-  as a hard `consult_expert` question was sent - unlike the two 2026-09-22
-  crashes in the same file, this one captured no backtrace, despite the
-  crash handler (2026-09-22 entry, above) being installed and working for
-  those two. Re-sending the identical message afterward did not reproduce
-  it. Worth a second look at whether the crash handler itself has a gap
-  for whatever failure mode this was, but not actionable without a repro.
+- **Found 2026-09-23, not reproduced: one real crash with no backtrace -
+  root cause of the *missing backtrace* found and fixed same day; the
+  underlying crash itself is still unreproduced.** `crash_log.txt`: "olli
+  was exited abnormally (code 134)" (SIGABRT) right as a hard
+  `consult_expert` question was sent - unlike the two 2026-09-22 crashes in
+  the same file, this one captured no backtrace, despite the crash handler
+  (2026-09-22 entry, above) being installed and working for those two.
+  Re-sending the identical message afterward did not reproduce it.
+  - **Why the backtrace itself went missing, found via a fast read of
+    `crash_signal_handler()` (`main.cpp`)**: its re-entrancy guard
+    (`g_in_crash_handler`, a plain bool) was meant to stop a fault
+    recursing inside its OWN handler (e.g. `backtrace()` itself faulting),
+    but being a process-wide signal handler with no thread awareness, it
+    also silently ate a second, genuinely DIFFERENT thread's own crash if
+    one fired while the first was still mid-write - that thread's own
+    handler invocation would see the guard already set and immediately
+    `_exit()` with zero output. If that instant exit won the race against
+    the first thread's careful write-then-raise sequence, the whole
+    process vanishes with no trace at all, matching exactly what's in the
+    log (the two 2026-09-22 crashes both have full backtraces; this one
+    has none, just the supervisor's own summary line).
+  - **Fix**: the guard now compares thread ids (`gettid()` via the raw
+    `syscall(SYS_gettid)`, not glibc's own wrapper - async-signal-safe,
+    and doesn't assume a glibc version that has it built in) instead of a
+    plain bool - only bails out for true same-thread self-recursion; a
+    genuinely different thread's crash still gets to write its own
+    backtrace (the two can interleave in the log if that happens, which
+    is still strictly better than one vanishing entirely).
+  - **Verified no regression**: re-ran the existing `--debug-crash` hook
+    (deliberately segfaults 5s in, real tmux pty per the original
+    2026-09-22 gotcha) through all 3 of the supervisor's own crash-restart
+    attempts - every one produced a complete, correct backtrace exactly as
+    before, and the give-up-after-3 behavior was unaffected.
+  - **What this does NOT explain**: why the underlying abort() happened in
+    the first place - only why its evidence went missing. The two
+    2026-09-22 crashes were separately diagnosed and fixed (the shutdown
+    thread-join gap, same section above); this one could be a fresh
+    instance of a similar "exception escapes a thread" class of bug, or
+    something else entirely - still not reproducible, so still not
+    actionable beyond this. If it recurs, it should at least leave a real
+    backtrace to work from now.

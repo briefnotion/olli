@@ -14,6 +14,7 @@
 #include <execinfo.h>
 #include <sys/wait.h>
 #include <sys/resource.h>
+#include <sys/syscall.h>
 
 namespace {
     void print_usage()
@@ -108,7 +109,22 @@ namespace {
     // internal malloc() here. g_crash_log_fd is opened once, in
     // main_process(), long before any crash - never inside the handler.
     int g_crash_log_fd = -1;
-    volatile std::sig_atomic_t g_in_crash_handler = 0;
+    // Which thread (gettid() - async-signal-safe, a plain syscall) is
+    // currently inside crash_signal_handler(), or 0 if none. A plain bool
+    // here would also silently swallow a second, genuinely DIFFERENT
+    // thread's own crash if it fires while the first is still mid-write -
+    // confirmed missing (2026-09-23): two SIGABRT crashes the same day
+    // this handler was added both got a full backtrace, but a later one
+    // (same signal, same general shape) got none at all, just the
+    // supervisor's own "exited abnormally" line - consistent with a
+    // second thread's own crash hitting the guard and immediately
+    // _exit()-ing before the first thread's own write finished. Comparing
+    // thread ids keeps the guard's real purpose (a fault recursing inside
+    // its OWN handler, e.g. backtrace() itself faulting) while letting a
+    // genuinely different thread's crash still get written - the two
+    // backtraces can interleave in the log if that happens, which is
+    // still strictly better than one vanishing with no trace at all.
+    volatile std::sig_atomic_t g_crash_handler_thread = 0;
 
     void crash_write(const char* text)
     {
@@ -120,13 +136,20 @@ namespace {
 
     extern "C" void crash_signal_handler(int sig)
     {
-        // A fault inside this handler itself (e.g. a stack overflow) would
-        // otherwise recurse forever - bail out immediately on re-entry.
-        if (g_in_crash_handler)
+        // gettid() via the raw syscall (not glibc's own wrapper, which
+        // isn't guaranteed present on every glibc this might build
+        // against) - a plain syscall, async-signal-safe. Only bail out
+        // for TRUE self-recursion (this exact thread faulting again
+        // inside its own handler, e.g. backtrace() itself faulting) - a
+        // different thread's own, genuinely separate crash still gets to
+        // write its own backtrace below, see g_crash_handler_thread's own
+        // comment for why a plain bool here used to silently lose one.
+        std::sig_atomic_t this_thread = static_cast<std::sig_atomic_t>(syscall(SYS_gettid));
+        if (g_crash_handler_thread == this_thread)
         {
             _exit(128 + sig);
         }
-        g_in_crash_handler = 1;
+        g_crash_handler_thread = this_thread;
 
         crash_write("\n[CRASH] signal ");
         crash_write(strsignal(sig));

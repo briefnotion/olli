@@ -109,6 +109,17 @@ class REMOTE_TOOL_LISTENER
 
         // Call once per main-loop tick (non-blocking - never waits).
         std::optional<REMOTE_TOOL_REGISTRATION> poll();
+
+        // True if the constructor's bind()/listen() didn't succeed - most
+        // likely another olli process (a different profile, or the same
+        // profile run twice) already has PORT, since every olli instance
+        // on a machine currently shares this one fixed port with no way to
+        // tell them apart. Not fatal - poll() just always returns
+        // std::nullopt, so this instance runs fine on its own built-in
+        // tools alone - but the caller should say so loudly (see
+        // tool_worker.cpp's own use of this), not leave it as silent as
+        // it used to be.
+        bool bind_failed() const { return listen_fd < 0; }
 };
 
 /**

@@ -140,4 +140,23 @@ class OLLI_LINK {
 
         std::string status_text;
         bool disconnected_flag = false;
+
+        // Every remote tool connects to the exact same fixed olli port
+        // (REMOTE_TOOL_PORT, olli_link.cpp) - a second copy of the SAME
+        // tool running at once would both try to register the identical
+        // set of names, with no way for olli to know which one should
+        // actually answer a given call. Held for this process's whole
+        // lifetime (never explicitly closed) via a non-blocking flock() on
+        // a lock file keyed off this tool's own registered names
+        // (register_message above) - acquired once, in the constructor,
+        // before the first connection attempt. sock_fd stays -1 forever
+        // and service() never calls try_connect() while this is true - see
+        // both bodies (olli_link.cpp) for exactly where.
+        int instance_lock_fd = -1;
+        bool duplicate_instance = false;
+        // True once service() has reported duplicate_instance via
+        // status_text one time - status() is documented as "empty when
+        // nothing connection-related changed", so this keeps that promise
+        // instead of re-announcing the same fact every single tick forever.
+        bool duplicate_instance_reported = false;
 };

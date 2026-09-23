@@ -5,6 +5,7 @@
 
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/file.h>
 #include <sys/socket.h>
 #include <sys/select.h>
 #include <netinet/in.h>
@@ -26,6 +27,12 @@ namespace {
     // Caps how long one connection attempt can take - see try_connect()
     // below for why this matters once host isn't loopback.
     constexpr int CONNECT_TIMEOUT_SECONDS = 2;
+
+    // try_acquire_single_instance_lock()'s own reserved return value for
+    // "couldn't even open the lock file" (a /tmp permissions problem, disk
+    // full) - see that function's own comment for why this fails open
+    // rather than blocking startup.
+    constexpr int LOCK_ACQUIRE_ERROR = -2;
 
     void send_line(int fd, const std::string& line)
     {
@@ -105,6 +112,49 @@ namespace {
         if (flags != -1) fcntl(fd, F_SETFL, flags); // back to blocking for the connection's lifetime
         return fd;
     }
+
+    // Derives a filesystem-safe lock-file name from this tool's own first
+    // registered function name (../PROTOCOL.md's `register` message shape:
+    // {"tools": [{"name": "get_clock_time", ...}, ...]}) - two copies of
+    // the SAME tool always register the identical set of names, so this is
+    // naturally the same key for genuine twins and different for different
+    // tools (clock vs hue), with no separate identity ever needing to be
+    // passed in. "unknown" is a defensive fallback only - every real tool's
+    // own make_register_message() always populates at least one entry.
+    std::string lock_key_for(const json& register_message)
+    {
+        if (register_message.contains("tools") && register_message["tools"].is_array()
+            && !register_message["tools"].empty())
+        {
+            std::string name = register_message["tools"][0].value("name", "");
+            if (!name.empty()) return name;
+        }
+        return "unknown";
+    }
+
+    // Non-blocking exclusive flock() on a fixed /tmp path keyed by
+    // lock_key_for() above - the OS releases it automatically whenever
+    // this process ends, however it ends (clean exit, crash, kill -9), so
+    // there's nothing to explicitly clean up and no stale-lock case to
+    // handle. Returns the held fd (kept open, never closed, for the whole
+    // process lifetime) on success, -1 if another live instance already
+    // holds it, or LOCK_ACQUIRE_ERROR if the lock file itself couldn't
+    // even be opened (a /tmp permissions problem, disk full) - the caller
+    // treats that case as "proceed as normal" rather than let an unrelated
+    // filesystem hiccup stop this tool from ever starting at all; -1 is
+    // reserved specifically for "a real twin is already running."
+    int try_acquire_single_instance_lock(const json& register_message)
+    {
+        std::string lock_path = "/tmp/olli_tool_" + lock_key_for(register_message) + ".lock";
+        int fd = open(lock_path.c_str(), O_CREAT | O_RDWR, 0666);
+        if (fd < 0) return LOCK_ACQUIRE_ERROR;
+
+        if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+            close(fd);
+            return -1;
+        }
+        return fd;
+    }
 }
 
 OLLI_LINK::OLLI_LINK(std::string host_display, in_addr host_addr_, json register_message_)
@@ -124,6 +174,17 @@ OLLI_LINK::OLLI_LINK(std::string host_display, in_addr host_addr_, json register
     // class already handles - and early enough, since this constructor
     // always runs before the first connection attempt.
     std::signal(SIGPIPE, SIG_IGN);
+
+    // See instance_lock_fd/duplicate_instance's own comment (olli_link.hpp)
+    // - acquired here, before service() ever gets a chance to call
+    // try_connect(), so a duplicate instance never even attempts a
+    // connection, let alone registers.
+    int lock_result = try_acquire_single_instance_lock(register_message);
+    if (lock_result == -1) {
+        duplicate_instance = true;
+    } else if (lock_result != LOCK_ACQUIRE_ERROR) {
+        instance_lock_fd = lock_result;
+    }
 }
 
 OLLI_LINK::~OLLI_LINK()
@@ -142,6 +203,22 @@ void OLLI_LINK::handle_disconnect(const std::string& reason)
 void OLLI_LINK::service(bool socket_readable)
 {
     status_text.clear();
+
+    // Another instance of this exact tool already holds the single-
+    // instance lock (instance_lock_fd/duplicate_instance, olli_link.hpp) -
+    // never attempt a connection at all, so two copies never both try to
+    // register the identical tool names with olli. The rest of this class
+    // (send_result()/send_event()/etc.) all check is_connected() before
+    // doing anything, so nothing else needs to know about this state -
+    // sock_fd simply stays -1 forever.
+    if (duplicate_instance) {
+        if (!duplicate_instance_reported) {
+            status_text = "Another instance of this tool is already running - not connecting.";
+            duplicate_instance_reported = true;
+        }
+        return;
+    }
+
     auto now = std::chrono::steady_clock::now();
 
     // Set when a "call"/"identity"/etc. line gets queued below - the

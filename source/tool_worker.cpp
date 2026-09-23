@@ -39,6 +39,21 @@ void TOOL_WORKER_CLASS::thread_main()
     // touched only by this thread.
     REMOTE_TOOL_LISTENER remote_tools;
 
+    // Loud, one-time notice instead of the silent std::nullopt-forever
+    // bind_failed() itself documents (remote_tools.h) - a real, live-caught
+    // gap (2026-09-23): with no per-profile port, a second concurrently-
+    // running olli instance (a different profile, or the same one twice)
+    // silently loses remote tools for its whole session, no error anywhere
+    // a user would ever see. Still not fatal - this instance just runs on
+    // its own built-in tools alone from here on - but now says so once, up
+    // front, rather than leaving whoever's debugging it to guess.
+    if (remote_tools.bind_failed())
+    {
+        DEBUG_LOG_CLASS::instance().log_event("tool_worker",
+            "Could not bind the remote-tool port - likely another olli instance "
+            "already has it. Running with built-in tools only this session.");
+    }
+
     RUN = true;
     while (RUN)
     {

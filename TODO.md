@@ -1253,6 +1253,155 @@ not needed elsewhere.
     success-response JSON, in place, using the same
     `bri_to_brightness_percent()` `list_hue_lights` already had. Verified
     live: requested 30% -> bridge reports 30 -> narrated correctly.
+- **Found and fixed 2026-09-23: `sidetrack-second-guess` could silently
+  override a decision the user had already explicitly made, with a real
+  physical side effect and zero trace on screen.** Found via a 90-minute
+  exploratory testing round: given a conversation ending on the user's own
+  contradictory-but-final decision ("leave the lights as they are"), the
+  main chat correctly did nothing - but the second-guess review pass
+  (`SIDETRACK_CLASS::run_second_guess()`, `sidetrack.cpp`) then
+  autonomously called `set_hue_light(on:false)` on its own judgment,
+  physically turning off all the lights, and the code only ever committed
+  the model's own *spoken text* to history - when the text came back
+  empty (which it did here), the whole thing was logged as "empty answer -
+  nothing committed" with no indication anywhere a real user would see
+  that a real action had just fired.
+  - **Root cause is architectural, not a typo**: `SIDETRACK_CHAT_INSTANCE`
+    is deliberately handed the REAL `tool_worker` and the REAL main chat's
+    own `comms` (unlike consolidation's own throwaway instance, which gets
+    neither) - a tool call it decides to make has genuine real-world
+    effects, same as anything the main chat itself dispatches. That's
+    intentional (see the design discussion below), not itself the bug.
+  - **The actual purpose, per the user**: second-guess exists to combine
+    the *speed* of a non-thinking fast reply with the *quality* of a
+    thinking one, without paying thinking mode's latency on every turn -
+    reply fast, then reconsider in the background and correct if wrong
+    ("the answer is blue... wait, green is better"), including actually
+    following through on something the fast reply claimed to do but
+    didn't. This is a recognized pattern in LLM-agent literature (similar
+    to published "Self-Refine"/"Reflexion" techniques) - the user arrived
+    at it independently. The *implementation* had drifted wider than that
+    scope, though: its actual prompt ("more needed to be done or said?")
+    invited it to independently decide *new* things should happen, not
+    just correct/complete what it already said - which is what let it
+    reach past correcting its own answer into overriding the user's own
+    separate decision.
+  - **Fix, two parts, agreed with the user before building**:
+    1. **Narrower prompts** (three strings in `run_second_guess()`,
+       stages 2 and 4) - rescoped to "was your reply accurate, did you
+       follow through on anything you claimed - correct it if not, but
+       never introduce a new action, and never override a decision the
+       user already explicitly made." A wording mitigation, not a hard
+       guarantee (still relies on the model following it) - live-tested,
+       the exact repro no longer reproduces, though the model still
+       occasionally re-issues a redundant (harmless in that case) call;
+       what changed is it now explains the inconsistency in the visible
+       chat instead of staying silent about it.
+    2. **Structural fix for the silence itself**: new
+       `SIDETRACK_CLASS::second_guess_actions_taken` (`sidetrack.h`) -
+       captures the names of any tool calls actually dispatched, at the
+       one tick `last_received.tool_calls` is still populated before
+       `handle_instance_tools()` clears it to dispatch (by the time the
+       review reaches its own "commit to history" step, that list is
+       already empty - the old code had nothing left to report by then).
+       Whenever a review pass ends with real action taken but no spoken
+       text, a plain fallback note ("(Took action on review:
+       set_hue_light.)") now gets committed to the real, visible
+       conversation instead of nothing - across all 3 places the pass can
+       end. **First review pass on this found a real double-counting
+       bug**: the capture condition was missing an `!is_processing` check,
+       so it could re-append the same call name across multiple polling
+       ticks before the real dispatch actually cleared `tool_calls`
+       (`last_received.complete` flips true slightly before
+       `is_processing` flips false, inside `send()`, `olla.cpp`) - fixed
+       by adding that check to both capture sites, re-reviewed clean.
+  - **Second, separate bug found live while re-testing the first fix**:
+    `SIDETRACK_CLASS::check()` calls `run_consolidation()` then
+    `run_second_guess()` every tick, unconditionally, with zero
+    coordination between them - both operate on the exact same shared
+    `SIDETRACK_CHAT_INSTANCE` (`history`/`PROPS`/`debug_label`/its own
+    `chat_thread`). Second-guess's own review call is asynchronous (spawns
+    a real background thread, `run_second_guess()` just polls across many
+    ticks while it's in flight); nothing stopped consolidation's own
+    synchronous pass (which clears/reconfigures that same instance) from
+    *starting* while second-guess's background thread was still actively
+    running - confirmed live: a second-guess follow-up call ended up
+    dispatched under consolidation's clobbered state/label, firing yet
+    another real `set_hue_light` call against already-corrupted context.
+    - **Fix**: `run_consolidation()`'s own stage-1-to-2 transition now
+      also requires `second_guess_stage == 100` (second-guess's fully-idle
+      resting state), not just its own idle timer being ready. The user's
+      own idea, chosen over an earlier draft gated on
+      `SIDETRACK_CHAT_INSTANCE.is_processing` instead - `is_processing`
+      alone leaves a real gap (the moment between second-guess's own two
+      calls, where it reads false but the review cycle isn't actually
+      done), which `second_guess_stage == 100` closes completely, since it
+      only reaches 100 once the *whole* cycle - including any follow-up
+      call and its own commit-to-history step - is finished.
+      `run_clear_context()` was checked and confirmed to only ever touch
+      `main_instance` (the real chat), never `SIDETRACK_CHAT_INSTANCE` -
+      not part of this risk at all.
+    - **No new mutex** - both routines' own stage variables are only ever
+      touched by the single main thread (confirmed by tracing every
+      access site); the only actual background thread involved
+      (`start_second_guess_call()`'s own spawned `chat_thread`) never
+      touches `second_guess_stage` at all. Independently re-verified:
+      `run_consolidation()`'s own stage-2 body is one straight-line
+      synchronous call with no yield points, so by the time
+      `run_second_guess()` even runs on a given tick, consolidation has
+      either already fully finished or hasn't started - no partial-
+      completion window exists to hit.
+  - Both fixes independently code-reviewed (two separate passes, fresh
+    agents) and live-tested against the original repro plus a normal
+    idle-timer consolidation pass, confirming no regression.
+- **Found and fixed 2026-09-23: nothing stopped two copies of the same
+  remote tool, or two concurrent `olli` processes, from silently stepping
+  on each other.** Same 90-minute testing round: a remote-tool listener
+  bind failure left `clock`/`hue` retrying forever with zero error
+  anywhere - traced to the user's own concurrent `ron` profile session
+  already holding the fixed, hardcoded remote-tool port
+  (`REMOTE_TOOL_LISTENER::PORT = 47601`, `remote_tools.h`) - every olli
+  process on a machine shares this one port, with no per-profile
+  distinction at all.
+  - **Two separate problems, two separate fixes, both the user's own
+    proposed shape**:
+    1. **Two instances of the *same* remote tool** (e.g. two `./clock`
+       processes) - fixed with a non-blocking `flock()`-based single-
+       instance lock in the shared `tools/olli_link/` plumbing every
+       remote tool links against, keyed off the tool's own first
+       registered function name (already passed into `OLLI_LINK`'s
+       constructor via `register_message` - no new parameter, no changes
+       needed to any individual tool's own `.cpp`/`Makefile` at all,
+       confirmed by rebuilding all 4 tools - `clock`/`hue`/`presence`/
+       `rag_tool` - with zero edits on their end). A duplicate instance
+       keeps running (its own local display still works) but `service()`
+       never calls `try_connect()` for it - `sock_fd` stays -1 forever.
+       The OS releases the lock automatically on exit however the process
+       ends (clean, crash, `kill -9`), so there's no stale-lock case to
+       handle. Live-tested: started two `./clock` processes against a
+       live olli - only the first opened a real socket and served a real
+       `get_clock_time` request end-to-end; the second had no socket at
+       all and reported "Another instance of this tool is already
+       running - not connecting." once, not spammed every tick.
+    2. **Two concurrent `olli` processes** (different profiles, or the
+       same one twice) - the user's own call: don't try to prevent this
+       or add per-profile ports (a bigger redesign), just make the
+       *already-graceful* degradation loud instead of silent.
+       `REMOTE_TOOL_LISTENER::bind_failed()` (`remote_tools.h`) exposes
+       what was already tracked internally; `TOOL_WORKER_CLASS::
+       thread_main()` (`tool_worker.cpp`) logs one clear event right after
+       construction if it's true. Still not fatal - the losing instance
+       just runs on built-in tools alone for its whole session, exactly
+       as before - but now says so once, instead of a user only ever
+       seeing "Not connected to olli - retrying..." forever on the tool's
+       own display with no explanation why. Live-tested: two concurrent
+       `olli` processes (different profiles) - the second logged the
+       notice once and kept working correctly on built-in tools only
+       (confirmed with a real non-tool question).
+  - Both independently code-reviewed; the lock fix flagged one cosmetic,
+    non-blocking note (treats any non-EWOULDBLOCK `flock()` failure the
+    same as "genuine twin," not distinguishing a rare unrelated system
+    error) - not acted on, not considered worth the complexity.
 - **Found and fixed 2026-09-04: `qwen3:8b` silently refusing to call
   `run_automation_task` for an unfamiliar task name.** After adding a new
   `.task` file (`print test`) to a profile's `scripts/` directory, saying
@@ -2721,6 +2870,18 @@ it can actually act under its persona's judgment, not just talk about it.
   don't-repeat-yourself instruction to that prompt as a mitigation - not a
   structural fix (the model still has to notice its own prior notes and
   self-censor), so revisit if it still recurs.
+  - **Another concrete instance, 2026-09-23**: second-guess generated pure
+    nonsense ("DUN. You got what you paid for." -> "DUN. You got your DUN.
+    Stay sharp, kid.") and committed it to history on an essentially empty,
+    freshly-restarted conversation - the very first thing visible on
+    screen, with zero real user interaction yet to have "reviewed." The
+    stray "DUN" tic then measurably persisted into later, real, unrelated
+    replies. The 2026-09-23 second-guess fix (narrower prompt, real
+    actions always visible - same section, "Session & model behavior")
+    targets the *autonomous-action* half of second-guess's problems, not
+    this *fabricating text from nothing* half - unconfirmed whether the
+    narrower prompt happens to help here too. Revisit/re-test
+    specifically for this if it recurs.
 - Same shape of problem as the item above, but from plain persisted history,
   not a consolidation summary - seen concretely while developing the
   remote-tools feature (2026-08-22): early testing recorded "remote tool
@@ -2733,3 +2894,37 @@ it can actually act under its persona's judgment, not just talk about it.
   underlying issue as the consolidation-drift case above, just without
   consolidation involved - whatever fix eventually gets decided there should
   probably account for plain history too, not just summaries.
+- **Found 2026-09-23, not fixed: a `[WAIT_FOR_RESULT]` task-runner script
+  step has no timeout of its own.** Found via the same 90-minute testing
+  round, alongside (and likely triggered by) the remote-tool listener bind
+  failure above - a `qa_wait_test.task` run hit its own `[WAIT_FOR_RESULT]`
+  step waiting on a `set_timer` call that could never return (nothing was
+  actually connected to answer it), and the wait blocked not just that
+  task-runner instance but the entire `chat` channel - neither `bye` nor a
+  plain typed message produced any new activity for over 3.5 minutes,
+  needing a forced kill. Distinct from the already-known/mitigated
+  `pending_tool_calls`/`last_received` race (2026-09-22 entries above) -
+  this is specifically about `[WAIT_FOR_RESULT]`'s own wait loop
+  (`tools.cpp`, `TOOL_TASK_RUNNER::handle_tool()`) never giving up on a
+  call that simply never comes back. Not investigated or fixed - the
+  listener-bind fix above makes the *specific trigger* (silently missing
+  remote tools) far less likely to happen by accident, but doesn't touch
+  the underlying gap: a genuinely connected tool that hangs for any other
+  reason would still freeze the whole program the same way.
+- **Found 2026-09-23, not fixed: raw, unnarrated DIRECTOR_NOTE text leaking
+  verbatim into the visible chat.** Same testing round, one occurrence: at
+  the exact seam the already-known-and-mitigated Phase 2 event-framing race
+  lives in (timer expiry + a concurrent user message), the model's
+  response to the `[TIMER EXPIRED]` DIRECTOR_NOTE was the raw DIRECTOR_NOTE
+  text itself, shown directly to the user instead of a real narrated reply.
+  Not a hang, milder than the disabled Phase 2 framing change's own failure
+  mode, but a real, live-caught symptom of the same underlying fragility -
+  not investigated further.
+- **Found 2026-09-23, not reproduced: one real crash with no backtrace.**
+  `crash_log.txt`: "olli was exited abnormally (code 134)" (SIGABRT) right
+  as a hard `consult_expert` question was sent - unlike the two 2026-09-22
+  crashes in the same file, this one captured no backtrace, despite the
+  crash handler (2026-09-22 entry, above) being installed and working for
+  those two. Re-sending the identical message afterward did not reproduce
+  it. Worth a second look at whether the crash handler itself has a gap
+  for whatever failure mode this was, but not actionable without a repro.

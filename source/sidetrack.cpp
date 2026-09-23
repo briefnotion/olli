@@ -3,6 +3,41 @@
 
 #include "sidetrack.h"
 
+// Small helper for building the "(Took action on review: ...)" fallback
+// note run_second_guess() commits whenever a real tool call happened with
+// no accompanying spoken text to fold it into - three separate exit points
+// need the identical join, not worth its own header.
+static std::string join_strings(const std::vector<std::string>& items, const std::string& separator)
+{
+    std::string joined;
+    for (size_t i = 0; i < items.size(); ++i)
+    {
+        if (i > 0) joined += separator;
+        joined += items[i];
+    }
+    return joined;
+}
+
+// Commits a plain "(Took action on review: ...)" note to the real
+// conversation - the two early-exit branches in run_second_guess()'s stage
+// 4 need this (the DONE-check call itself can still have dispatched a real
+// tool call while forming its answer), same rule stage 6 applies to its
+// own, richer commit path.
+static void commit_action_only_note(ollama_system& main_instance, const std::vector<std::string>& actions)
+{
+    if (actions.empty()) return;
+
+    Message action_note;
+    action_note.role = "assistant";
+    action_note.content = "(Took action on review: " + join_strings(actions, ", ") + ".)";
+    action_note.consolidation_level = 0;
+    {
+        std::lock_guard<std::mutex> lock(history_mutex);
+        main_instance.history.push_back(action_note);
+    }
+    main_instance.save_history();
+}
+
 // Starts SIDETRACK_CHAT_INSTANCE generating a reply to whatever's currently
 // sitting in comms.INPUT_FROM_USER, using its own chat_thread - same
 // mechanism ollama_system::input() uses for the main chat (olla.cpp) - so
@@ -186,8 +221,14 @@ void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ollama_system
         SIDETRACK_CHAT_INSTANCE.clear_history();
         Message task_note;
         task_note.role = "system";
-        task_note.content = "You are reviewing your own last response to the user. Decide whether "
-                             "anything more needs to be said or done, or whether it was already complete.";
+        task_note.content = "You are reviewing your own last response to the user, given fast without "
+                             "much thought so it wouldn't be slow to reply. Check it for two things "
+                             "only: was it factually accurate, and did you actually follow through on "
+                             "anything you claimed to do (a tool call you said you made but didn't)? "
+                             "If either is wrong, correct it. Do not introduce any new action the user "
+                             "didn't ask for, and never override or second-guess a decision the user "
+                             "has already explicitly made - their own most recent instruction always "
+                             "wins, even if you think a different one would have been better.";
         task_note.consolidation_level = -1;
         SIDETRACK_CHAT_INSTANCE.history.push_back(task_note);
 
@@ -211,7 +252,8 @@ void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ollama_system
             }
         }
 
-        comms.INPUT_FROM_USER = "More needed to be done or said? Respond DONE if not.";
+        comms.INPUT_FROM_USER = "Was your last reply accurate, and did you really do anything you said "
+                                 "you did? Respond DONE if there's nothing to correct.";
         start_second_guess_call(SIDETRACK_CHAT_INSTANCE, comms, tool_worker);
 
         second_guess_stage = 3;
@@ -221,7 +263,22 @@ void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ollama_system
         // Waiting on the first ("is there more?") call - including
         // dispatching/narrating any tool call it decides to make (e.g.
         // actually checking whether a light it claimed was turned on
-        // really is).
+        // really is). Captured here, on the exact tick handle_instance_
+        // tools() (inside poll_second_guess_call(), tools.cpp's own
+        // is_ready_for_tools gate) is about to dispatch and clear
+        // last_received.tool_calls - see second_guess_actions_taken's own
+        // comment (sidetrack.h). Must match that gate's !is_processing
+        // check exactly, not just last_received.complete: send() (olla.cpp)
+        // sets complete=true before it returns, but is_processing only
+        // flips false slightly later, once the spawned thread's next line
+        // runs - during that narrow gap this would otherwise re-capture
+        // the same names on every tick that lands in it, since neither
+        // is_processing nor tool_calls has changed yet.
+        if (!SIDETRACK_CHAT_INSTANCE.is_processing && SIDETRACK_CHAT_INSTANCE.last_received.complete && !SIDETRACK_CHAT_INSTANCE.last_received.tool_calls.empty())
+        {
+            for (const ToolCall& tc : SIDETRACK_CHAT_INSTANCE.last_received.tool_calls)
+                second_guess_actions_taken.push_back(tc.name);
+        }
         if (!poll_second_guess_call(io_worker, SIDETRACK_CHAT_INSTANCE, comms, tools_list, tool_worker, system))
         {
             return; // still working - try again next tick, do nothing else this one
@@ -242,14 +299,23 @@ void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ollama_system
         size_t first_word_char = answer.find_first_not_of("_* \t\r\n");
         if (first_word_char != std::string::npos) answer = answer.substr(first_word_char);
 
+        // Either exit here skips stage 6 (the DONE-check call itself can
+        // still have dispatched a real tool call while forming its answer
+        // - e.g. checking a timer before deciding "DONE" - see stage 3's
+        // own comment) - same "a real action is never silent" rule stage 6
+        // applies, just inlined here since there's no later stage to reach.
         if (!SIDETRACK_CHAT_INSTANCE.last_received.complete)
         {
             DEBUG_LOG_CLASS::instance().log_event("sidetrack-second-guess", "interrupted during the DONE check - nothing to add");
+            commit_action_only_note(main_instance, second_guess_actions_taken);
+            second_guess_actions_taken.clear();
             second_guess_stage = 100;
         }
         else if (starts_with(answer, "DONE"))
         {
             DEBUG_LOG_CLASS::instance().log_event("sidetrack-second-guess", "DONE - nothing more needed");
+            commit_action_only_note(main_instance, second_guess_actions_taken);
+            second_guess_actions_taken.clear();
             second_guess_stage = 100;
         }
         else
@@ -258,14 +324,22 @@ void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ollama_system
             // Streaming back on for this one - this is the real content the
             // user should actually see/hear, unlike the DONE-check above.
             SIDETRACK_CHAT_INSTANCE.PROPS.stream_output = true;
-            comms.INPUT_FROM_USER = "Go ahead - say or do what needs to happen.";
+            comms.INPUT_FROM_USER = "Go ahead - correct what was wrong, or actually follow through on "
+                                     "what you already claimed. Nothing beyond that.";
             start_second_guess_call(SIDETRACK_CHAT_INSTANCE, comms, tool_worker);
             second_guess_stage = 5;
         }
     }
     else if (second_guess_stage == 5)
     {
-        // Waiting on the second ("say/do it") call - same shape as stage 3.
+        // Waiting on the second ("say/do it") call - same shape as stage 3,
+        // including the same action-capture step (see its own comment,
+        // including why !is_processing has to be checked too).
+        if (!SIDETRACK_CHAT_INSTANCE.is_processing && SIDETRACK_CHAT_INSTANCE.last_received.complete && !SIDETRACK_CHAT_INSTANCE.last_received.tool_calls.empty())
+        {
+            for (const ToolCall& tc : SIDETRACK_CHAT_INSTANCE.last_received.tool_calls)
+                second_guess_actions_taken.push_back(tc.name);
+        }
         if (!poll_second_guess_call(io_worker, SIDETRACK_CHAT_INSTANCE, comms, tools_list, tool_worker, system))
         {
             return;
@@ -282,6 +356,19 @@ void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ollama_system
         {
             answer += "...";
             DEBUG_LOG_CLASS::instance().log_event("sidetrack-second-guess", "interrupted mid-answer - keeping partial response");
+        }
+
+        // A real action (second_guess_actions_taken, sidetrack.h) must
+        // never go unmentioned just because the accompanying spoken text
+        // was empty - a tool this instance calls has real side effects
+        // (the real tool_worker/comms, same as the main chat itself uses),
+        // so silently taking one with nothing in the visible conversation
+        // to explain it is the actual bug this whole block exists to
+        // avoid. Falls back to a plain, honest note naming what was
+        // called when there's no answer text to fold it into.
+        if (answer.empty() && !second_guess_actions_taken.empty())
+        {
+            answer = "(Took action on review: " + join_strings(second_guess_actions_taken, ", ") + ".)";
         }
 
         if (!answer.empty())
@@ -301,6 +388,8 @@ void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ollama_system
         {
             DEBUG_LOG_CLASS::instance().log_event("sidetrack-second-guess", "empty answer - nothing committed");
         }
+
+        second_guess_actions_taken.clear();
 
         second_guess_stage = 100;
     }
@@ -350,7 +439,23 @@ void SIDETRACK_CLASS::run_consolidation(ollama_system& main_instance)
     }
     else if (consolidation_stage == 1)
     {
-        if (IDLE_WAIT_TIMER_FOR_CONSOLIDATION.is_ready())
+        // Also gated on second_guess_stage == 100 (its fully-idle resting
+        // state, run_second_guess()) - stage 2 below reuses the exact same
+        // shared SIDETRACK_CHAT_INSTANCE run_second_guess() owns for the
+        // whole span of its own review cycle, not just while its
+        // background chat_thread is literally mid-request - the gap
+        // between second-guess's own two calls (chat_thread finished, but
+        // it hasn't yet decided on/started the next one) is just as
+        // unsafe, since consolidation's own stage 2 clears/reconfigures
+        // that instance synchronously, on this same main thread. Real
+        // cross-thread collision confirmed live: a second-guess review's
+        // own follow-up call ended up dispatched under consolidation's
+        // clobbered state/label, with a real tool call - set_hue_light -
+        // firing off already-corrupted context. No new mutex needed -
+        // second_guess_stage only ever changes from this same main
+        // thread's own tick, so a plain int comparison is enough to keep
+        // the two from ever touching the instance at the same time.
+        if (IDLE_WAIT_TIMER_FOR_CONSOLIDATION.is_ready() && second_guess_stage == 100)
         {
             consolidation_stage = 2; // ready to consolidate
         }

@@ -55,6 +55,21 @@ class SIDETRACK_CLASS
         int second_guess_chain_count = 0;
         static constexpr int SECOND_GUESS_MAX_CHAIN = 10;
 
+        // Names of any real tool calls SIDETRACK_CHAT_INSTANCE actually
+        // dispatched during the current review pass (stages 3/5,
+        // run_second_guess()) - it's handed the real tool_worker/comms, so
+        // a call it makes has real side effects (a light actually turning
+        // off), same as anything the main chat itself dispatches. Captured
+        // right before handle_instance_tools() (poll_second_guess_call())
+        // clears last_received.tool_calls to dispatch it - by stage 6, that
+        // list is already empty, so this is the only place that moment is
+        // still visible. Used so stage 6 can commit a visible note to the
+        // real conversation whenever real action was taken, even if the
+        // accompanying spoken text was empty - a real-world side effect
+        // should never be silent just because there was nothing to say
+        // alongside it. Cleared once stage 6 uses it.
+        std::vector<std::string> second_guess_actions_taken;
+
         // How long to wait after a turn finishes before running the
         // second-guess review - short, since this isn't waiting for real
         // idle like consolidation/context-clear, just a brief grace period.

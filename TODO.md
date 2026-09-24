@@ -3130,3 +3130,82 @@ it can actually act under its persona's judgment, not just talk about it.
     parsing a yes/no (or similar) answer out of free text - flagged as a
     likely fit for a future `.task`-script conditional-branching feature
     (`IDEAS.md`'s "Conditional branching" section, not started).
+- **Built 2026-09-24: `COMMS::busy`, the first real piece of subcon's
+  "how busy is the system" input** (see `IDEAS.md`'s "The subconscious"
+  section) - a plain `int busy` member (`comms.h`) plus three free
+  functions in `comms.cpp`: `comms_busy_inc()` (capped at 1024),
+  `comms_busy_dec()`, and `comms_busy()` (currently `busy < 10` - true
+  while quiet, false once enough recent activity has pushed the count up;
+  deliberately not `!= 0`, since checking busy from inside an `exchange()`-
+  style tick would otherwise make it nearly impossible to ever see a clean
+  zero). Free functions rather than members - COMMS is more a plain data
+  definition than a class with real behavior of its own (its own existing
+  hand-written `operator=` is the same spirit). A fancier fully-self-
+  contained design (a wrapper type auto-incrementing on field assignment,
+  no external calls needed anywhere) was discussed and deliberately not
+  built - real risk of silently breaking on `COMMS`'s own existing copy
+  sites (`operator=`, `IO_WORKER_CLASS::thread_main()`'s per-channel
+  relay) without careful handling; kept simple instead.
+  - **Wiring so far, deliberately light**: `comms_busy_dec()` once per
+    main-loop tick (`main.cpp`). `comms_busy_inc()` in every guarded,
+    something-actually-happened branch of `IO_WORKER_CLASS::exchange()`
+    (`io_worker.cpp`) - both directions (`INPUT_FROM_LLM`,
+    `TOOL_ATTACHMENTS`, `INPUT_FROM_THINKING`, `INPUT_FROM_SYSTEM` out;
+    `ENTER_PRESSED`, `INPUT_FROM_USER`, `INTERRUPTED`, `IS_TYPING`,
+    `EXIT_REQUESTED` in) - skipping the two unconditional settings-copies
+    (color/enable flags, not real events) and `close_chat_log_requested`
+    (rare enough not worth it for a "light" first pass).
+  - **A real, live-verified finding, not just theory**: watched real
+    values in `debug_full_history.txt` during a live test - `busy` went
+    0→2→1→0 right as a message was submitted (multiple different signals
+    landing close together), then sat flat at 0 through the entire
+    multi-second streamed response that followed. Root cause: right now
+    `comms_busy_inc()` fires at most once per tick per field, and
+    `comms_busy_dec()` fires once per tick unconditionally - during
+    steady single-chunk-per-tick streaming, the same tick's own +1 and -1
+    cancel out exactly, invisible to change-only logging. Not a bug (the
+    code does exactly what's written), but a real gap between what's
+    built and "reflects ongoing activity, not just bursts" - open
+    question, not yet resolved, revisit once there's an actual reader for
+    `is_busy()`/`comms_busy()` that cares about the distinction.
+- **Found and fixed 2026-09-24: a real, live SIGABRT in
+  `SUBCON_WORKER_CLASS::thread_main()`** (`ollama_system::~ollama_system()`
+  per `addr2line` on the crash address) - caught live during the same
+  session that built the busy-tracking work above, on a `claude`-profile
+  test instance.
+  - **Root cause**: `subcon_worker.cpp`'s own test-prompt response check
+    read and cleared `subcon_llm.last_received.response` gated only on
+    `last_received.complete`, missing a `!subcon_llm.is_processing` guard.
+    `send()` (`olla.cpp`) sets `last_received.complete = true` near its
+    own tail end, but that runs on the `chat_thread` it spawns -
+    `is_processing` only flips false slightly later, once that thread's
+    own lambda finishes its next line. Reading/clearing a `std::string`
+    in that narrow window is an unsynchronized race against whatever
+    `chat_thread` is still doing - no happens-before relationship, real
+    undefined behavior, not just a stale read. Exact same missing-guard
+    shape as `sidetrack.cpp`'s own action-capture race, already found and
+    fixed the day before (2026-09-23 entry, above) - same lesson, not
+    applied when this new code was written.
+  - **Diagnosis path**: `addr2line` on the crash address (from
+    `crash_log.txt`'s own backtrace, the crash-handler thread-race fix
+    from 2026-09-23 doing its job) pointed at `ollama_system`'s implicit
+    destructor - consistent with corrupted state from the race finally
+    surfacing wherever something next got destroyed, not necessarily
+    where the actual corruption happened. A live repro attempt under gdb
+    (`gdb -p` attach is blocked in this sandbox; running fresh under gdb
+    directly, bypassing the fork/exec supervisor wrapper via
+    `./olli --supervised-child claude` as the direct target, does work)
+    didn't reproduce the race within several minutes of waiting - gdb's
+    own overhead very plausibly shifts the timing enough to avoid it.
+    Root cause was pinned down by code reading against the already-
+    documented sidetrack precedent, not by a forced live repro.
+  - **Fix**: added the missing `!subcon_llm.is_processing` guard,
+    matching `sidetrack.cpp`'s own established pattern exactly. Verified
+    live afterward (one-shot test prompt fired and logged correctly, a
+    real chat message was also exercised, clean shutdown, no new crash
+    entries) - but honestly caveated: since this is a timing-dependent
+    race that never reliably reproduced under controlled testing either,
+    a clean test run doesn't *prove* it's gone the way a deterministic
+    bug's fix could be proven. Confidence comes from the diagnosis
+    matching an already-confirmed bug class in this same codebase, not
+    from forcing the original failure and watching it not happen.

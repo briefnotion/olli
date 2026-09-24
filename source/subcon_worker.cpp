@@ -145,7 +145,20 @@ void SUBCON_WORKER_CLASS::thread_main()
         // no UI of its own to show this in yet). Cleared after logging,
         // same reasoning as tools.cpp's own "instance closed" sites: leaving
         // it set would log the same response again next tick.
-        if (subcon_llm.last_received.complete && !subcon_llm.last_received.response.empty())
+        //
+        // !is_processing is required, not just last_received.complete - a
+        // real, live crash (SIGABRT in ollama_system::~ollama_system(),
+        // 2026-09-24) traced back to this same missing guard sidetrack.cpp
+        // already had to add for its own action-capture (TODO.md's
+        // 2026-09-23 entry): send() (olla.cpp) sets last_received.complete
+        // true near its own tail end, but that runs on the chat_thread it
+        // spawned - is_processing only flips false slightly later, once
+        // that thread's own lambda finishes its next line. Reading/clearing
+        // last_received.response in that narrow window is an unsynchronized
+        // race against whatever chat_thread is still doing, undefined
+        // behavior with no happens-before relationship - not just a stale
+        // read, capable of real memory corruption.
+        if (!subcon_llm.is_processing && subcon_llm.last_received.complete && !subcon_llm.last_received.response.empty())
         {
             DEBUG_LOG_CLASS::instance().log_event("subcon", "test prompt response: " + subcon_llm.last_received.response);
             subcon_llm.last_received.response.clear();

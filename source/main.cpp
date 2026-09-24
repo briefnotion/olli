@@ -501,6 +501,16 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
                 *debug_crash_trigger = 1;
             }
 
+            // Once per tick - see comms_busy_dec()'s own comment (comms.h)
+            // for why this drains rather than resets: any access that
+            // changed comms this tick already had its own comms_busy_inc()
+            // call (IO_WORKER_CLASS::exchange(), io_worker.cpp - the only
+            // call sites wired in so far), so this just brings it back
+            // down by one, letting several increments in the same tick
+            // still show up as "busy" for a bit rather than being erased
+            // the instant the tick ends.
+            comms_busy_dec(comms);
+
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
 

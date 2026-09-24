@@ -1340,24 +1340,28 @@ void IO_WORKER_CLASS::exchange(COMMS& comms, TOOL_WORKER_CLASS* tool_worker)
         {
             comms_buffer.INPUT_FROM_LLM += comms.INPUT_FROM_LLM;
             comms.INPUT_FROM_LLM.clear();
+            comms_busy_inc(comms);
         }
 
         if (!comms.TOOL_ATTACHMENTS.empty())
         {
             comms_buffer.TOOL_ATTACHMENTS.insert(comms_buffer.TOOL_ATTACHMENTS.end(), comms.TOOL_ATTACHMENTS.begin(), comms.TOOL_ATTACHMENTS.end());
             comms.TOOL_ATTACHMENTS.clear();
+            comms_busy_inc(comms);
         }
 
         if (!comms.INPUT_FROM_THINKING.empty())
         {
             comms_buffer.INPUT_FROM_THINKING += comms.INPUT_FROM_THINKING;
             comms.INPUT_FROM_THINKING.clear();
+            comms_busy_inc(comms);
         }
 
         if (!comms.INPUT_FROM_SYSTEM.empty())
         {
             comms_buffer.INPUT_FROM_SYSTEM += comms.INPUT_FROM_SYSTEM;
             comms.INPUT_FROM_SYSTEM.clear();
+            comms_busy_inc(comms);
         }
 
         // Plain assignment, not append-then-clear like the text buffers
@@ -1386,6 +1390,7 @@ void IO_WORKER_CLASS::exchange(COMMS& comms, TOOL_WORKER_CLASS* tool_worker)
     {
         comms.ENTER_PRESSED = true;
         comms_buffer.ENTER_PRESSED = false;
+        comms_busy_inc(comms);
     }
 
     if (!comms_buffer.INPUT_FROM_USER.empty())
@@ -1396,24 +1401,28 @@ void IO_WORKER_CLASS::exchange(COMMS& comms, TOOL_WORKER_CLASS* tool_worker)
         std::lock_guard<std::mutex> lock(output_buffer_mutex);
         comms.INPUT_FROM_USER = comms_buffer.INPUT_FROM_USER;
         comms_buffer.INPUT_FROM_USER.clear();
+        comms_busy_inc(comms);
     }
 
     if (comms_buffer.INTERRUPTED)
     {
         comms.INTERRUPTED = true;
         comms_buffer.INTERRUPTED = false;
+        comms_busy_inc(comms);
     }
 
     if (comms_buffer.IS_TYPING)
     {
         comms.IS_TYPING = true;
         comms_buffer.IS_TYPING = false;
+        comms_busy_inc(comms);
     }
 
     if (comms_buffer.EXIT_REQUESTED)
     {
         comms.EXIT_REQUESTED = true;
         comms_buffer.EXIT_REQUESTED = false;
+        comms_busy_inc(comms);
     }
 
     INTERUPTED.store(false);

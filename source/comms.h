@@ -185,6 +185,13 @@ class COMMS
         // reasoning as KEYBOARD_INPUT_PROPERTIES::ENABLED, user_io.h).
         std::atomic<bool> close_chat_log_requested{false};
 
+        // "How busy is the system" signal, first piece of subcon_worker's
+        // real design (IDEAS.md). Drained once per main loop tick
+        // (comms_busy_dec(), main.cpp), incremented on the guarded
+        // "something actually happened" branches of IO_WORKER_CLASS::
+        // exchange() (io_worker.cpp) - the only call sites wired in so far.
+        int busy = 0;
+
         // std::atomic has no copy-assignment operator, which would
         // otherwise implicitly delete COMMS's own operator= entirely -
         // provided explicitly instead, copying every field above except
@@ -215,5 +222,19 @@ class COMMS
             return *this;
         }
 };
+
+// Free functions, not members - COMMS is more a plain data definition than
+// a class with real behavior of its own (see its own class comment: bundled
+// fields, one hand-written operator=), so operations on it live alongside
+// it instead of inside it. Meant to track how busy a given instance's own
+// COMMS is: comms_busy_inc() when something actually happens (currently
+// wired into IO_WORKER_CLASS::exchange()'s own guarded branches,
+// io_worker.cpp - not every access, just real data/events passing
+// through), comms_busy_dec() once per main loop tick (main.cpp) so it
+// drains back toward 0 when nothing's happening instead of climbing
+// forever. comms_busy() reads the current state.
+void comms_busy_inc(COMMS& Comms_var);
+void comms_busy_dec(COMMS& Comms_var);
+bool comms_busy(COMMS& Comms_var);
 
 #endif

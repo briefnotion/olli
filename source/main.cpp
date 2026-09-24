@@ -277,6 +277,7 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         SIDETRACK_CLASS sidetrack;
         IO_WORKER_CLASS io_worker; // keyboard input + screen display - see io_worker.h
         TOOL_WORKER_CLASS tool_worker; // remote-tool communications - see tool_worker.h
+        SUBCON_WORKER_CLASS subcon_worker; // background/idle reasoning - skeleton only for now, see subcon_worker.h
 
         // The main chat's real tools_list - the 4 built-ins. Declared here,
         // not owned by 'chat' itself - see process()'s comment in olla.h for
@@ -385,6 +386,20 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         tool_worker.set_identity(system.user);
 
         tool_worker.thread_start();
+
+        // One-way copy of chat's own PROPS (subcon_worker.h's own comment) -
+        // same model/host/port, so the subconscious always talks to the
+        // same LLM the real conversation does. Just a stepping stone, not
+        // canon: thread_main() (subcon_worker.cpp) applies its own real
+        // overrides (LOAD_SAVE_HISTORY_ON_DISK, OLLI_DIRECTORY, use_thinking)
+        // on top of this copy once it opens subcon_llm - nothing here should
+        // be assumed final. Must happen after chat.PROPS.OLLI_DIRECTORY is
+        // set (above) and before thread_start() below, since thread_main()
+        // copies this into its own local ollama_system once, right at the
+        // start.
+        subcon_worker.PROPS = chat.PROPS;
+
+        subcon_worker.thread_start(); // skeleton only for now - see subcon_worker.h
 
         // No separate priming call needed here (there used to be one - a
         // one-off get_response()+display() to flush chat.open()'s startup
@@ -511,6 +526,7 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         // See IO_WORKER_CLASS's class comment (io_worker.h).
         io_worker.thread_stop();
         tool_worker.thread_stop();
+        subcon_worker.thread_stop();
 
         // Hand the real terminal screen back before printing any of the
         // shutdown messages below - otherwise they'd print while ncurses'

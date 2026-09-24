@@ -3008,3 +3008,78 @@ it can actually act under its persona's judgment, not just talk about it.
     way, just via an exception fallback instead of a clean check. Not
     actually broken, just not as tidy as it could be - flagged, not fixed,
     per this project's own scope-discipline convention.
+- **Built 2026-09-24: `SUBCON_WORKER_CLASS` (`source/subcon_worker.h`/
+  `.cpp`) - a skeleton dedicated-thread worker for "the subconscious" (see
+  `IDEAS.md`'s own section), with a real, live-verified LLM round trip
+  proven working end to end. No real reasoning/design behind it yet -
+  purely the plumbing, built incrementally and smoke-tested at every step.**
+  - **Modeled on `TOOL_WORKER_CLASS`, not `IO_WORKER_CLASS`** - chosen
+    deliberately: `IO_WORKER_CLASS`'s single combined `exchange()` exists
+    because keyboard/audio genuinely need a full `COMMS` snapshot every
+    tick; this worker doesn't need that shape, and it explicitly isn't
+    built sidetrack-style either - a real dedicated thread, not a tick-
+    based state machine riding the main thread's own loop (and inheriting
+    every stall that has, e.g. `TOOL_TASK_RUNNER::handle_tool()`'s
+    synchronous blocking).
+  - **`thread_main()` made private on all three worker classes**
+    (`SUBCON_WORKER_CLASS`, `TOOL_WORKER_CLASS`, `IO_WORKER_CLASS`) - it was
+    only ever invoked internally via `thread_start()`'s own lambda, which
+    has the same access as any other member function; moved for
+    correctness on all three at once rather than leaving the two existing
+    classes' own pre-existing (arguably wrong) public declarations as-is.
+  - **Its own `ollama_system` (`subcon_llm`), fully isolated**: own
+    `debug_label` ("subcon", tagging its lines in the one shared
+    `debug_full_history.txt` - `DEBUG_LOG_CLASS` is a global singleton, one
+    log file for the whole process, not per-instance-directory-controlled),
+    own `OLLI_DIRECTORY` (`.../subcon`, created by `open()`'s own
+    unconditional `create_directories()` calls - confirmed on disk via a
+    live run), `LOAD_SAVE_HISTORY_ON_DISK = false` (never touches the real
+    `history.json` - the exact trap `SIDETRACK_CLASS::run_consolidation()`
+    already had to avoid), `use_thinking = true` (chat itself runs with
+    this off), and `stream_output`/`stream_thinking` both off (nothing
+    ever displays this instance's output, so there's nothing for
+    incremental chunks to write to - `send()` just takes the plain
+    non-streaming path instead, same end result). `PROPS` starts as a
+    wholesale copy of chat's own (so model/host/port always track chat's
+    automatically) with these overrides applied on top, not cherry-picked
+    field by field.
+  - **Its own persona** (`OLLAMA_OPENING`, set before `open()` so it seeds
+    the protected opening message, same order `TOOL_DELEGATOR`'s own
+    instance uses) - added after a live test showed the *default* persona
+    (written for a general assistant with tool guidance) bleeding through
+    as an in-character reply with nothing to do with what subcon actually
+    is. Re-tested after the fix: plain, on-topic replies.
+  - **Deliberately passive for now**: empty `tools_list`, self-contained to
+    `thread_main()` - no tools at all yet, matching the safety principle
+    from the `IDEAS.md` brainstorm (a background process that can only
+    think out loud is a very different risk than one that can also act).
+  - **A real `input()`/`process()`/`send()` round trip, proven live**: a
+    one-shot test prompt (fires once via a `TIMED_IS_READY_SIMPLE` delay
+    and a `bool` latch - an earlier version re-armed the timer every 60s,
+    caught and fixed before pushing since a repeating, unremovable nag was
+    exactly the failure mode being designed against) goes through
+    `subcon_llm.input()`/`.process()` the same way real user input does,
+    and the real response gets logged via `DEBUG_LOG_CLASS` once it
+    arrives - confirmed with real model output in the log (~3-9s round
+    trip), confirmed it does not repeat.
+  - **`process()`/`handle_instance_tools()` need an `IO_WORKER_CLASS&` (a
+    reference, not nullable)** even though subcon has nothing to do with
+    the real one - resolved with a real but never-started, fully self-
+    contained `IO_WORKER_CLASS subcon_io_worker` local to `thread_main()`,
+    safe because that reference is only ever actually touched inside
+    `dispatch_tool_call()`, which can't fire with an empty `tools_list`.
+  - **No `close()` exists anywhere on `ollama_system`** - confirmed via
+    grep; what other instances call "instance closed" is just a
+    `DEBUG_LOG_CLASS` log tag, not a real teardown call. Left alone for
+    subcon for now (undecided, not forgotten).
+  - **Verified after every single increment**, not just at the end - each
+    step (thread lifecycle, the privacy fix, the local `ollama_system`,
+    the `PROPS` copy chain, the tools list, `open()`, `COMMS`, the
+    `input()`/`process()` loop, the persona, the one-shot fix) got its own
+    clean rebuild (`-Wall -Wextra -Wpedantic -Wconversion -Werror`) and a
+    real `tmux`-driven start/`bye`/exit check against `crash_log.txt`
+    before moving to the next piece.
+  - **Not yet built**: any actual reasoning/scheduling logic - what
+    triggers a real thought, a digest queue, tying into the awareness/
+    event layer. All still exactly as scoped in `IDEAS.md`; this entry
+    only covers the plumbing now proven to work.

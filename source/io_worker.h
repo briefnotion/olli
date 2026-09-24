@@ -458,6 +458,13 @@ class IO_WORKER_CLASS
 
         bool RUN = false;
 
+        // Runs on the background thread - only ever invoked internally,
+        // via thread_start()'s own lambda (same access rights as any
+        // other member-function code, since the lambda is defined inside
+        // one), never meant to be called directly from outside. See
+        // thread_start()'s own comment for why it takes no parameters.
+        void thread_main();
+
     public:
         KEYBOARD_INPUT key_input;
         OUTPUT_CLASS output;
@@ -490,10 +497,6 @@ class IO_WORKER_CLASS
         // here reaches it anymore.
         void thread_start();
         void thread_stop();
-
-        // Runs on the background thread - see thread_start()'s comment for
-        // why it takes no parameters.
-        void thread_main();
 
         // Runs on the MAIN/owner thread - call once per its own loop tick,
         // passing the real comms (see this class's own comment for why

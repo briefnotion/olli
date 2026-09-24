@@ -44,6 +44,12 @@ class TOOL_WORKER_CLASS
 
         bool RUN = false;
 
+        // Runs on the background thread - only ever invoked internally,
+        // via thread_start()'s own lambda (same access rights as any
+        // other member-function code, since the lambda is defined inside
+        // one), never meant to be called directly from outside.
+        void thread_main();
+
         // The communication variables tools_list's calls/results actually
         // cross put_pending_call()/get_pending_result() through - the same
         // worker-private copies io_worker's comms_buffer/comms_keyboard/
@@ -134,9 +140,6 @@ class TOOL_WORKER_CLASS
     public:
         void thread_start();
         void thread_stop();
-
-        // Runs on the background thread.
-        void thread_main();
 
         // Both run on the MAIN/owner thread, called independently as main
         // actually has something to send/check for - not tied to a fixed

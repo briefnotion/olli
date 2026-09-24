@@ -445,7 +445,19 @@ class ollama_system {
 
         string gather_history();
         void integrate_tool_result(TOOL_WORKER_CLASS* tool_worker, COMMS& comms, std::string Special_Instruction, const std::string& raw_result);
-        void send(TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const std::string& role);
+
+        // response_format: optional Ollama "format" constraint (a JSON
+        // Schema object, e.g. {"type":"object","properties":{...}}) -
+        // forces the model's reply into that exact shape via constrained
+        // decoding server-side, rather than asking for a particular phrase
+        // and hoping it lands somewhere findable in free text (the DONE-
+        // marker bug, sidetrack.cpp, was exactly that class of problem).
+        // Default-empty (json()'s own default, a null value - json::empty()
+        // is true for that) means "no constraint," so every existing call
+        // site is unaffected. Still just a plain string in last_received.
+        // response either way - json::parse() it yourself to read the
+        // structured reply back out.
+        void send(TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const std::string& role, const json& response_format = json());
         void send_tool_result(const std::string& tool_call_id, const std::string& result);
 
         // Helper to reset the signal

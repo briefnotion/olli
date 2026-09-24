@@ -186,3 +186,22 @@ More speculative:
   transcripts.
 - Tying **presence** into more automations now that it exists as a real
   tool - `welcome_home`/`leaving_home` are already a foundation.
+
+## Conditional branching in `.task` scripts (2026-09-24)
+
+`[IF <question>]` / `[ELSE]` / `[MAYBE]` / `[ENDIF]` - a real branch
+structure for task-runner scripts, sent to the LLM as a question and
+routed on the answer instead of always running the same fixed sequence.
+
+A genuine three-way branch, not just true/false - `MAYBE` is its own
+branch, not an error/fallback path, for whenever the honest answer to
+the condition isn't a clean yes or no. Maps directly onto the structured-
+output mechanism added the same night (`sidetrack.cpp`'s DONE-check
+fix, `TODO.md`) - an `enum` field (`"yes"`/`"no"`/`"maybe"`) instead of a
+plain boolean, so the model reports genuine uncertainty as a real answer
+rather than being forced to pick a side.
+
+Not designed further yet - parked until ready to work through it
+properly (parser changes to `TOOL_TASK_RUNNER::handle_tool()`/
+`tools_task_script.cpp`, how nesting works, what happens to a call
+already in flight when a branch is skipped, etc.).

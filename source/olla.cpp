@@ -274,7 +274,7 @@ static std::string summarize_tool_calls(const std::vector<ToolCall>& calls)
     return ss.str();
 }
 
-void ollama_system::send(TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const std::string& role) {
+void ollama_system::send(TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const std::string& role, const json& response_format) {
     std::string new_user_input = filter_non_printable(comms.INPUT_FROM_USER);
     
     // 1. Set initial states
@@ -364,6 +364,10 @@ void ollama_system::send(TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const std
 
     if (!tools.empty()) {
         body["tools"] = tools;
+    }
+
+    if (!response_format.empty()) {
+        body["format"] = response_format;
     }
 
     httplib::Client cli(PROPS.host, PROPS.port);

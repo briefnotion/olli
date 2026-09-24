@@ -45,18 +45,39 @@ static void commit_action_only_note(ollama_system& main_instance, const std::vec
 // entered from a stage that already set INPUT_FROM_USER. comms here is the
 // real main chat's own COMMS (passed through from check()), not a separate
 // one - see run_second_guess()'s own comment for the tradeoff that implies.
+// response_format forwards straight to ollama_system::send() - default-
+// empty (plain text) for the stage 4 "go ahead" call, set for the stage 2
+// DONE-check call (see SECOND_GUESS_RESULT_FORMAT below).
 static void start_second_guess_call(ollama_system& instance, COMMS& comms,
-                                     TOOL_WORKER_CLASS* tool_worker)
+                                     TOOL_WORKER_CLASS* tool_worker,
+                                     const json& response_format = json())
 {
     instance.status.interrupt_signal = false;
     instance.is_processing = true;
     if (instance.chat_thread.joinable()) instance.chat_thread.join();
-    instance.chat_thread = std::thread([&instance, tool_worker, &comms]()
+    instance.chat_thread = std::thread([&instance, tool_worker, &comms, response_format]()
     {
-        instance.send(tool_worker, comms, "user");
+        instance.send(tool_worker, comms, "user", response_format);
         instance.is_processing = false;
     });
 }
+
+// Structured-output schema for the stage 2 DONE-check call - forces the
+// reply into this exact shape via Ollama's own constrained decoding
+// (send()'s own comment, olla.h) instead of asking for a magic word and
+// hoping it lands somewhere findable in free text. Replaces the old
+// leading/trailing "DONE" text-matching, which real model replies (an
+// explanation, then the marker at the END, not the start) kept missing -
+// found live 2026-09-24, a real review self-chained all the way to
+// SECOND_GUESS_MAX_CHAIN without a single one of its "DONE" answers ever
+// being recognized as such.
+static const json SECOND_GUESS_RESULT_FORMAT = {
+    {"type", "object"},
+    {"properties", {
+        {"needs_correction", {{"type", "boolean"}}}
+    }},
+    {"required", json::array({"needs_correction"})}
+};
 
 // Dispatches any tool calls the last call produced - same shape
 // ollama_system::process()'s own background_tasks handling uses for
@@ -253,8 +274,9 @@ void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ollama_system
         }
 
         comms.INPUT_FROM_USER = "Was your last reply accurate, and did you really do anything you said "
-                                 "you did? Respond DONE if there's nothing to correct.";
-        start_second_guess_call(SIDETRACK_CHAT_INSTANCE, comms, tool_worker);
+                                 "you did? Set needs_correction to true only if something was wrong or "
+                                 "left unfinished; false if it was fine as-is.";
+        start_second_guess_call(SIDETRACK_CHAT_INSTANCE, comms, tool_worker, SECOND_GUESS_RESULT_FORMAT);
 
         second_guess_stage = 3;
     }
@@ -287,17 +309,27 @@ void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ollama_system
     }
     else if (second_guess_stage == 4)
     {
-        // Trim leading whitespace/newlines (thinking-mode responses often
-        // have some) before checking for the DONE marker.
-        std::string answer = SIDETRACK_CHAT_INSTANCE.last_received.response;
-        size_t first_non_space = answer.find_first_not_of(" \t\r\n");
-        if (first_non_space != std::string::npos) answer = answer.substr(first_non_space);
-
-        // Strip leading markdown emphasis (_DONE_, **DONE**, etc.) before
-        // the DONE check below - the model sometimes wraps the marker in
-        // emphasis instead of sending it plain.
-        size_t first_word_char = answer.find_first_not_of("_* \t\r\n");
-        if (first_word_char != std::string::npos) answer = answer.substr(first_word_char);
+        // Structured reply (SECOND_GUESS_RESULT_FORMAT, above) - guaranteed
+        // valid-JSON-shaped by Ollama's own constrained decoding, not text
+        // to search for a marker in. Replaces the old leading/trailing
+        // "DONE" matching, which kept missing real replies (explanation
+        // first, marker last - found live 2026-09-24, a review self-chained
+        // 10 times straight without ever being recognized as done).
+        // needs_correction defaults true on a parse failure - constrained
+        // output should make that rare, and treating an unreadable answer
+        // as "needs a look" is the safer failure direction on its own, but
+        // SECOND_GUESS_MAX_CHAIN (sidetrack.h) still bounds the worst case
+        // either way.
+        bool needs_correction = true;
+        try
+        {
+            json parsed = json::parse(SIDETRACK_CHAT_INSTANCE.last_received.response);
+            needs_correction = parsed.at("needs_correction").get<bool>();
+        }
+        catch (const std::exception& e)
+        {
+            DEBUG_LOG_CLASS::instance().log_event("sidetrack-second-guess", std::string("DONE-check reply wasn't valid structured JSON, treating as needs_correction: ") + e.what());
+        }
 
         // Either exit here skips stage 6 (the DONE-check call itself can
         // still have dispatched a real tool call while forming its answer
@@ -311,7 +343,7 @@ void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ollama_system
             second_guess_actions_taken.clear();
             second_guess_stage = 100;
         }
-        else if (starts_with(answer, "DONE"))
+        else if (!needs_correction)
         {
             DEBUG_LOG_CLASS::instance().log_event("sidetrack-second-guess", "DONE - nothing more needed");
             commit_action_only_note(main_instance, second_guess_actions_taken);

@@ -3083,3 +3083,50 @@ it can actually act under its persona's judgment, not just talk about it.
     triggers a real thought, a digest queue, tying into the awareness/
     event layer. All still exactly as scoped in `IDEAS.md`; this entry
     only covers the plumbing now proven to work.
+- **Found and fixed 2026-09-24: `sidetrack-second-guess`'s own DONE-check
+  never once recognized a real "DONE" answer, causing a live, active
+  self-chaining review loop on the user's own real `ron` profile
+  (bounded by `SECOND_GUESS_MAX_CHAIN`, but wasteful and polluted history
+  with junk "corrections" while it ran).** Caught live, not in testing -
+  the user noticed second-guess "isn't picking up done."
+  - **Root cause**: stage 4's `starts_with(answer, "DONE")` check
+    (`sidetrack.cpp`) assumed the model would lead with the marker. Real
+    replies never did - every one looked like a short explanation
+    followed by the marker at the *end* ("...nothing to correct.\n\n
+    DONE"), which a leading-only check can never match. Every DONE-check
+    this session read as "not done," which sent it to the "go ahead and
+    correct something" stage, which committed a new assistant message to
+    real history - which, by design (self-chaining off its own follow-up
+    is intentional, capped by `SECOND_GUESS_MAX_CHAIN = 10`), immediately
+    triggered another review of itself. Confirmed live: 10 straight
+    cycles, none of them a real correction.
+  - **First pass, since superseded**: added a matching trailing-DONE
+    check (strip trailing whitespace/periods/markdown emphasis, check the
+    end instead of the start) - fixed the immediate bug, verified live
+    (single review cycle, correctly recognized `**DONE**` on its own
+    trailing line).
+  - **Real fix, replacing the trailing check same day**: Ollama supports
+    structured outputs (a JSON Schema passed in the request's `format`
+    field, constraining the model's own token generation server-side
+    rather than hoping a phrase lands somewhere findable in free text) -
+    installed Ollama here is 0.34.1, comfortably past the version that
+    added this (~0.5.0, December 2024). `ollama_system::send()`
+    (`olla.h`/`.cpp`) gained an optional `response_format` parameter
+    (default-empty JSON, so every existing call site is unaffected).
+    `sidetrack.cpp`'s DONE-check call now passes a schema forcing
+    `{"needs_correction": bool}`; stage 4 just reads that field directly
+    (`json::parse` + `.at("needs_correction").get<bool>()`, wrapped in a
+    try/catch defaulting to `true` - i.e. "needs a look" - on a parse
+    failure, the safer direction given tonight's incident, still bounded
+    by `SECOND_GUESS_MAX_CHAIN` regardless). All leading/trailing text-
+    matching removed - nothing left to miss. Verified live: the model's
+    raw reply is now literally `{"needs_correction":false}`, recognized
+    correctly in a single cycle.
+  - **Scope note**: the "needs_correction: true" (real-correction) path
+    through stages 5/6 was not itself touched by this change and wasn't
+    separately live-tested - confirmed correct by inspection, not by a
+    forced repro.
+  - **Same mechanism now available project-wide** for any place currently
+    parsing a yes/no (or similar) answer out of free text - flagged as a
+    likely fit for a future `.task`-script conditional-branching feature
+    (`IDEAS.md`'s "Conditional branching" section, not started).

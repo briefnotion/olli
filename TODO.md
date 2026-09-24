@@ -2961,3 +2961,50 @@ it can actually act under its persona's judgment, not just talk about it.
     something else entirely - still not reproducible, so still not
     actionable beyond this. If it recurs, it should at least leave a real
     backtrace to work from now.
+- **Found and fixed 2026-09-24: `set_hue_light` returning a genuine
+  network hiccup as a flat, un-retried failure, plus `manage_hue_scenes`
+  having no way to report a bridge failure honestly at all.** Found live,
+  outside any testing round - the user asked to turn the lights on, olli
+  said it timed out, and a little later a repeated request worked fine.
+  - **Root cause**: `HUE_LIGHT_CLASS::make_request()` (`tools/hue/hue.cpp`)
+    - the one function every Hue API call funnels through - had a flat 5s
+    `CURLOPT_TIMEOUT` covering everything, including a group "all lights"
+    command, which can genuinely take the bridge a moment longer than a
+    single light, with no retry at all on a plain transient timeout. Same
+    class of bug `TOOL_WEB_SEARCH::curl_get()` (`source/tools.cpp`) was
+    already fixed for (2026-09-16 entry, below) - this tool just hadn't
+    gotten the same treatment.
+  - **Fix**: `make_request()` now matches `curl_get()`'s own shape exactly
+    - one retry, but only on `CURLE_OPERATION_TIMEDOUT` specifically (a
+    bad URL/connection-refused/host-not-found would just fail identically
+    again, so retrying those doubles the wait for nothing), overall
+    timeout raised 5s -> 8s, plus its own separate 3s
+    `CURLOPT_CONNECTTIMEOUT` (the bridge is a local LAN device - a
+    connection that hasn't even opened within a few seconds is genuinely
+    unreachable, not just slow to answer, and shouldn't eat the whole
+    request budget finding that out).
+  - **Separately, while checking this: `set_hue_light`/`list_hue_lights`
+    already had an honest-failure signal for the model
+    (`failure_instruction`, mirroring `TOOL_WEB_SEARCH`'s own
+    `Special_Instruction` wording exactly - "this is not real data, tell
+    the user plainly it failed"), but `manage_hue_scenes`'s save/load
+    actions didn't.** Not as broken as first suspected on a quick look -
+    `save_scene()`/`load_scene()` already produced reasonably readable
+    failure text (not raw curl noise), they just had no way to tell
+    `handle_call()`'s dispatch "this one's actually a failure" vs. an
+    ordinary success, so the same honesty framing never got attached.
+    Fixed by changing both to return `{ok, message}` (matching
+    `TOOL_WEB_SEARCH::curl_get()`'s own established `std::pair<bool,
+    std::string>` convention exactly), with `handle_call()`'s dispatch now
+    attaching `failure_instruction` whenever `ok` is false.
+    `remove_scene()` deliberately left as a plain string - it's purely
+    local (a map erase + a disk write), no bridge call at all, nothing to
+    ever be dishonest about.
+  - **Noticed but not touched**: `refresh_lights()`'s own error-detection
+    only explicitly checks one of the two error shapes
+    `response_is_error()` normally distinguishes (the array-shaped one,
+    not the object-shaped `{"error": "CURL failed: ..."}` a real curl
+    failure actually produces) - still correctly returns failure either
+    way, just via an exception fallback instead of a clean check. Not
+    actually broken, just not as tidy as it could be - flagged, not fixed,
+    per this project's own scope-discipline convention.

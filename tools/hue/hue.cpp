@@ -145,6 +145,22 @@ namespace {
     // whatever came back - see handle_call()'s set_hue_light branch and
     // HUE_LIGHT_CLASS::load_scene() below for where a raw pass-through
     // used to read like a success.
+    // Same convention, same wording, as source/tools.cpp's TOOL_WEB_SEARCH::
+    // handle_tool() failure_instruction - integrate_tool_result()'s default
+    // framing ("report this real result... without changing the facts")
+    // reads the same whether a call succeeded or not, so a plain bridge
+    // error used to risk getting relayed as if it were a normal answer.
+    // Passed as send_result()'s own special_instruction (../PROTOCOL.md's
+    // `result` message shape) at every call site here that reports a
+    // genuine connectivity failure (not a bad argument from the model,
+    // which is already unambiguous on its own) - see handle_call()'s
+    // list_hue_lights/set_hue_light branches.
+    const std::string failure_instruction =
+        "This attempt did NOT succeed - it is an error, not real data. Tell "
+        "the user plainly, in your own words, that it failed and what "
+        "likely went wrong. Do not present this as a real answer to their "
+        "question.";
+
     bool response_is_error(const std::string& response, std::string& detail)
     {
         try {
@@ -186,30 +202,53 @@ namespace {
                 load_scenes_from_disk();
             }
 
+            // Timeout/retry shape matches source/tools.cpp's TOOL_WEB_SEARCH::
+            // curl_get() - a real, live-caught bug there too (curl's own
+            // timeout firing on an ordinary transient hiccup, reported back
+            // as a flat failure with no second chance). Only a genuine
+            // timeout gets retried once - a bad URL/connection-refused/
+            // host-not-found will just fail identically again, so retrying
+            // those doubles the wait for nothing. 8s overall (was a flat 5s
+            // for everything, including a group "all lights" command, which
+            // can take the bridge a moment longer than a single light) plus
+            // its own separate, short connect-timeout - the bridge is a
+            // local LAN device, so a connection that hasn't opened within a
+            // few seconds is genuinely unreachable, not just slow to
+            // respond, and shouldn't eat the whole request budget finding
+            // that out.
+            static constexpr long REQUEST_TIMEOUT_SECONDS = 8L;
+            static constexpr long CONNECT_TIMEOUT_SECONDS = 3L;
+
             std::string make_request(const std::string& method, const std::string& endpoint, const std::string& body = "")
             {
-                CURL* curl = curl_easy_init();
-                std::string read_buffer;
-                if (curl) {
-                    std::string url = "http://" + bridge_ip + "/api/" + api_key + endpoint;
-                    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-                    curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, method.c_str());
-                    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);
+                for (int attempt = 0; attempt < 2; ++attempt) {
+                    CURL* curl = curl_easy_init();
+                    std::string read_buffer;
+                    CURLcode res = CURLE_FAILED_INIT;
+                    if (curl) {
+                        std::string url = "http://" + bridge_ip + "/api/" + api_key + endpoint;
+                        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+                        curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, method.c_str());
+                        curl_easy_setopt(curl, CURLOPT_TIMEOUT, REQUEST_TIMEOUT_SECONDS);
+                        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, CONNECT_TIMEOUT_SECONDS);
 
-                    if (!body.empty()) {
-                        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
+                        if (!body.empty()) {
+                            curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
+                        }
+
+                        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
+                        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &read_buffer);
+
+                        res = curl_easy_perform(curl);
+                        curl_easy_cleanup(curl);
                     }
 
-                    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
-                    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &read_buffer);
+                    if (res == CURLE_OK) return read_buffer;
+                    if (res == CURLE_OPERATION_TIMEDOUT && attempt == 0) continue;
 
-                    CURLcode res = curl_easy_perform(curl);
-                    if (res != CURLE_OK) {
-                        read_buffer = "{\"error\": \"CURL failed: " + std::string(curl_easy_strerror(res)) + "\"}";
-                    }
-                    curl_easy_cleanup(curl);
+                    return "{\"error\": \"CURL failed: " + std::string(curl_easy_strerror(res)) + "\"}";
                 }
-                return read_buffer;
+                return "{\"error\": \"CURL failed: unreachable\"}";
             }
 
             bool refresh_lights()
@@ -275,19 +314,28 @@ namespace {
 
             // --- Scene logic ---
 
-            std::string save_scene(const std::string& name)
+            // Returns {ok, message} - ok is specifically "did a genuine
+            // bridge/connectivity problem happen", not a catch-all for
+            // every non-ideal outcome. A clear, already-unambiguous
+            // informational result (scene already exists, scene not
+            // found) is still ok=true - it's not raw/ambiguous technical
+            // noise a model could mistake for real success data the way
+            // a bare bridge error could, so it doesn't need the same
+            // explicit "this is not real data" framing handle_call()
+            // attaches on ok=false (see manage_hue_scenes below).
+            std::pair<bool, std::string> save_scene(const std::string& name)
             {
                 std::string lower_name = to_lower(name);
                 {
                     std::lock_guard<std::mutex> lock(state_mutex);
                     if (local_scenes.count(lower_name)) {
-                        return "Scene '" + name + "' already exists. Please remove it first or use a different name.";
+                        return {true, "Scene '" + name + "' already exists. Please remove it first or use a different name."};
                     }
                 }
 
                 // Not held across refresh_lights() - it takes state_mutex
                 // itself, and this is a single, non-recursive mutex.
-                if (!refresh_lights()) return "Failed to refresh lights for scene capture.";
+                if (!refresh_lights()) return {false, "Failed to refresh lights for scene capture."};
 
                 HUE_SCENE new_scene;
                 new_scene.name = name;
@@ -302,17 +350,17 @@ namespace {
                 }
                 local_scenes[lower_name] = new_scene;
                 save_scenes_to_disk();
-                return "Scene '" + name + "' saved to disk.";
+                return {true, "Scene '" + name + "' saved to disk."};
             }
 
-            std::string load_scene(const std::string& name)
+            std::pair<bool, std::string> load_scene(const std::string& name)
             {
                 std::string lower_name = to_lower(name);
                 std::map<std::string, json> states;
                 {
                     std::lock_guard<std::mutex> lock(state_mutex);
                     auto it = local_scenes.find(lower_name);
-                    if (it == local_scenes.end()) return "Scene '" + name + "' not found.";
+                    if (it == local_scenes.end()) return {true, "Scene '" + name + "' not found."};
                     states = it->second.light_states;
                 }
 
@@ -323,12 +371,12 @@ namespace {
                     if (response_is_error(res, last_detail)) ++failed;
                 }
 
-                if (failed == 0) return "Scene '" + name + "' activated.";
+                if (failed == 0) return {true, "Scene '" + name + "' activated."};
                 if (static_cast<size_t>(failed) == states.size()) {
-                    return "Error: Scene '" + name + "' could not be activated - bridge unreachable or rejected every light (" + last_detail + ").";
+                    return {false, "Error: Scene '" + name + "' could not be activated - bridge unreachable or rejected every light (" + last_detail + ")."};
                 }
-                return "Scene '" + name + "' partially activated - " + std::to_string(failed) + " of "
-                       + std::to_string(states.size()) + " light(s) failed (" + last_detail + ").";
+                return {false, "Scene '" + name + "' partially activated - " + std::to_string(failed) + " of "
+                       + std::to_string(states.size()) + " light(s) failed (" + last_detail + ")."};
             }
 
             std::string remove_scene(const std::string& name)
@@ -637,7 +685,7 @@ namespace {
         if (name == "list_hue_lights") {
             if (!hue.refresh_lights()) {
                 std::string err = "Error: Could not reach the Hue Bridge.";
-                link.send_result(call_id, err);
+                link.send_result(call_id, err, failure_instruction);
                 return err;
             }
             auto lights = hue.get_cached_lights();
@@ -684,9 +732,10 @@ namespace {
             }
 
             std::string res;
-            if (action == "save") res = hue.save_scene(scene_name);
+            bool ok = true;
+            if (action == "save") std::tie(ok, res) = hue.save_scene(scene_name);
             else if (action == "load") {
-                res = hue.load_scene(scene_name);
+                std::tie(ok, res) = hue.load_scene(scene_name);
                 // load_scene() only PUTs new state to the bridge, it
                 // doesn't re-read it back - without this, the cached
                 // lights_cache (what the live display and list_hue_lights
@@ -695,10 +744,20 @@ namespace {
                 // LIGHT_REFRESH_INTERVAL_SECONDS later.
                 hue.refresh_lights();
             }
+            // remove_scene() stays a plain string - purely local (a map
+            // erase + a disk write), no bridge/network call at all, so
+            // there's no connectivity failure it could ever report.
             else if (action == "remove") res = hue.remove_scene(scene_name);
-            else res = "Error: Unknown scene action '" + action + "'";
+            else { ok = false; res = "Error: Unknown scene action '" + action + "'"; }
 
-            link.send_result(call_id, res);
+            // Same "this is not real data" framing set_hue_light/
+            // list_hue_lights already use (failure_instruction, above) -
+            // save/load can genuinely fail against the bridge same as
+            // those do (save_scene()'s own refresh_lights() call,
+            // load_scene()'s own per-light PUTs), just used to report it
+            // as a plain string with no way for handle_call() to tell
+            // that apart from an ordinary success.
+            link.send_result(call_id, res, ok ? "" : failure_instruction);
             return "Scene " + action + ": " + scene_name;
         }
 
@@ -754,7 +813,7 @@ namespace {
             std::string err_detail;
             if (response_is_error(res, err_detail)) {
                 std::string err = "Error controlling light '" + target + "': " + err_detail;
-                link.send_result(call_id, err);
+                link.send_result(call_id, err, failure_instruction);
                 return "Error: set_hue_light (" + target + ")";
             }
 

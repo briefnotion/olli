@@ -436,6 +436,12 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
             // chat.comms.
             io_worker.exchange(comms, &tool_worker);
 
+            // One-way snapshot only (subcon_worker.h's own comment on
+            // exchange()) - gives subcon_worker's own thread something
+            // current to read (e.g. COMMS::busy_count()) without it ever
+            // touching the real comms directly from its own thread.
+            subcon_worker.exchange(comms);
+
             // Ctrl+C - see COMMS::EXIT_REQUESTED's comment (comms.h) for
             // why this needs its own handling instead of a real SIGINT.
             // Checked before anything else this tick since it should win

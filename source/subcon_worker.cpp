@@ -18,6 +18,28 @@ void SUBCON_WORKER_CLASS::thread_stop()
     THREAD_CONTROL.wait_for_thread_to_finish();
 }
 
+void SUBCON_WORKER_CLASS::exchange(COMMS& comms)
+{
+    // Same handshake IO_WORKER_CLASS::exchange() uses (io_worker.cpp) -
+    // INTERUPTED tells thread_main() to sit out its next tick entirely
+    // (see its own while(RUN) loop below), then this waits for
+    // PROCESSING to confirm thread_main() isn't already mid-tick before
+    // touching comms_buffer, so the two threads never touch it at the
+    // same time.
+    INTERUPTED.store(true);
+
+    while (PROCESSING.load())
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    // One-way only - a plain snapshot copy, nothing flows back into the
+    // real comms (subcon_worker.h's own comment on this method).
+    comms_buffer = comms;
+
+    INTERUPTED.store(false);
+}
+
 void SUBCON_WORKER_CLASS::thread_main()
 {
     // Local, not a class member - same reasoning TOOL_WORKER_CLASS::
@@ -124,44 +146,59 @@ void SUBCON_WORKER_CLASS::thread_main()
     RUN = true;
     while (RUN)
     {
-        // Temporary: proves the whole pipe (open() -> real model -> a real
-        // send()/process() round trip) actually works end to end. Not real
-        // design - subcon has nothing of its own to think about yet, this
-        // just gives it one thing to say once, on a delay, so there's
-        // something to observe - not a repeating nag every 60s.
-        if (!test_prompt_sent && test_prompt_timer.is_ready())
+        // Same shape IO_WORKER_CLASS::thread_main() uses (io_worker.cpp):
+        // sit out this tick entirely if exchange() currently wants
+        // exclusive access (INTERUPTED), otherwise mark PROCESSING for the
+        // duration of this tick's own work so exchange() knows it's not
+        // safe to touch comms_buffer yet.
+        if (!INTERUPTED.load())
         {
-            test_prompt_sent = true;
+            PROCESSING.store(true);
 
-            subcon_comms.INPUT_FROM_USER.set("Say hello and confirm you're running.");
-            subcon_comms.ENTER_PRESSED = true;
-        }
+            // Temporary: proves the whole pipe (open() -> real model -> a
+            // real send()/process() round trip) actually works end to end.
+            // Not real design - subcon has nothing of its own to think
+            // about yet, this just gives it one thing to say once, on a
+            // delay, so there's something to observe - not a repeating nag
+            // every 60s.
+            if (!test_prompt_sent && test_prompt_timer.is_ready())
+            {
+                test_prompt_sent = true;
 
-        subcon_llm.input(subcon_comms, nullptr);
-        subcon_llm.process(subcon_io_worker, nullptr, subcon_tools_list, nullptr, subcon_comms);
+                subcon_comms.INPUT_FROM_USER.set("Say hello and confirm you're running.");
+                subcon_comms.ENTER_PRESSED = true;
+            }
 
-        // "Do something with the output" - for now just prove it arrived,
-        // via the same shared debug log everything else uses (subcon has
-        // no UI of its own to show this in yet). Cleared after logging,
-        // same reasoning as tools.cpp's own "instance closed" sites: leaving
-        // it set would log the same response again next tick.
-        //
-        // !is_processing is required, not just last_received.complete - a
-        // real, live crash (SIGABRT in ollama_system::~ollama_system(),
-        // 2026-09-24) traced back to this same missing guard sidetrack.cpp
-        // already had to add for its own action-capture (TODO.md's
-        // 2026-09-23 entry): send() (olla.cpp) sets last_received.complete
-        // true near its own tail end, but that runs on the chat_thread it
-        // spawned - is_processing only flips false slightly later, once
-        // that thread's own lambda finishes its next line. Reading/clearing
-        // last_received.response in that narrow window is an unsynchronized
-        // race against whatever chat_thread is still doing, undefined
-        // behavior with no happens-before relationship - not just a stale
-        // read, capable of real memory corruption.
-        if (!subcon_llm.is_processing && subcon_llm.last_received.complete && !subcon_llm.last_received.response.empty())
-        {
-            DEBUG_LOG_CLASS::instance().log_event("subcon", "test prompt response: " + subcon_llm.last_received.response);
-            subcon_llm.last_received.response.clear();
+            subcon_llm.input(subcon_comms, nullptr);
+            subcon_llm.process(subcon_io_worker, nullptr, subcon_tools_list, nullptr, subcon_comms);
+
+            // "Do something with the output" - for now just prove it
+            // arrived, via the same shared debug log everything else uses
+            // (subcon has no UI of its own to show this in yet). Cleared
+            // after logging, same reasoning as tools.cpp's own "instance
+            // closed" sites: leaving it set would log the same response
+            // again next tick.
+            //
+            // !is_processing is required, not just last_received.complete -
+            // a real, live crash (SIGABRT in ollama_system::~ollama_system(),
+            // 2026-09-24) traced back to this same missing guard
+            // sidetrack.cpp already had to add for its own action-capture
+            // (TODO.md's 2026-09-23 entry): send() (olla.cpp) sets
+            // last_received.complete true near its own tail end, but that
+            // runs on the chat_thread it spawned - is_processing only flips
+            // false slightly later, once that thread's own lambda finishes
+            // its next line. Reading/clearing last_received.response in
+            // that narrow window is an unsynchronized race against whatever
+            // chat_thread is still doing, undefined behavior with no
+            // happens-before relationship - not just a stale read, capable
+            // of real memory corruption.
+            if (!subcon_llm.is_processing && subcon_llm.last_received.complete && !subcon_llm.last_received.response.empty())
+            {
+                DEBUG_LOG_CLASS::instance().log_event("subcon", "test prompt response: " + subcon_llm.last_received.response);
+                subcon_llm.last_received.response.clear();
+            }
+
+            PROCESSING.store(false);
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(20));

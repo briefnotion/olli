@@ -3316,5 +3316,43 @@ it can actually act under its persona's judgment, not just talk about it.
   `response_is_error()` exactly. Verified with a small isolated test (the
   exact JSON logic, no real bridge involved) against all three real
   shapes - object-error, array-error, and real light data - each behaving
-  correctly. Not yet restarted on the live `ron` profile - same as the
-  2026-09-24 hue fix, that's on the user's own machine/schedule.
+  correctly. Restarted on the live `ron` profile and confirmed working by
+  the user.
+- **Built 2026-09-25: `SUBCON_WORKER_CLASS::exchange()` - subcon can now
+  see the real chat's own `COMMS` (specifically `COMMS::busy_count()`,
+  same-day entry above) from its own thread, safely.** The next real step
+  once `busy_count()` had something genuine to show - wiring it so subcon
+  can actually use it, not just watch it in isolation.
+  - **Modeled directly on `IO_WORKER_CLASS::exchange()`** (`io_worker.h`/
+    `.cpp`) at the user's own explicit direction ("we can hand over a
+    copy of comms via exchange. just like we do in io worker") - same
+    `INTERUPTED`/`PROCESSING` atomic-bool handshake: `exchange()` (main
+    thread) sets `INTERUPTED`, waits for `PROCESSING` to clear (confirming
+    `thread_main()` isn't mid-tick), only then safely copies into
+    `comms_buffer`; `thread_main()`'s own `while(RUN)` loop now sits out a
+    tick entirely if `INTERUPTED` is set, otherwise wraps its whole tick in
+    `PROCESSING.store(true)`/`store(false)`. One-way only (`comms_buffer =
+    comms;`) - subcon has nothing to relay back into the real conversation
+    yet, so it's simpler than `IO_WORKER_CLASS`'s own two-direction
+    version, but the same real synchronization requirement applies
+    regardless of direction.
+  - **A deliberate change from the original skeleton's own stated plan**:
+    `subcon_worker.h`'s class comment used to explicitly argue against this
+    shape ("IO_WORKER_CLASS's single combined exchange() exists because
+    keyboard/audio genuinely need a full COMMS snapshot... this worker
+    isn't going to need that shape") - updated now that subcon actually has
+    a first real reason to need one.
+  - **`main.cpp`** calls `subcon_worker.exchange(comms);` once per tick,
+    right alongside the existing `io_worker.exchange(comms, &tool_worker);`.
+  - **Verified live, not just compiled**: a temporary log inside
+    `thread_main()` (removed before pushing) confirmed `comms_buffer.
+    busy_count()` - subcon's own private copy, read from its own thread -
+    genuinely tracked the real chat's own busy activity in real time
+    (climbing to 9 during a real exchange, draining cleanly afterward),
+    proving the cross-thread handoff actually works, not just that it
+    compiles. Clean shutdown confirmed afterward too - no deadlock risk
+    from the new synchronization.
+  - **Not yet built**: anything that actually *uses* `comms_buffer.
+    busy_count()` to make a decision - subcon still just runs its old
+    one-shot test prompt on a fixed timer, unconditionally. That's the
+    next real step.

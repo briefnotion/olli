@@ -873,8 +873,7 @@ void IO_WORKER_CLASS::display_with_tts(COMMS& comms_tty_stt)
     // every tick (see thread_main()'s own comment, step 5/9), so anything
     // not yet spoken has to live in tts_pending instead, surviving across
     // ticks independent of comms_tty_stt's own lifetime.
-    tts_pending += comms_tty_stt.INPUT_FROM_LLM;
-    comms_tty_stt.INPUT_FROM_LLM.clear();
+    tts_pending += comms_tty_stt.INPUT_FROM_LLM.drain();
 
     // Speak once idle, chunking into "whatever arrived since it last went
     // idle" instead of one call per streamed token, without needing a
@@ -918,8 +917,8 @@ void IO_WORKER_CLASS::display_with_web(const std::string& /*input_from_user_echo
         return;
     }
 
-    web_server->push_output(comms_browser.INPUT_FROM_LLM, comms_browser.INPUT_FROM_THINKING,
-                             comms_browser.INPUT_FROM_SYSTEM, comms_browser.TOOL_ATTACHMENTS,
+    web_server->push_output(comms_browser.INPUT_FROM_LLM.peek(), comms_browser.INPUT_FROM_THINKING.peek(),
+                             comms_browser.INPUT_FROM_SYSTEM.peek(), comms_browser.TOOL_ATTACHMENTS,
                              comms_browser.INPUT_FROM_LLM_COLOR);
     web_server->push_tool_names(tool_names_arg);
     web_server->push_keyboard_enabled(comms_browser.ENABLE_KEYBOARD_INPUT);
@@ -1098,11 +1097,11 @@ void IO_WORKER_CLASS::thread_main()
 
                 if (comms_buffer.ENTER_PRESSED)
                 {
-                    comms_buffer.INPUT_FROM_USER += "\n" + web_line;
+                    comms_buffer.INPUT_FROM_USER.add_to("\n" + web_line);
                 }
                 else
                 {
-                    comms_web.INPUT_FROM_USER = web_line;
+                    comms_web.INPUT_FROM_USER.set(web_line);
                     comms_web.ENTER_PRESSED = true;
                     comms_buffer = comms_web;
                 }
@@ -1121,7 +1120,7 @@ void IO_WORKER_CLASS::thread_main()
             {
                 if (!voca_event.status_message.empty())
                 {
-                    comms_buffer.INPUT_FROM_SYSTEM += voca_event.status_message;
+                    comms_buffer.INPUT_FROM_SYSTEM.add_to(voca_event.status_message);
                 }
                 else
                 {
@@ -1145,11 +1144,11 @@ void IO_WORKER_CLASS::thread_main()
                             // tick) - append rather than drop or overwrite
                             // it, so nothing said/typed gets lost; both go
                             // out together on the next exchange() cycle.
-                            comms_buffer.INPUT_FROM_USER += "\n" + voca_event.text;
+                            comms_buffer.INPUT_FROM_USER.add_to("\n" + voca_event.text);
                         }
                         else
                         {
-                            comms_stt_tts.INPUT_FROM_USER = voca_event.text;
+                            comms_stt_tts.INPUT_FROM_USER.set(voca_event.text);
                             comms_stt_tts.ENTER_PRESSED = true;
                             comms_buffer = comms_stt_tts;
                         }
@@ -1201,11 +1200,11 @@ void IO_WORKER_CLASS::thread_main()
 
                 if (comms_buffer.ENTER_PRESSED)
                 {
-                    comms_buffer.INPUT_FROM_USER += "\n" + key_input.LINE;
+                    comms_buffer.INPUT_FROM_USER.add_to("\n" + key_input.LINE);
                 }
                 else
                 {
-                    comms_keyboard.INPUT_FROM_USER = key_input.LINE;
+                    comms_keyboard.INPUT_FROM_USER.set(key_input.LINE);
                     comms_keyboard.ENTER_PRESSED = true;
                     comms_buffer = comms_keyboard;
                 }
@@ -1336,33 +1335,19 @@ void IO_WORKER_CLASS::exchange(COMMS& comms, TOOL_WORKER_CLASS* tool_worker)
     {
         std::lock_guard<std::mutex> lock(output_buffer_mutex);
 
-        if (!comms.INPUT_FROM_LLM.empty())
-        {
-            comms_buffer.INPUT_FROM_LLM += comms.INPUT_FROM_LLM;
-            comms.INPUT_FROM_LLM.clear();
-            comms_busy_inc(comms);
-        }
+        // Each drain() is a no-op (and doesn't touch busy) when empty - no
+        // separate !empty() guard needed anymore, COMMS_STRING handles it
+        // internally (comms.h).
+        comms_buffer.INPUT_FROM_LLM.add_to(comms.INPUT_FROM_LLM.drain());
 
         if (!comms.TOOL_ATTACHMENTS.empty())
         {
             comms_buffer.TOOL_ATTACHMENTS.insert(comms_buffer.TOOL_ATTACHMENTS.end(), comms.TOOL_ATTACHMENTS.begin(), comms.TOOL_ATTACHMENTS.end());
             comms.TOOL_ATTACHMENTS.clear();
-            comms_busy_inc(comms);
         }
 
-        if (!comms.INPUT_FROM_THINKING.empty())
-        {
-            comms_buffer.INPUT_FROM_THINKING += comms.INPUT_FROM_THINKING;
-            comms.INPUT_FROM_THINKING.clear();
-            comms_busy_inc(comms);
-        }
-
-        if (!comms.INPUT_FROM_SYSTEM.empty())
-        {
-            comms_buffer.INPUT_FROM_SYSTEM += comms.INPUT_FROM_SYSTEM;
-            comms.INPUT_FROM_SYSTEM.clear();
-            comms_busy_inc(comms);
-        }
+        comms_buffer.INPUT_FROM_THINKING.add_to(comms.INPUT_FROM_THINKING.drain());
+        comms_buffer.INPUT_FROM_SYSTEM.add_to(comms.INPUT_FROM_SYSTEM.drain());
 
         // Plain assignment, not append-then-clear like the text buffers
         // above - these are a current setting, not accumulating content, so
@@ -1390,39 +1375,37 @@ void IO_WORKER_CLASS::exchange(COMMS& comms, TOOL_WORKER_CLASS* tool_worker)
     {
         comms.ENTER_PRESSED = true;
         comms_buffer.ENTER_PRESSED = false;
-        comms_busy_inc(comms);
     }
 
     if (!comms_buffer.INPUT_FROM_USER.empty())
     {
         // Locked - ollama_system::input() (olla.cpp) can write this same
         // field from chat_thread at the same time, to restore it right
-        // before send() reads it back out.
+        // before send() reads it back out. Guard kept (unlike the add_to()
+        // sites above) because set() replaces rather than appends - an
+        // unconditional set() would overwrite comms's own value with an
+        // empty string on a tick where comms_buffer has nothing new,
+        // wiping out anything still unconsumed there.
         std::lock_guard<std::mutex> lock(output_buffer_mutex);
-        comms.INPUT_FROM_USER = comms_buffer.INPUT_FROM_USER;
-        comms_buffer.INPUT_FROM_USER.clear();
-        comms_busy_inc(comms);
+        comms.INPUT_FROM_USER.set(comms_buffer.INPUT_FROM_USER.drain());
     }
 
     if (comms_buffer.INTERRUPTED)
     {
         comms.INTERRUPTED = true;
         comms_buffer.INTERRUPTED = false;
-        comms_busy_inc(comms);
     }
 
     if (comms_buffer.IS_TYPING)
     {
         comms.IS_TYPING = true;
         comms_buffer.IS_TYPING = false;
-        comms_busy_inc(comms);
     }
 
     if (comms_buffer.EXIT_REQUESTED)
     {
         comms.EXIT_REQUESTED = true;
         comms_buffer.EXIT_REQUESTED = false;
-        comms_busy_inc(comms);
     }
 
     INTERUPTED.store(false);

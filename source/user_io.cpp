@@ -578,12 +578,9 @@ void OUTPUT_CLASS::end_ncurses()
 void OUTPUT_CLASS::get_response(COMMS& comms)
 {
     std::lock_guard<std::mutex> lock(output_buffer_mutex);
-    chat_response += comms.INPUT_FROM_LLM;
-    comms.INPUT_FROM_LLM.clear();
-    chat_thinking += comms.INPUT_FROM_THINKING;
-    comms.INPUT_FROM_THINKING.clear();
-    system_message += comms.INPUT_FROM_SYSTEM;
-    comms.INPUT_FROM_SYSTEM.clear();
+    chat_response += comms.INPUT_FROM_LLM.drain();
+    chat_thinking += comms.INPUT_FROM_THINKING.drain();
+    system_message += comms.INPUT_FROM_SYSTEM.drain();
     web_links.insert(web_links.end(), comms.TOOL_ATTACHMENTS.begin(), comms.TOOL_ATTACHMENTS.end());
     comms.TOOL_ATTACHMENTS.clear();
 }

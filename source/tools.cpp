@@ -374,7 +374,7 @@ void TOOL_DELEGATOR::handle_tool(IO_WORKER_CLASS& io_worker, ollama_system& chat
 
     ++delegation_depth;
 
-    comms.INPUT_FROM_SYSTEM = "[Delegator] Invoking Specialist: [" + specialty + "]\n";
+    comms.INPUT_FROM_SYSTEM.set("[Delegator] Invoking Specialist: [" + specialty + "]\n");
     io_worker.exchange(comms, tool_worker);
 
     // The sub-agent runs on its own background instance so it doesn't block
@@ -432,7 +432,7 @@ void TOOL_DELEGATOR::handle_tool(IO_WORKER_CLASS& io_worker, ollama_system& chat
     // an accidental repeat the way it did when both were the same color.
     instance.PROPS.stream_output = true;
 
-    instance_comms.INPUT_FROM_USER = "Generate response.";
+    instance_comms.INPUT_FROM_USER.set("Generate response.");
 
     // Run send() on its own thread instead of calling it directly here -
     // it's a blocking HTTP call, same pattern as TOOL_TASK_RUNNER's own
@@ -471,7 +471,7 @@ void TOOL_DELEGATOR::handle_tool(IO_WORKER_CLASS& io_worker, ollama_system& chat
     if (result.empty() && !instance.last_received.thinking.empty())
     {
         result = instance.last_received.thinking;
-        comms.INPUT_FROM_SYSTEM = "[Delegator] Note: Main response empty, using data from thinking buffer.\n";
+        comms.INPUT_FROM_SYSTEM.set("[Delegator] Note: Main response empty, using data from thinking buffer.\n");
         io_worker.exchange(comms, tool_worker);
     }
 
@@ -593,7 +593,7 @@ void TOOL_TASK_RUNNER::handle_tool(IO_WORKER_CLASS& io_worker, ollama_system& ch
     // "run automation task" without needing an olli restart.
     task_manager.load_all_task(OLLI_DIRECTORY / "scripts");
 
-    comms.INPUT_FROM_SYSTEM = "[TaskRunner] Searching for automation matching: \"" + intent_phrase + "\"\n";
+    comms.INPUT_FROM_SYSTEM.set("[TaskRunner] Searching for automation matching: \"" + intent_phrase + "\"\n");
     io_worker.exchange(comms, tool_worker);
 
     auto task_it = std::find_if(

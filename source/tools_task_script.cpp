@@ -34,7 +34,7 @@ void command_pause(SCRIPT_STATE& state, COMMS& instance_comms, bool& keyboard_wa
 {
     keyboard_was_enabled = instance_comms.ENABLE_KEYBOARD_INPUT;
     instance_comms.ENABLE_KEYBOARD_INPUT = true;
-    instance_comms.INPUT_FROM_LLM = "--------------------------\nPRESS ENTER TO CONTINUE\n";
+    instance_comms.INPUT_FROM_LLM.set("--------------------------\nPRESS ENTER TO CONTINUE\n");
     state = SCRIPT_STATE::WAIT_ENTER;
 }
 
@@ -47,13 +47,13 @@ void command_ask(SCRIPT_STATE& state, COMMS& instance_comms, const std::string& 
 {
     keyboard_was_enabled = instance_comms.ENABLE_KEYBOARD_INPUT;
     instance_comms.ENABLE_KEYBOARD_INPUT = true;
-    instance_comms.INPUT_FROM_LLM = "--------------------------\nREQUEST: " + command.substr(5) + "\n";
+    instance_comms.INPUT_FROM_LLM.set("--------------------------\nREQUEST: " + command.substr(5) + "\n");
     state = SCRIPT_STATE::WAIT_ASK;
 }
 
 void command_print(size_t& i, COMMS& instance_comms, const std::string& command)
 {
-    instance_comms.INPUT_FROM_LLM = command.substr(7) + "\n";
+    instance_comms.INPUT_FROM_LLM.set(command.substr(7) + "\n");
     ++i;
 }
 
@@ -85,7 +85,7 @@ void command_file_in(SCRIPT_STATE& state, std::string& current_input, COMMS& ins
         // missing file.
         keyboard_was_enabled = instance_comms.ENABLE_KEYBOARD_INPUT;
         instance_comms.ENABLE_KEYBOARD_INPUT = true;
-        instance_comms.INPUT_FROM_LLM = "--------------------------\nCould not find '" + raw_name + "'. Please paste it here:\n";
+        instance_comms.INPUT_FROM_LLM.set("--------------------------\nCould not find '" + raw_name + "'. Please paste it here:\n");
         state = SCRIPT_STATE::WAIT_ASK;
     }
 }
@@ -328,15 +328,15 @@ void command_wait_ask(SCRIPT_STATE& state, std::string& current_input, COMMS& in
     {
         instance_comms.ENTER_PRESSED = false;
         instance_comms.ENABLE_KEYBOARD_INPUT = keyboard_was_enabled;
-        current_input = instance_comms.INPUT_FROM_USER;
+        current_input = instance_comms.INPUT_FROM_USER.peek();
         state = SCRIPT_STATE::EXECUTE_COMMAND;
     }
 }
 
 void command_execute_command(SCRIPT_STATE& state, const std::string& current_input, ollama_system& instance, COMMS& instance_comms, TOOL_WORKER_CLASS* tool_worker)
 {
-    instance_comms.INPUT_FROM_LLM = "--------------------------\nINPUT: " + current_input + "\n";
-    instance_comms.INPUT_FROM_USER = current_input;
+    instance_comms.INPUT_FROM_LLM.set("--------------------------\nINPUT: " + current_input + "\n");
+    instance_comms.INPUT_FROM_USER.set(current_input);
 
     // Run send() on its own thread instead of calling it
     // directly here - it's a blocking HTTP call, so calling

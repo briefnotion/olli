@@ -207,7 +207,7 @@ void ollama_system::integrate_tool_result(TOOL_WORKER_CLASS* tool_worker, COMMS&
         // 2. We use "system" here.
         // This prevents the "What was the last thing I said?" confusion
         // because the model treats this as a 'state' rather than 'user input'.
-        comms.INPUT_FROM_USER = prompt;
+        comms.INPUT_FROM_USER.set(prompt);
         this->send(tool_worker, comms, "system");
 
         // 3. This DIRECTOR_NOTE, and the raw tool result send_tool_result()
@@ -275,7 +275,7 @@ static std::string summarize_tool_calls(const std::vector<ToolCall>& calls)
 }
 
 void ollama_system::send(TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const std::string& role, const json& response_format) {
-    std::string new_user_input = filter_non_printable(comms.INPUT_FROM_USER);
+    std::string new_user_input = filter_non_printable(comms.INPUT_FROM_USER.peek());
     
     // 1. Set initial states
     status.is_active = true;
@@ -421,7 +421,7 @@ void ollama_system::send(TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const std
                             // also goes to comms live is gated.
                             if (PROPS.stream_thinking) {
                                 std::lock_guard<std::mutex> lock(output_buffer_mutex);
-                                comms.INPUT_FROM_THINKING += t;
+                                comms.INPUT_FROM_THINKING.add_to(t);
                             }
                         }
                         if (msg_chunk.contains("content")) {
@@ -437,7 +437,7 @@ void ollama_system::send(TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const std
                             // whether it also goes to comms live is gated.
                             if (PROPS.stream_output) {
                                 std::lock_guard<std::mutex> lock(output_buffer_mutex);
-                                comms.INPUT_FROM_LLM += c;
+                                comms.INPUT_FROM_LLM.add_to(c);
                             }
                         }
 
@@ -512,7 +512,7 @@ void ollama_system::send(TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const std
     // stays the only thing that actually writes chat output to the screen.
     {
         std::lock_guard<std::mutex> lock(output_buffer_mutex);
-        comms.INPUT_FROM_LLM += "\n";
+        comms.INPUT_FROM_LLM.add_to("\n");
     }
     status.is_active = false;
 }
@@ -776,7 +776,7 @@ bool ollama_system::jump_input(COMMS& comms)
     // TOOL_PERMISSIONS system it depended on. See git history if this
     // pattern (a throwaway ollama_system instance short-circuiting straight
     // to a scripted action, bypassing the LLM) is ever wanted again.
-    if (trim(comms.INPUT_FROM_USER) == "bye" || trim(comms.INPUT_FROM_USER) == "quit" || trim(comms.INPUT_FROM_USER) == "Goodbye.")
+    if (trim(comms.INPUT_FROM_USER.peek()) == "bye" || trim(comms.INPUT_FROM_USER.peek()) == "quit" || trim(comms.INPUT_FROM_USER.peek()) == "Goodbye.")
     {
         request_exit();
         return true;
@@ -837,9 +837,8 @@ bool ollama_system::input(COMMS& comms, TOOL_WORKER_CLASS* tool_worker)
             status.interrupt_signal = false;
             is_processing = true;
 
-            std::string tmp_line = comms.INPUT_FROM_USER;
+            std::string tmp_line = comms.INPUT_FROM_USER.drain();
             comms.ENTER_PRESSED = false;
-            comms.INPUT_FROM_USER.clear();
 
             // No output.user_input echo needed here - IO_WORKER_CLASS
             // already did it (io_worker.cpp thread_main(), step 8) at the
@@ -864,7 +863,7 @@ bool ollama_system::input(COMMS& comms, TOOL_WORKER_CLASS* tool_worker)
                 try {
                     {
                         std::lock_guard<std::mutex> lock(output_buffer_mutex);
-                        comms.INPUT_FROM_USER = tmp_line;
+                        comms.INPUT_FROM_USER.set(tmp_line);
                     }
                     send(tool_worker, comms, "user");
                 } catch (...) {
@@ -968,7 +967,7 @@ void ollama_system::process(IO_WORKER_CLASS& io_worker, CLASS_SYSTEM* system, st
             // If the task produced a response, relay it to the main chat
             if (!task_instance.last_received.response.empty()) {
                 std::string task_report = "[Task Update]: " + task_instance.last_received.response;
-                comms.INPUT_FROM_USER = task_report;
+                comms.INPUT_FROM_USER.set(task_report);
                 send(tool_worker, comms, "system");
             }
 

@@ -50,6 +50,145 @@ struct TOOL_ATTACHMENT {
 };
 
 /**
+ * COMMS_STRING
+ *
+ * COMMS's "how busy is the system" rewrite (TODO.md/IDEAS.md) - wraps each
+ * of COMMS's 4 text fields (INPUT_FROM_LLM/INPUT_FROM_THINKING/
+ * INPUT_FROM_SYSTEM/INPUT_FROM_USER, comms.h below). Named in ALL_CAPS to
+ * match this codebase's own class-naming convention (COMMS, TOOL_ATTACHMENT,
+ * IO_WORKER_CLASS, etc.), even though the design itself came from a
+ * lowercase sketch.
+ *
+ * Owns its own data AND its own busy counter together, self-contained - no
+ * back-pointer to any owning COMMS. That's the whole reason this replaces
+ * the earlier plain-int-plus-free-functions COMMS::busy design: a wrapper
+ * type that auto-tracks on assignment was considered and rejected earlier
+ * (comms.h's own prior version, TODO.md's 2026-09-24 entry) specifically
+ * because a back-pointer would need careful, easy-to-get-wrong fixup on
+ * every one of COMMS's own existing copy sites (its hand-written
+ * operator=, IO_WORKER_CLASS::thread_main()'s per-channel relay). This has
+ * no back-pointer to fix up - an ordinary copy of a COMMS_STRING correctly
+ * copies both its data and its own count together, no special-casing
+ * needed anywhere.
+ *
+ * Also gives finer-grained visibility than the old single flat counter -
+ * "is INPUT_FROM_LLM specifically busy" vs. "is INPUT_FROM_USER
+ * specifically busy," not just one number blending every field together.
+ */
+class COMMS_STRING
+{
+    private:
+        std::string data = "";
+
+        // Capped the same way the old free-function design was, just in
+        // bigger steps now (+10, not +1) - found live 2026-09-24 that +1
+        // was structurally invisible: exchange() drains at most once per
+        // main-loop tick, and COMMS::busy_count_dec() also fires once per
+        // tick in that same iteration, so a lone +1 always got cancelled
+        // by that same tick's own -1 before anything could ever read it -
+        // not bad luck, guaranteed every time. +10 leaves a real +9
+        // residue after that same-tick cancellation, decaying over the
+        // next several ticks instead of vanishing instantly.
+        int busy_counter = 0;
+
+        void busy_count_inc()
+        {
+            busy_counter += 10;
+            if (busy_counter > 1024) busy_counter = 1024;
+        }
+
+    public:
+        // Appends - the common streaming-chunk case (LLM/thinking/system
+        // text arriving piece by piece). Counts as activity now (found
+        // live 2026-09-24: INPUT_FROM_USER's own busy_counter never moved
+        // at all under real use, because its real content actually arrives
+        // via set(), not drain() - see set()'s own comment). Guarding the
+        // append itself on s.empty() is safe here (appending nothing is
+        // already a no-op) - unlike set() below, there's no case where
+        // skipping the assignment would silently do the wrong thing.
+        void add_to(const std::string& s)
+        {
+            if (!s.empty())
+            {
+                data += s;
+                busy_count_inc();
+            }
+        }
+
+        // Wholesale replace - the "set to a fixed message" case (several
+        // real call sites overwrite rather than accumulate), and the main
+        // path INPUT_FROM_USER's own real content actually arrives through
+        // (exchange()'s input-direction block calls comms.INPUT_FROM_USER.
+        // set(...), io_worker.cpp). The assignment itself is unconditional,
+        // not guarded like add_to()/clear() - set("") has to actually
+        // clear the field (replacing with nothing is still a real
+        // replace), so only the busy-count increment is conditional.
+        void set(const std::string& s)
+        {
+            data = s;
+            if (!s.empty())
+                busy_count_inc();
+        }
+
+        // Read without consuming - for the real call sites that check/use
+        // the value without meaning to claim it yet (e.g. comparing against
+        // "bye" before deciding whether to actually consume the input).
+        // const& - no copy, and nothing here can mutate through it.
+        const std::string& peek() const
+        {
+            return data;
+        }
+
+        bool empty() const
+        {
+            return data.empty();
+        }
+
+        // Discards without reading - the bare-.clear() call sites that
+        // never used the value on the way out. Counts as activity too now,
+        // same reasoning as add_to() - discarding something that was
+        // actually there is a real event. Guarding on data.empty() first
+        // is safe (clearing an already-empty string is already a no-op).
+        void clear()
+        {
+            if (!data.empty())
+            {
+                data.clear();
+                busy_count_inc();
+            }
+        }
+
+        // Read AND consume in one step - the accumulate-then-relay pattern
+        // (e.g. IO_WORKER_CLASS::exchange() moving new content from one
+        // COMMS's own field into another's). Counts as activity: bumps
+        // busy_counter, same as the old design's comms_busy_inc(comms) at
+        // its own equivalent call sites.
+        std::string drain()
+        {
+            if (data.empty()) return "";
+
+            std::string tmp = std::move(data);
+            data.clear();
+            busy_count_inc();
+            return tmp;
+        }
+
+        // Both public - COMMS's own aggregate busy_count()/busy_count_dec()
+        // (below, past the COMMS class itself) call these on each of its
+        // own COMMS_STRING members.
+        void busy_count_dec()
+        {
+            if (busy_counter > 0)
+                busy_counter--;
+        }
+
+        int busy_count() const
+        {
+            return busy_counter;
+        }
+};
+
+/**
  * COMMS
  * Bundles what an ollama_system instance uses to hand output to whatever's
  * consuming it (the screen, a log) - moved out of olla.h so it can be
@@ -75,9 +214,9 @@ class COMMS
         // OUTPUT_CLASS::get_response() (user_io.cpp) and SIDETRACK_CLASS::
         // pull_output() (sidetrack.cpp) for the two existing consumers.
         // --------------------------------------------------------------
-        std::string INPUT_FROM_LLM = "";
-        std::string INPUT_FROM_THINKING = "";
-        std::string INPUT_FROM_SYSTEM = "";
+        COMMS_STRING INPUT_FROM_LLM;
+        COMMS_STRING INPUT_FROM_THINKING;
+        COMMS_STRING INPUT_FROM_SYSTEM;
 
         // ncurses attribute value (e.g. COLOR_PAIR(n) | A_DIM) for each
         // buffer above when it's rendered to the chat panel - same type
@@ -111,7 +250,7 @@ class COMMS
         // EXIT_REQUESTED (user_io.h), which these are relayed from.
         // --------------------------------------------------------------
         bool ENTER_PRESSED = false;    // a line is ready to submit
-        std::string INPUT_FROM_USER;   // valid when ENTER_PRESSED == true
+        COMMS_STRING INPUT_FROM_USER;  // valid when ENTER_PRESSED == true
         bool INTERRUPTED = false;      // abort in-flight generation/speech
         bool IS_TYPING = false;        // a line is being typed/spoken, not yet submitted
         bool EXIT_REQUESTED = false;   // Ctrl+C - shut olli down
@@ -185,13 +324,6 @@ class COMMS
         // reasoning as KEYBOARD_INPUT_PROPERTIES::ENABLED, user_io.h).
         std::atomic<bool> close_chat_log_requested{false};
 
-        // "How busy is the system" signal, first piece of subcon_worker's
-        // real design (IDEAS.md). Drained once per main loop tick
-        // (comms_busy_dec(), main.cpp), incremented on the guarded
-        // "something actually happened" branches of IO_WORKER_CLASS::
-        // exchange() (io_worker.cpp) - the only call sites wired in so far.
-        int busy = 0;
-
         // std::atomic has no copy-assignment operator, which would
         // otherwise implicitly delete COMMS's own operator= entirely -
         // provided explicitly instead, copying every field above except
@@ -221,20 +353,29 @@ class COMMS
             TOOL_ATTACHMENTS = other.TOOL_ATTACHMENTS;
             return *this;
         }
-};
 
-// Free functions, not members - COMMS is more a plain data definition than
-// a class with real behavior of its own (see its own class comment: bundled
-// fields, one hand-written operator=), so operations on it live alongside
-// it instead of inside it. Meant to track how busy a given instance's own
-// COMMS is: comms_busy_inc() when something actually happens (currently
-// wired into IO_WORKER_CLASS::exchange()'s own guarded branches,
-// io_worker.cpp - not every access, just real data/events passing
-// through), comms_busy_dec() once per main loop tick (main.cpp) so it
-// drains back toward 0 when nothing's happening instead of climbing
-// forever. comms_busy() reads the current state.
-void comms_busy_inc(COMMS& Comms_var);
-void comms_busy_dec(COMMS& Comms_var);
-bool comms_busy(COMMS& Comms_var);
+        // "How busy is the system" signal, first piece of subcon_worker's
+        // real design (IDEAS.md/TODO.md) - superseded the old single flat
+        // int busy + free-function (comms_busy_inc/_dec/comms_busy) design.
+        // Just sums/drains each of the 4 text fields' own COMMS_STRING
+        // counters - deliberately not tracking ENTER_PRESSED/INTERRUPTED/
+        // IS_TYPING/EXIT_REQUESTED/TOOL_ATTACHMENTS (none of those are
+        // COMMS_STRING, nothing built for them). Kept simple on purpose -
+        // nothing reads this yet, the whole idea's still up in the air,
+        // expand later if actually needed.
+        int busy_count() const
+        {
+            return INPUT_FROM_LLM.busy_count() + INPUT_FROM_THINKING.busy_count() +
+                   INPUT_FROM_SYSTEM.busy_count() + INPUT_FROM_USER.busy_count();
+        }
+
+        void busy_count_dec()
+        {
+            INPUT_FROM_LLM.busy_count_dec();
+            INPUT_FROM_THINKING.busy_count_dec();
+            INPUT_FROM_SYSTEM.busy_count_dec();
+            INPUT_FROM_USER.busy_count_dec();
+        }
+};
 
 #endif

@@ -273,9 +273,9 @@ void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ollama_system
             }
         }
 
-        comms.INPUT_FROM_USER = "Was your last reply accurate, and did you really do anything you said "
+        comms.INPUT_FROM_USER.set("Was your last reply accurate, and did you really do anything you said "
                                  "you did? Set needs_correction to true only if something was wrong or "
-                                 "left unfinished; false if it was fine as-is.";
+                                 "left unfinished; false if it was fine as-is.");
         start_second_guess_call(SIDETRACK_CHAT_INSTANCE, comms, tool_worker, SECOND_GUESS_RESULT_FORMAT);
 
         second_guess_stage = 3;
@@ -356,8 +356,8 @@ void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ollama_system
             // Streaming back on for this one - this is the real content the
             // user should actually see/hear, unlike the DONE-check above.
             SIDETRACK_CHAT_INSTANCE.PROPS.stream_output = true;
-            comms.INPUT_FROM_USER = "Go ahead - correct what was wrong, or actually follow through on "
-                                     "what you already claimed. Nothing beyond that.";
+            comms.INPUT_FROM_USER.set("Go ahead - correct what was wrong, or actually follow through on "
+                                     "what you already claimed. Nothing beyond that.");
             start_second_guess_call(SIDETRACK_CHAT_INSTANCE, comms, tool_worker);
             second_guess_stage = 5;
         }
@@ -649,7 +649,7 @@ void SIDETRACK_CLASS::run_consolidation(ollama_system& main_instance)
             DEBUG_LOG_CLASS::instance().log_event("sidetrack-consolidate",
                 "squashing " + std::to_string(overflow_count) + " messages at level " + std::to_string(level));
 
-            blank_comms.INPUT_FROM_USER = "What happened in all your memory? Summarize it.";
+            blank_comms.INPUT_FROM_USER.set("What happened in all your memory? Summarize it.");
             SIDETRACK_CHAT_INSTANCE.send(nullptr, blank_comms, "system");
 
             std::string summary_text = SIDETRACK_CHAT_INSTANCE.last_received.response;

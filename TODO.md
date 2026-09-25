@@ -3209,3 +3209,96 @@ it can actually act under its persona's judgment, not just talk about it.
     bug's fix could be proven. Confidence comes from the diagnosis
     matching an already-confirmed bug class in this same codebase, not
     from forcing the original failure and watching it not happen.
+- **Built 2026-09-24/25: `COMMS_STRING` - `COMMS`'s 4 text fields
+  (`INPUT_FROM_LLM`/`INPUT_FROM_THINKING`/`INPUT_FROM_SYSTEM`/
+  `INPUT_FROM_USER`) are now a real, encapsulated type instead of plain
+  `std::string`, with self-contained busy tracking built in.** A genuine
+  rewrite, not an addition - the flat `int busy` + free-function design
+  from the previous entry is fully retired.
+  - **Design journey**: started from "make the 4 fields private, add
+    `add_to_X()`/`drain_X()` accessor methods" - surveyed every real call
+    site first (~50 across 8 files) and found the actual access patterns
+    needed 5 shapes, not 2 (`add_to`/`set`/`peek`/`clear`/`drain`).
+    Considered and rejected a generic free-function alternative
+    (`add_to(comms_buffer.X, drain(comms.X))`) - it can't cleanly reach
+    `busy`, which lives on the owning object, not the string, so it would
+    have needed the fields to stay public anyway. Landed on the user's own
+    proposed design instead: wrap each field in its own small class
+    (`COMMS_STRING`) owning both its data AND its own busy counter
+    together - no back-pointer to any parent `COMMS` needed at all, which
+    is what makes this safe where an earlier auto-tracking wrapper idea
+    (rejected the same session, see previous entry) wasn't: an ordinary
+    copy of a `COMMS_STRING` just correctly copies both its string and its
+    own count, no special-casing needed on any of `COMMS`'s existing copy
+    sites (`operator=`, `IO_WORKER_CLASS::thread_main()`'s per-channel
+    relay).
+  - **The sweep**: converted every real call site in `olla.cpp`,
+    `io_worker.cpp`, `user_io.cpp`, `tools.cpp`, `tools_task_script.cpp`,
+    `sidetrack.cpp`, `subcon_worker.cpp`, `main.cpp` - couldn't be
+    separated from adding the class itself, since the new type has no
+    implicit `std::string` conversion, so nothing compiles until every
+    site is converted together. Caught one real behavior bug of the sweep
+    itself before it was ever tested: a `.set(source.drain())` conversion
+    that would have unconditionally overwritten unconsumed input with an
+    empty string whenever the source happened to be empty that tick -
+    `set()` replaces rather than appends, so (unlike `add_to()`) it isn't
+    a safe no-op on empty input; restored the original `!empty()` guard
+    around that one call site. Clean build with `-Werror` on the first
+    attempt after the full sweep - a strong signal every site was
+    converted correctly, since any missed one would have failed to
+    compile.
+  - **Deliberately dropped, per explicit direction**: the 5 non-string
+    signals the old flat counter also tracked (`TOOL_ATTACHMENTS`,
+    `ENTER_PRESSED`, `INTERRUPTED`, `IS_TYPING`, `EXIT_REQUESTED`) don't
+    fit `COMMS_STRING` and aren't tracked by anything else now -
+    `COMMS::busy_count()` is just the sum of the 4 text fields' own
+    counts. Explicitly not a mistake: "the entire idea is up in the air...
+    lets just do what's simple and right for now."
+  - **A real, live-verified finding, twice over**: first pass (`+1` per
+    event, matching the old design's own magnitude) showed the SAME
+    fields watched via a live test *never* moved at all, even across a
+    full conversation with tool calls, streaming, and second-guess all
+    firing - worse than the previous (flat-counter) version's own already-
+    known gap. Root cause, found by re-reading `exchange()`: each field's
+    own counter can only be incremented once per main-loop tick, and
+    `COMMS::busy_count_dec()` also fires once per tick in that same
+    iteration - so a lone `+1` is *always* cancelled by that same tick's
+    own `-1` before anything can ever read it, deterministically, not by
+    bad luck. Separately, `INPUT_FROM_USER`'s own counter (as read on the
+    real `comms`) specifically never moved at all under any circumstance,
+    because `exchange()`'s input-direction block drains `comms_buffer`'s
+    own copy, not `comms`'s - the real `comms.INPUT_FROM_USER` only ever
+    receives via `set()`, which didn't touch `busy_counter` at the time.
+  - **Fix, all user-directed**: `busy_count_inc()`'s own step raised from
+    `+1` to `+10` (still capped at 1024) - leaves a real `+9` residue
+    surviving the same tick's `-1`, decaying over the next several ticks
+    instead of vanishing instantly. `add_to()`/`set()`/`clear()` now also
+    count as activity, not just `drain()` - `set()` is what
+    `INPUT_FROM_USER`'s real content actually arrives through, closing
+    that gap directly. One correctness nuance handled deliberately:
+    `add_to()`/`clear()` safely guard the underlying operation itself on
+    `!empty()` (appending/clearing nothing is already a no-op either way),
+    but `set()`'s assignment is unconditional - only the busy-count
+    increment is conditional - since `set("")` has to actually clear the
+    field, not silently leave stale data in place.
+  - **Re-verified live after the fix**: real, clean, meaningful numbers
+    this time - `USER` climbed to 9 then drained to 0, then a second burst
+    to 28 draining cleanly afterward; `LLM` climbed past 550 during a
+    streamed response and drained afterward; `THINKING` climbed all the
+    way to 1023 (effectively the cap) during second-guess's own thinking
+    stream (which deliberately reuses the *same* `comms` as the main chat,
+    a documented existing tradeoff, `sidetrack.cpp`) before draining back
+    down cleanly once that stream stopped.
+  - **Side effect worth remembering later, not fixed now**: with `+10`
+    instead of `+1`, hitting the 1024 cap during any genuinely fast/
+    sustained burst is now the normal case, not an edge case - and a full
+    drain from the cap still takes ~20s (1024 ticks x 20ms) regardless of
+    increment size, so "pinned at max for several seconds" is expected
+    behavior now, not a bug.
+  - **Not separately live-tested**: the web/voice channels
+    (`display_with_web()`/`display_with_tts()`, the keyboard/voice/web
+    multi-channel input paths in `IO_WORKER_CLASS::thread_main()`) got the
+    same mechanical conversions as everything else, verified by clean
+    compile and matching each site's original semantics exactly, but
+    weren't separately exercised live (would need a browser session and
+    mic input).

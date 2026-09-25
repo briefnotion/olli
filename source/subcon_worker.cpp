@@ -133,7 +133,7 @@ void SUBCON_WORKER_CLASS::thread_main()
         {
             test_prompt_sent = true;
 
-            subcon_comms.INPUT_FROM_USER = "Say hello and confirm you're running.";
+            subcon_comms.INPUT_FROM_USER.set("Say hello and confirm you're running.");
             subcon_comms.ENTER_PRESSED = true;
         }
 

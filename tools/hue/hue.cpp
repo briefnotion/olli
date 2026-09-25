@@ -257,6 +257,7 @@ namespace {
                 try {
                     json data = json::parse(response);
                     if (data.is_array() && !data.empty() && data[0].contains("error")) return false;
+                    if (data.is_object() && data.contains("error")) return false;
 
                     std::map<std::string, LightState> new_cache;
                     std::map<std::string, std::string> new_name_to_id;

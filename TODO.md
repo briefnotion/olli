@@ -3302,3 +3302,19 @@ it can actually act under its persona's judgment, not just talk about it.
     compile and matching each site's original semantics exactly, but
     weren't separately exercised live (would need a browser session and
     mic input).
+- **Fixed 2026-09-25: `refresh_lights()`'s error-detection gap, flagged but
+  not fixed in the 2026-09-24 hue timeout entry.** `HUE_LIGHT_CLASS::
+  refresh_lights()` (`tools/hue/hue.cpp`) only explicitly checked the
+  array-shaped bridge error (`response_is_error()`'s own already-correct
+  pattern, right above it, checks both shapes) - `make_request()` itself
+  returns the *object*-shaped kind on a real curl failure
+  (`{"error": "CURL failed: ..."}`). That case fell through the explicit
+  check, hit the light-parsing loop, threw a `json::type_error` trying to
+  treat the error string as a light object, and got caught by the blanket
+  `catch (...) { return false; }` - correct result, wrong path. Added the
+  missing `data.is_object() && data.contains("error")` check, mirroring
+  `response_is_error()` exactly. Verified with a small isolated test (the
+  exact JSON logic, no real bridge involved) against all three real
+  shapes - object-error, array-error, and real light data - each behaving
+  correctly. Not yet restarted on the live `ron` profile - same as the
+  2026-09-24 hue fix, that's on the user's own machine/schedule.

@@ -5,7 +5,7 @@
 #include "comms.h" // COMMS
 #include "threading.h"
 
-#include <atomic>
+#include <mutex>
 
 /**
  * SUBCON_WORKER_CLASS
@@ -25,6 +25,23 @@
  * is still open for whatever else subcon eventually needs to hand over or
  * ask for - exchange() covers the "snapshot of what's currently going on"
  * need specifically, not every future need.
+ *
+ * comms_buffer's own synchronization is a real std::mutex, not the
+ * INTERUPTED/PROCESSING atomic-bool handshake IO_WORKER_CLASS uses - a
+ * deliberate improvement on that pattern, decided after actually comparing
+ * the two: a real mutex is correct regardless of how many callers exist
+ * (IO_WORKER_CLASS's own scheme only works because there's exactly one -
+ * TOOL_WORKER_CLASS's own state_mutex, tool_worker.h, exists precisely
+ * because that assumption broke there once, a real live SIGSEGV). What's
+ * different from TOOL_WORKER_CLASS's own state_mutex: exchange() takes it
+ * via try_lock (see its own comment below) rather than blocking, since
+ * copying a snapshot is safe to skip on lock contention (missed once,
+ * refreshed again next tick) the same way TOOL_WORKER_CLASS::
+ * get_pending_result()/get_pending_event() safely skip on contention -
+ * unlike put_pending_call()/abandon_call(), which must never be skipped.
+ * thread_main()'s own side still blocks normally - it's fine for subcon's
+ * own background thread to wait briefly on its own mutex, since nothing
+ * else is waiting on it.
  */
 class SUBCON_WORKER_CLASS
 {
@@ -33,22 +50,16 @@ class SUBCON_WORKER_CLASS
 
         bool RUN = false;
 
-        // Same INTERUPTED/PROCESSING handshake IO_WORKER_CLASS uses to keep
-        // exchange() (main thread) and thread_main() (this class's own
-        // thread) from touching comms_buffer at the same time - see
-        // IO_WORKER_CLASS's own class comment (io_worker.h) for the full
-        // reasoning. One-way here (comms -> comms_buffer only, nothing
-        // flows back into the real comms yet), so it's simpler than IO_
-        // WORKER_CLASS's own two-direction version, but the same real
-        // synchronization requirement applies regardless of direction.
-        std::atomic<bool> INTERUPTED{false};
-        std::atomic<bool> PROCESSING{false};
+        // Guards comms_buffer below - see this class's own comment above
+        // for why this is a real mutex, not IO_WORKER_CLASS's own
+        // INTERUPTED/PROCESSING scheme.
+        std::mutex comms_mutex;
 
         // This worker's own snapshot of the real comms (main.cpp's own),
-        // refreshed once per main-loop tick by exchange() below - never
-        // touched directly by the main thread outside of exchange() itself,
-        // and never touched by thread_main() except while PROCESSING is
-        // true (guaranteeing exchange() isn't mid-copy at the same time).
+        // refreshed once per main-loop tick by exchange() below (when it
+        // manages to get the lock - see its own comment) - never touched
+        // directly by the main thread outside of exchange() itself, and
+        // never touched by thread_main() except while holding comms_mutex.
         COMMS comms_buffer;
 
         // Runs on the background thread - only ever invoked internally,
@@ -62,7 +73,11 @@ class SUBCON_WORKER_CLASS
         // IO_WORKER_CLASS's own exchange() call (main.cpp). One-way copy
         // of the real comms into this worker's own comms_buffer - nothing
         // flows back out yet, since subcon has nothing to relay into the
-        // real conversation right now.
+        // real conversation right now. Non-blocking (try_lock, not a plain
+        // lock_guard) - the main thread has a lot else to do every tick, so
+        // it never waits on subcon's own background thread; if the attempt
+        // fails, comms_buffer just keeps last tick's snapshot and this
+        // tries again next time, same as leaving it alone would anyway.
         void exchange(COMMS& comms);
 
         // Set by main.cpp, once, before thread_start() - a one-way copy of

@@ -20,24 +20,18 @@ void SUBCON_WORKER_CLASS::thread_stop()
 
 void SUBCON_WORKER_CLASS::exchange(COMMS& comms)
 {
-    // Same handshake IO_WORKER_CLASS::exchange() uses (io_worker.cpp) -
-    // INTERUPTED tells thread_main() to sit out its next tick entirely
-    // (see its own while(RUN) loop below), then this waits for
-    // PROCESSING to confirm thread_main() isn't already mid-tick before
-    // touching comms_buffer, so the two threads never touch it at the
-    // same time.
-    INTERUPTED.store(true);
-
-    while (PROCESSING.load())
-    {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    // try_lock, not a blocking lock_guard - see this class's own header
+    // comment for why: a missed copy here is harmless (comms_buffer just
+    // keeps last tick's snapshot, refreshed again next tick), so the main
+    // thread should never wait on subcon's own background thread for
+    // this. If thread_main() happens to hold comms_mutex right now, just
+    // skip this tick's copy entirely rather than stalling.
+    std::unique_lock<std::mutex> lock(comms_mutex, std::try_to_lock);
+    if (!lock.owns_lock()) return;
 
     // One-way only - a plain snapshot copy, nothing flows back into the
     // real comms (subcon_worker.h's own comment on this method).
     comms_buffer = comms;
-
-    INTERUPTED.store(false);
 }
 
 void SUBCON_WORKER_CLASS::thread_main()
@@ -146,22 +140,30 @@ void SUBCON_WORKER_CLASS::thread_main()
     RUN = true;
     while (RUN)
     {
-        // Same shape IO_WORKER_CLASS::thread_main() uses (io_worker.cpp):
-        // sit out this tick entirely if exchange() currently wants
-        // exclusive access (INTERUPTED), otherwise mark PROCESSING for the
-        // duration of this tick's own work so exchange() knows it's not
-        // safe to touch comms_buffer yet.
-        if (!INTERUPTED.load())
+        // Plain blocking lock - see this class's own header comment for
+        // why comms_mutex (not IO_WORKER_CLASS's own INTERUPTED/PROCESSING
+        // scheme) is used here: a real mutex needs no separate "please
+        // wait" flag, and it's fine for this thread to block briefly on
+        // its own mutex since nothing else is waiting on it (exchange(),
+        // main.cpp, uses try_lock precisely so it never has to).
         {
-            PROCESSING.store(true);
+            std::lock_guard<std::mutex> lock(comms_mutex);
 
             // Temporary: proves the whole pipe (open() -> real model -> a
             // real send()/process() round trip) actually works end to end.
             // Not real design - subcon has nothing of its own to think
             // about yet, this just gives it one thing to say once, on a
             // delay, so there's something to observe - not a repeating nag
-            // every 60s.
-            if (!test_prompt_sent && test_prompt_timer.is_ready())
+            // every 60s. Now also gated on comms_buffer.busy_count() < 10 -
+            // the timer being ready is necessary but no longer sufficient;
+            // it also has to be a quiet moment on the real chat's side.
+            // comms_buffer is exchange()'s own snapshot (this class's own
+            // header comment) - could be up to one tick stale, harmless for
+            // a check this coarse. 10 matches the threshold the retired
+            // comms_busy() free function used (TODO.md's 2026-09-24 entry) -
+            // not a re-derived value, just the same "essentially idle" read
+            // carried forward.
+            if (!test_prompt_sent && test_prompt_timer.is_ready() && comms_buffer.busy_count() < 10)
             {
                 test_prompt_sent = true;
 
@@ -197,8 +199,6 @@ void SUBCON_WORKER_CLASS::thread_main()
                 DEBUG_LOG_CLASS::instance().log_event("subcon", "test prompt response: " + subcon_llm.last_received.response);
                 subcon_llm.last_received.response.clear();
             }
-
-            PROCESSING.store(false);
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(20));

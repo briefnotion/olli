@@ -3352,7 +3352,66 @@ it can actually act under its persona's judgment, not just talk about it.
     proving the cross-thread handoff actually works, not just that it
     compiles. Clean shutdown confirmed afterward too - no deadlock risk
     from the new synchronization.
-  - **Not yet built**: anything that actually *uses* `comms_buffer.
-    busy_count()` to make a decision - subcon still just runs its old
-    one-shot test prompt on a fixed timer, unconditionally. That's the
-    next real step.
+  - **Not yet built (2026-09-25 entry below picks this up)**: anything
+    that actually *uses* `comms_buffer.busy_count()` to make a decision -
+    subcon still just ran its old one-shot test prompt on a fixed timer,
+    unconditionally.
+- **Built 2026-09-25: `TOOL_WORKER_CLASS::get_pending_result()`/
+  `get_pending_event()` converted from a blocking `lock_guard` to a
+  non-blocking `try_lock`-based `unique_lock`, plus `subcon_worker.h`'s
+  own `comms_mutex` designed the same way from the start - both grew out
+  of a live design conversation comparing `state_mutex` against `IO_WORKER_
+  CLASS`'s own `INTERUPTED`/`PROCESSING` scheme.**
+  - **The underlying question**: for any given `state_mutex`-guarded
+    function, is it ever actually safe to skip the work entirely on lock
+    contention, or does skipping it lose something real? Landed on a clear
+    rule: safe only for operations that are already polled repeatedly with
+    "nothing yet" as an expected, harmless outcome - `get_pending_result()`/
+    `get_pending_event()` fit that exactly (called every tick until they
+    succeed, and a contention-`false` is behaviorally identical to a
+    genuine "not ready yet" `false`). `put_pending_call()`/`abandon_call()`/
+    `set_identity()`/`add_manual_tool_def()` don't - each fires exactly
+    once with nothing else ever giving it a second chance, so skipping any
+    of them on contention would silently lose real state (a dropped tool
+    call, a leaked pending result, a stale identity) - `lock_guard` (block
+    until safe) stays correct for those.
+  - **`get_pending_result()`/`get_pending_event()`**: both now use
+    `std::unique_lock<std::mutex> lock(state_mutex, std::try_to_lock);
+    if (!lock.owns_lock()) return false;` - still real RAII (auto-unlocks
+    if it did acquire the lock), just non-blocking on the attempt itself.
+    Verified live with a genuine remote-tool round trip (`set_timer`,
+    the `clock` tool) - both the immediate `put_pending_call()`/
+    `get_pending_result()` reply and the later on-expire `TOOL_EVENT`
+    (`get_pending_event()`) worked correctly with real data, not just a
+    clean compile.
+  - **`subcon_worker`'s own `exchange()`/`comms_mutex` redesigned the same
+    way, from a different starting point**: it had just been built
+    (previous entry, same day) using `IO_WORKER_CLASS`'s own `INTERUPTED`/
+    `PROCESSING` atomic-bool handshake, matching that class exactly. After
+    the `state_mutex` comparison, replaced it with a real `std::mutex` -
+    correct regardless of caller count (removes the same single-caller
+    fragility `TOOL_WORKER_CLASS` had to fix once already, `2026-09-22`
+    entry above) - with `exchange()` itself using `try_lock` (same
+    reasoning as `get_pending_result()`: a missed snapshot copy is
+    harmless, refreshed again next tick) so the *main* thread specifically
+    never blocks waiting on subcon's own background thread.
+    `thread_main()`'s own side keeps a plain blocking `lock_guard` - fine
+    for subcon's own thread to wait briefly on its own mutex, since
+    nothing else is waiting on it. Verified live again after the swap -
+    same real, fluctuating `busy_count()` values coming through correctly,
+    clean shutdown confirmed with the new mutex in place.
+- **Built 2026-09-25: subcon's one-shot test prompt now actually gated on
+  `comms_buffer.busy_count() < 10`, not just the 60s timer** - the first
+  real use of the busy signal to make a decision, closing out the
+  "not yet built" item from the entry above.
+  - `!test_prompt_sent && test_prompt_timer.is_ready() && comms_buffer.
+    busy_count() < 10` - the timer being ready is now necessary but not
+    sufficient; it also has to be a genuinely quiet moment. `10` matches
+    the threshold the retired `comms_busy()` free function used (same-day
+    entry above), not a re-derived value.
+  - **Verified live, both branches**: kept the real chat continuously busy
+    (two back-to-back real messages) spanning well past the 60s mark -
+    confirmed the prompt did *not* fire during that entire window, despite
+    the timer being ready. Then let things go quiet - confirmed it fired
+    correctly shortly after, once `busy_count()` actually dropped below
+    10.

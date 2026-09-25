@@ -215,7 +215,18 @@ void TOOL_WORKER_CLASS::put_pending_call(const ToolCall& call)
 
 bool TOOL_WORKER_CLASS::get_pending_result(const std::string& call_id, TOOL_RESULT& out)
 {
-    std::lock_guard<std::mutex> lock(state_mutex);
+    // try_lock via unique_lock (std::try_to_lock), not the blocking
+    // lock_guard every other method here uses - safe specifically because
+    // this is already a polling function, called every tick until it
+    // returns true. A false from lock contention is behaviorally
+    // identical to a genuine "not ready yet" false (the caller just
+    // checks again next tick either way) - unlike put_pending_call()/
+    // abandon_call()/etc., nothing here only gets one chance to happen.
+    // owns_lock() reports whether the attempt actually succeeded;
+    // unique_lock still unlocks automatically in its own destructor if it
+    // did, same RAII guarantee lock_guard gives everywhere else.
+    std::unique_lock<std::mutex> lock(state_mutex, std::try_to_lock);
+    if (!lock.owns_lock()) return false;
 
     for (auto it = pending_results.begin(); it != pending_results.end(); ++it)
     {
@@ -239,7 +250,11 @@ void TOOL_WORKER_CLASS::abandon_call(const std::string& call_id)
 
 bool TOOL_WORKER_CLASS::get_pending_event(TOOL_EVENT& out)
 {
-    std::lock_guard<std::mutex> lock(state_mutex);
+    // Same try_lock reasoning as get_pending_result() just above - already
+    // a polling function, so a lock-contention false is indistinguishable
+    // from a genuine "nothing right now" false.
+    std::unique_lock<std::mutex> lock(state_mutex, std::try_to_lock);
+    if (!lock.owns_lock()) return false;
 
     bool got_one = false;
     if (!pending_events.empty())

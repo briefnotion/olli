@@ -3415,3 +3415,13 @@ it can actually act under its persona's judgment, not just talk about it.
     the timer being ready. Then let things go quiet - confirmed it fired
     correctly shortly after, once `busy_count()` actually dropped below
     10.
+- **Simplified 2026-09-25: `subcon_worker`'s `exchange()` no longer copies
+  the whole `COMMS` snapshot - just the one `int` subcon actually uses.**
+  User-directed simplification, same day as the entries above: `comms_
+  buffer` (the full `COMMS` snapshot member) is kept declared for later,
+  but `exchange()` doesn't populate it anymore; a new plain `int
+  main_busy_level` member gets `comms.busy_count()` copied into it instead.
+  `thread_main()`'s own gate now reads `main_busy_level` directly instead
+  of `comms_buffer.busy_count()`. Same `comms_mutex`/`try_lock` protection
+  as before, just guarding a smaller, cheaper copy. Verified live again
+  with real, correctly-tracking values, clean shutdown confirmed.

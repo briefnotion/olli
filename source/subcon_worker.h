@@ -50,17 +50,25 @@ class SUBCON_WORKER_CLASS
 
         bool RUN = false;
 
-        // Guards comms_buffer below - see this class's own comment above
-        // for why this is a real mutex, not IO_WORKER_CLASS's own
-        // INTERUPTED/PROCESSING scheme.
+        // Guards comms_buffer/main_busy_level below - see this class's own
+        // comment above for why this is a real mutex, not IO_WORKER_CLASS's
+        // own INTERUPTED/PROCESSING scheme.
         std::mutex comms_mutex;
 
-        // This worker's own snapshot of the real comms (main.cpp's own),
-        // refreshed once per main-loop tick by exchange() below (when it
-        // manages to get the lock - see its own comment) - never touched
-        // directly by the main thread outside of exchange() itself, and
-        // never touched by thread_main() except while holding comms_mutex.
+        // This worker's own snapshot of the real comms (main.cpp's own) -
+        // kept for later, but exchange() doesn't actually copy the whole
+        // thing anymore (see its own comment) now that all subcon needs
+        // right now is main_busy_level below. Will start being used again
+        // once subcon needs more than just the busy level.
         COMMS comms_buffer;
+
+        // The real chat's own COMMS::busy_count(), copied over by
+        // exchange() below each tick - what thread_main() actually reads
+        // now instead of comms_buffer.busy_count(). Plain int, not its own
+        // COMMS_STRING-style wrapper - it's just a number handed across the
+        // thread boundary, not something with its own add_to()/drain()
+        // semantics to preserve.
+        int main_busy_level = 0;
 
         // Runs on the background thread - only ever invoked internally,
         // via thread_start()'s own lambda (same access rights as any
@@ -70,14 +78,16 @@ class SUBCON_WORKER_CLASS
 
     public:
         // Runs on the MAIN/owner thread, once per tick, right alongside
-        // IO_WORKER_CLASS's own exchange() call (main.cpp). One-way copy
-        // of the real comms into this worker's own comms_buffer - nothing
-        // flows back out yet, since subcon has nothing to relay into the
-        // real conversation right now. Non-blocking (try_lock, not a plain
-        // lock_guard) - the main thread has a lot else to do every tick, so
-        // it never waits on subcon's own background thread; if the attempt
-        // fails, comms_buffer just keeps last tick's snapshot and this
-        // tries again next time, same as leaving it alone would anyway.
+        // IO_WORKER_CLASS's own exchange() call (main.cpp). Copies
+        // comms.busy_count() into main_busy_level - not the whole comms
+        // into comms_buffer anymore, since that's all subcon actually
+        // needs right now (comms_buffer itself is unused for now, kept for
+        // when subcon needs more than just the busy level). Non-blocking
+        // (try_lock, not a plain lock_guard) - the main thread has a lot
+        // else to do every tick, so it never waits on subcon's own
+        // background thread; if the attempt fails, main_busy_level just
+        // keeps last tick's value and this tries again next time, same as
+        // leaving it alone would anyway.
         void exchange(COMMS& comms);
 
         // Set by main.cpp, once, before thread_start() - a one-way copy of

@@ -207,10 +207,11 @@ void SUBCON_WORKER_CLASS::exchange(COMMS& comms)
     std::unique_lock<std::mutex> lock(comms_mutex, std::try_to_lock);
     if (!lock.owns_lock()) return;
 
-    // Just the busy level for now, not the whole comms - comms_buffer
-    // stays unused/stale until subcon actually needs more than this
-    // (subcon_worker.h's own comment on both members).
+    // Just the busy level and presence for now, not the whole comms -
+    // comms_buffer stays unused/stale until subcon actually needs more than
+    // this (subcon_worker.h's own comment on both members).
     main_busy_level = comms.busy_count();
+    user_presence = comms.user.presence;
 }
 
 void SUBCON_WORKER_CLASS::thread_main()
@@ -328,6 +329,16 @@ void SUBCON_WORKER_CLASS::thread_main()
     TIMED_IS_READY_SIMPLE think_cycle_timer;
     think_cycle_timer.set(60000); // ms
 
+    // Own timer, deliberately separate from think_cycle_timer above - this
+    // gates "is now an okay moment to consider surfacing something already
+    // queued," a different question from "is it time to reason about
+    // something new," even though they happen to share the same
+    // presence/busy inputs right now. A shorter interval than the think
+    // cycle's own 60s - checking readiness is cheap (no LLM call), unlike
+    // starting a new reasoning cycle.
+    TIMED_IS_READY_SIMPLE delivery_check_timer;
+    delivery_check_timer.set(30000); // ms
+
     // Fake data to play with (user's own explicit request) - not wired to
     // anything real yet (no presence, no real awareness sources). Purely
     // for proving the prioritize/plan reasoning loop itself works before
@@ -365,6 +376,42 @@ void SUBCON_WORKER_CLASS::thread_main()
                 start_subcon_call(subcon_llm, subcon_comms, build_prioritize_prompt(fake_todo_items), SUBCON_PRIORITIZE_FORMAT);
                 stage = SUBCON_STAGE::PRIORITIZING;
                 DEBUG_LOG_CLASS::instance().log_event("subcon", "think-cycle started: prioritizing");
+            }
+
+            // Delivery-readiness check - independent of stage above (a
+            // previously-queued note can become ready to surface while a
+            // new reasoning cycle is or isn't running). "near" matches
+            // presence.cpp's own vocabulary (profile.is_near) - see
+            // comms.h/olla.cpp's own PART 5 for where this value actually
+            // comes from. Marks at most one note per firing (the oldest
+            // undelivered one), not the whole backlog at once - a cheap way
+            // to get "one thing at a time" (IDEAS.md's own digest-queue
+            // section) without new pacing machinery, given this timer only
+            // fires once per delivery_check_timer.set() interval above.
+            //
+            // Still just marking delivered=true here, not actually saying
+            // anything to the user - there's no real narration channel from
+            // this thread into the main chat's own conversation yet (that's
+            // separate, bigger wiring - subcon has no access to the real
+            // comms at all beyond this one busy/presence copy). This proves
+            // the readiness-gating logic itself before that gets built.
+            if (delivery_check_timer.is_ready())
+            {
+                delivery_check_timer.set(30000); // ms - re-arm for the next check
+
+                if (user_presence == "near" && main_busy_level < 10)
+                {
+                    for (auto& note : tell_later_queue)
+                    {
+                        if (note.delivered) continue;
+
+                        note.delivered = true;
+                        save_subcon_queue(subcon_queue_path, tell_later_queue);
+                        DEBUG_LOG_CLASS::instance().log_event("subcon",
+                            "delivery-ready (presence near, idle): \"" + note.content + "\"");
+                        break;
+                    }
+                }
             }
 
             // Drives whatever's currently in flight, if anything - same

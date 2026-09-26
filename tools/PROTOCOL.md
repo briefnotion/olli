@@ -433,6 +433,33 @@ or, on failure:
   execution, regardless of origin, is simpler to reason about than a
   separate exemption.
 
+- Optional `var` field (2026-09-26) - a generic olli-side state update this
+  event represents, separate from (and independent of) `action` above:
+
+  ```json
+  {"type": "event", "message": "Ron just got home.", "var": {"name": "user.presence", "value": "near"}}
+  ```
+
+  A plain `{name, value}` pair, both plain strings - `name` isn't an enum
+  or a fixed list on the wire (same "no header-wide change for a new kind"
+  reasoning `attachment`'s own `type` field above uses); it's just up to
+  whichever olli-side code reads a given name (`source/olla.cpp`'s own
+  event-draining loop, PART 5) whether it does anything with it. Deliberately
+  its own field rather than reusing `action`'s slot - a presence transition
+  already legitimately uses `action` for that person's own configured
+  `on_near_action`/`on_away_action`, and a single JSON object can't carry
+  both a real tool-call payload and a state-update payload at once.
+
+  Right now the one real producer is `tools/presence/presence.cpp`, sending
+  `{"name": "user.presence", "value": "near"}` or `"away"` on every
+  transition, read by `source/olla.cpp` into `COMMS::user.presence`
+  (`source/comms.h`/`source/helper_olli.h`'s `USER_IDENTITY`). Assumes
+  exactly one tracked person per olli profile - a profile with more than
+  one configured person in `presence_settings.json` would have whichever
+  transitions last clobber this for both, since nothing here knows which
+  configured person is actually "the" olli user for that instance. Not
+  handled - not a real config as of this writing.
+
 ### `ping` / `pong` (either direction - heartbeat, see the status note above)
 
 ```json

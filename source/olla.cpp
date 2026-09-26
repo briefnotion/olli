@@ -1059,6 +1059,16 @@ void ollama_system::process(IO_WORKER_CLASS& io_worker, CLASS_SYSTEM* system, st
         {
             tool_calls_this_turn = 0;
 
+            // Generic var update (TOOL_EVENT's own comment, remote_tools.h) -
+            // applied before narration/action below, so if anything ever
+            // reads comms.user.presence while building this turn's own
+            // prompt/persona, it sees the fresh value, not last tick's.
+            // Presence (tools/presence/presence.cpp) is the one real
+            // producer right now; a second var name would just be another
+            // else-if here, no wire/struct/parsing changes needed.
+            if (event.var_name == "user.presence")
+                comms.user.presence = event.var_value;
+
             if (!event.message.empty())
             {
                 log("[RemoteTools] Event from remote tool: " + event.message + "\n");

@@ -148,20 +148,22 @@ class Settings {
         fs::path get_shared_path();
 };
 
-// Who olli is talking to this session - lives on CLASS_SYSTEM (system.h),
-// reachable everywhere Settings already is, since a tool that wants a name
-// to show/act on will want it the same way it'd want anything else there.
-// Deliberately just three plain strings, all optional (empty = not set) -
-// see the design discussion this came out of for why: 'about' is one open
-// field rather than a guessed-at set of named ones (pronouns, timezone,
-// preferences...), easy to split out later once something concrete actually
-// needs a piece of it split out, instead of guessing now.
+// Who olli is talking to this session, and (as of 'presence' below) their
+// current status - lives on COMMS (comms.h) as comms.user, not CLASS_SYSTEM
+// anymore. Moved 2026-09-26: name/full_name/about are static (set once in
+// main.cpp, never touched again), but presence genuinely changes mid-session
+// and needs to be visible cross-thread the same way COMMS::busy_count()
+// already is (subcon_worker's own exchange() copies it out, same as the
+// busy level) - COMMS is where that kind of live state belongs, not a
+// write-once settings-adjacent object like CLASS_SYSTEM. Reachable
+// everywhere COMMS already is, since a tool that wants a name to show/act
+// on will want it the same way it'd want anything else there.
 class USER_IDENTITY {
     public:
-        // Mirrors Settings::profile_name above (set once in main.cpp,
-        // right where profile_name itself is resolved) - not a separate
-        // concept, just makes the same value reachable from CLASS_SYSTEM
-        // too. Empty for the shared/no-profile default.
+        // Mirrors Settings::profile_name (set once in main.cpp, right where
+        // profile_name itself is resolved) - not a separate concept, just
+        // makes the same value reachable from COMMS too. Empty for the
+        // shared/no-profile default.
         std::string name = "";
 
         // Freeform, optional - "Ron", "Ronald Somebody", whatever's wanted
@@ -172,6 +174,14 @@ class USER_IDENTITY {
         // name - a remote tool's own per-user profile, later maybe folded
         // into the model's own persona prompt.
         std::string about = "";
+
+        // First "current status" field - deliberately just one plain
+        // string, same "guess less, split out later" reasoning 'about'
+        // above already uses, rather than inventing a whole status struct
+        // for a single value. "unknown" until something actually reports
+        // otherwise - presence's own remote tool isn't wired to write this
+        // yet (see IDEAS.md/TODO.md), this is just the field existing.
+        std::string presence = "unknown";
 };
 
 #endif

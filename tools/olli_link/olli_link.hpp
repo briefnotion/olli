@@ -112,7 +112,26 @@ class OLLI_LINK {
         // this instead of narrating it as if it just answered whatever's
         // currently being discussed. Defaults to the reserved
         // EVENT_NO_ORIGIN_ID above for an event with no such call at all.
-        void send_event(const std::string& message, const nlohmann::json& action = nullptr, const std::string& origin_id = EVENT_NO_ORIGIN_ID);
+        //
+        // var: optional {"name", "value"} pair (../PROTOCOL.md's `event`
+        // shape again) - a generic, olli-side state update this event
+        // represents, independent of action above (a person's own
+        // configured on_near_action/on_away_action already occupies action
+        // on a presence event - var is a separate slot precisely so the two
+        // don't collide). Appended last, after origin_id (not next to
+        // action, where it conceptually belongs) specifically so existing
+        // positional call sites - e.g. clock.cpp's
+        // send_event(message, action, timer.origin_call_id) - keep meaning
+        // exactly what they already do; nlohmann::json's implicit
+        // std::string constructor means inserting a json param before
+        // origin_id would have silently compiled while actually passing
+        // origin_call_id as var instead, leaving origin_id at its default.
+        // olli-side code matches on name (a plain string, same "no
+        // header-wide change for a new kind" reasoning OLLI_ATTACHMENT's
+        // own type field already uses) - a tool sends whatever name/value
+        // it wants; whether anything currently reads that name is olli's
+        // own business, not this tool's.
+        void send_event(const std::string& message, const nlohmann::json& action = nullptr, const std::string& origin_id = EVENT_NO_ORIGIN_ID, const nlohmann::json& var = nullptr);
 
         // Connection status text for display - what just happened to the
         // connection this tick (connecting/registered/disconnected/timed

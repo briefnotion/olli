@@ -600,6 +600,13 @@ void TOOL_REMOTE::poll_communications(std::vector<ToolCall>& pending_calls, std:
                     event.action_tool = msg["action"].value("tool", "");
                     event.action_arguments = msg["action"].value("arguments", json::object());
                 }
+                // Same optional/independent-of-action shape as above - see
+                // TOOL_EVENT's own comment (remote_tools.h) for why this is
+                // a separate field rather than reusing action.
+                if (msg.contains("var") && msg["var"].is_object()) {
+                    event.var_name = msg["var"].value("name", "");
+                    event.var_value = msg["var"].value("value", "");
+                }
                 // Defaults to EVENT_NO_ORIGIN_ID (remote_tools.h) for a
                 // tool that hasn't been updated to send this field yet -
                 // treated the same as a genuinely ownerless event, which is

@@ -9,6 +9,8 @@
 
 #include <ncursesw/curses.h>
 
+#include "helper_olli.h" // USER_IDENTITY
+
 // A single shared mutex guarding every ollama_system instance's COMMS.
 //
 // This MUST be an 'inline' variable (C++17), not 'static' - same reasoning
@@ -208,6 +210,21 @@ class COMMS
 {
     public:
         // --------------------------------------------------------------
+        // Who this COMMS is about, and their current status - moved here
+        // from CLASS_SYSTEM::user (system.h) 2026-09-26, since COMMS is
+        // literally who's talking and what's going on with them, and this
+        // is where cross-thread-visible live state already lives (see
+        // busy_count() below) - USER_IDENTITY::presence needs exactly that,
+        // unlike name/full_name/about which are set once and never change.
+        // Keeping exchange()'s signature the same (SUBCON_WORKER_CLASS::
+        // exchange(COMMS&), subcon_worker.h) was part of the point - one
+        // more field on the object already being handed across, not a new
+        // parameter.
+        // --------------------------------------------------------------
+        USER_IDENTITY user;
+        // --------------------------------------------------------------
+
+        // --------------------------------------------------------------
         // Output-direction buffers - streamed into incrementally by
         // whoever's producing them, drained (read + cleared) by whoever's
         // consuming them, under output_buffer_mutex above. See
@@ -338,6 +355,7 @@ class COMMS
         COMMS& operator=(const COMMS& other)
         {
             if (this == &other) return *this;
+            user = other.user;
             INPUT_FROM_LLM = other.INPUT_FROM_LLM;
             INPUT_FROM_THINKING = other.INPUT_FROM_THINKING;
             INPUT_FROM_SYSTEM = other.INPUT_FROM_SYSTEM;

@@ -70,6 +70,16 @@ class SUBCON_WORKER_CLASS
         // semantics to preserve.
         int main_busy_level = 0;
 
+        // The real chat's own COMMS::user.presence (helper_olli.h), copied
+        // over by exchange() below each tick, same reasoning/shape as
+        // main_busy_level just above - a plain copy, not the whole
+        // USER_IDENTITY, since presence is the only field of it that
+        // changes live right now. Not read by thread_main() for anything
+        // yet - nothing writes a real value into comms.user.presence yet
+        // either (that's still open, see TODO.md/IDEAS.md) - this is just
+        // the copy existing, ready for when there's something to gate on.
+        std::string user_presence = "unknown";
+
         // Runs on the background thread - only ever invoked internally,
         // via thread_start()'s own lambda (same access rights as any
         // other member-function code, since the lambda is defined inside
@@ -79,10 +89,11 @@ class SUBCON_WORKER_CLASS
     public:
         // Runs on the MAIN/owner thread, once per tick, right alongside
         // IO_WORKER_CLASS's own exchange() call (main.cpp). Copies
-        // comms.busy_count() into main_busy_level - not the whole comms
-        // into comms_buffer anymore, since that's all subcon actually
-        // needs right now (comms_buffer itself is unused for now, kept for
-        // when subcon needs more than just the busy level). Non-blocking
+        // comms.busy_count() into main_busy_level and comms.user.presence
+        // into user_presence - not the whole comms into comms_buffer
+        // anymore, since that's all subcon actually needs right now
+        // (comms_buffer itself is unused for now, kept for when subcon
+        // needs more than just these two). Non-blocking
         // (try_lock, not a plain lock_guard) - the main thread has a lot
         // else to do every tick, so it never waits on subcon's own
         // background thread; if the attempt fails, main_busy_level just

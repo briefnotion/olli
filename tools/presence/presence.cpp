@@ -185,7 +185,18 @@ namespace {
 
     // Push-only path - see PersonSettings::on_home_action's comment for why
     // this carries a real action, not just narration text.
-    void fire_transition_event(OLLI_LINK& link, const std::string& message, const json& action)
+    //
+    // near: whether this transition is an arrival (true) or departure
+    // (false) - sent as a generic {"name": "user.presence", "value": ...}
+    // var (../PROTOCOL.md's `event` shape) alongside message/action, olli's
+    // own COMMS::user.presence's source of truth (source/olla.cpp, PART 5).
+    // "user.presence" assumes exactly one tracked person per olli profile,
+    // matching every real presence_settings.json today (one person, its
+    // name matching the profile) - if a profile ever configures more than
+    // one person, whichever transitions last would clobber this for both,
+    // since nothing here knows which configured person is actually "the"
+    // olli user for this instance. Not handled - not a real config yet.
+    void fire_transition_event(OLLI_LINK& link, const std::string& message, const json& action, bool near)
     {
         json wire_action = nullptr;
         if (action.is_object() && !action.empty()) {
@@ -194,7 +205,8 @@ namespace {
                 {"arguments", action.value("arguments", json::object())}
             };
         }
-        link.send_event(message, wire_action);
+        json wire_var = {{"name", "user.presence"}, {"value", near ? "near" : "away"}};
+        link.send_event(message, wire_action, EVENT_NO_ORIGIN_ID, wire_var);
     }
 
     std::vector<PersonProfile> people;
@@ -232,7 +244,7 @@ namespace {
             if (!profile.triggered) continue;
 
             std::string message = profile.name + (profile.is_near ? " just got home." : " just left.");
-            fire_transition_event(link, message, profile.is_near ? profile.on_near_action : profile.on_away_action);
+            fire_transition_event(link, message, profile.is_near ? profile.on_near_action : profile.on_away_action, profile.is_near);
             display.set_activity_line(profile.name, message, 30);
 
             profile.triggered = false;

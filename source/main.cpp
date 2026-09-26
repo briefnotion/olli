@@ -289,7 +289,7 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
 
         // --- system: profile/settings ---
         system.setings_vars.profile_name = profile_name;
-        system.user.name = profile_name;
+        comms.user.name = profile_name;
 
         system.setings_vars.load_settings();
         std::filesystem::path settings_path = system.setings_vars.get_settings_path();
@@ -383,7 +383,7 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         // PROTOCOL.md's "identity" message and TOOL_REMOTE::send_identity()'s
         // comment, remote_tools.h) - before thread_start(), so the very
         // first registration already has it rather than the empty default.
-        tool_worker.set_identity(system.user);
+        tool_worker.set_identity(comms.user);
 
         tool_worker.thread_start();
 

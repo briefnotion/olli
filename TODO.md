@@ -3568,3 +3568,84 @@ it can actually act under its persona's judgment, not just talk about it.
     `thread_main()`. Verified by deliberately sending `bye` mid-flight
     four separate times - twice during PRIORITIZING, once during PLANNING,
     once more for confidence - all clean, no new crash.
+- **Built 2026-09-26 (continued): real presence now reaches
+  `COMMS::user.presence`, and subcon's own digest queue has its first real
+  (if still one-line) delivery-readiness gate.** Grew out of a design
+  conversation about how subcon could ever observe presence at all, given
+  it's an event fired into the main chat's own `COMMS` (a `TOOL_EVENT`),
+  not a pollable state - three pieces, in order:
+  - **`USER_IDENTITY` (`name`/`full_name`/`about`) moved from
+    `CLASS_SYSTEM::user` to `COMMS::user`** (`helper_olli.h`/`comms.h`/
+    `system.h`/`main.cpp`), and gained a fourth field, `presence`
+    (default `"unknown"`). Static identity didn't need to move for its own
+    sake - only 3 real call sites in the whole codebase, all write-once at
+    startup - but `presence` genuinely changes mid-session and needs the
+    same cross-thread visibility `COMMS::busy_count()` already has, and
+    `COMMS` is where that kind of live state already lives. Kept
+    `SUBCON_WORKER_CLASS::exchange(COMMS&)`'s own signature unchanged - one
+    more field on the object already being handed across, not a new
+    parameter. Verified live: full startup, remote-tool identity handshake,
+    a real chat round-trip, and clean `bye` shutdown, all unaffected.
+  - **A new generic `var` field on the `event` wire message**
+    (`tools/PROTOCOL.md`, `TOOL_EVENT` in `remote_tools.h`,
+    `OLLI_LINK::send_event()` in `tools/olli_link/`), separate from the
+    existing `action` field rather than reusing it - a presence transition
+    already legitimately uses `action` for that person's own configured
+    `on_near_action`/`on_away_action`, and one JSON object can't carry both
+    a real tool-call payload and a state-update payload at once. `var` is a
+    plain `{"name", "value"}` pair, both free strings - same "no
+    header-wide change for a new kind" reasoning `OLLI_ATTACHMENT`'s own
+    `type` field already uses - so a future second var needs only one more
+    `else if` in `olla.cpp`'s own draining loop, no new wire/struct/parsing
+    work. `send_event()`'s new `var` parameter was appended *last* (after
+    the existing `origin_id`), not inserted before it - `nlohmann::json`'s
+    implicit `std::string` constructor means a json param inserted earlier
+    would have let `clock.cpp`'s existing `send_event(msg, action,
+    timer.origin_call_id)` call silently compile while actually passing
+    `origin_call_id` as the new param and leaving `origin_id` at its
+    default. `presence.cpp`'s `fire_transition_event()` now sends
+    `{"name": "user.presence", "value": "near"|"away"}` on every
+    transition; `olla.cpp`'s PART 5 event loop applies it with one line
+    (`if (event.var_name == "user.presence") comms.user.presence =
+    event.var_value;`), before narration/action-dispatch, so anything that
+    ever reads presence mid-turn sees the fresh value. Known, accepted gap:
+    `presence.cpp` tracks a `vector` of people, but `user.presence` assumes
+    exactly one per profile (true of every real `presence_settings.json`
+    today) - a profile with two configured people would have whichever
+    transitions last clobber it for both. Not handled - not a real config
+    yet, flagged in both `presence.cpp` and `PROTOCOL.md` rather than
+    guessed at. Also known/accepted: `tools.cpp`'s task-runner script loop
+    drains the same shared `pending_events` queue independently onto its
+    own throwaway `COMMS`, so a transition arriving mid-script never
+    reaches the real `comms.user.presence` - self-corrects on the next
+    transition, left alone per the user's own "not worried about the task
+    for now" call. **Verified live** with a hand-crafted raw socket message
+    (register + a synthetic `event` with `var`) against a real running
+    instance - a temporary debug log confirmed `comms.user.presence set
+    to: near` firing before the narration reached the model; removed after
+    confirming, then rebuilt clean. All three remote-tool binaries
+    (`presence`, `clock`, `hue`) rebuilt clean with `-Wall -Wextra`, `clock`
+    confirmed to still compile its existing `send_event()` call correctly.
+  - **`subcon_worker`'s digest queue gets its first delivery-readiness
+    check** (`subcon_worker.cpp`) - `SUBCON_WORKER_CLASS::exchange()`
+    already copied `comms.user.presence` into a `user_presence` member
+    (built alongside the `COMMS::user` move above, unused until now). A new
+    `delivery_check_timer` (30s, deliberately separate from the 60s think-
+    cycle timer - a different question: "is now okay to surface something
+    already queued," not "is it time to reason about something new") gates
+    a check, independent of `SUBCON_STAGE`: if `user_presence == "near" &&
+    main_busy_level < 10`, mark the single oldest undelivered
+    `SUBCON_NOTE` `delivered = true` and persist the queue - one note per
+    firing, not the whole backlog at once, a free way to get "one thing at
+    a time" (`IDEAS.md`'s own digest-queue section) without new pacing
+    machinery. Still just flips the flag - no real narration channel from
+    subcon's own thread into the main chat's conversation exists yet, so
+    this proves the readiness-gating logic itself before that bigger,
+    separate piece gets built. **Verified live, both directions**: a real
+    "near" presence event (same synthetic-socket method as above) correctly
+    flipped the oldest of 5 real backlog notes to `delivered: true` on disk
+    within the 30s window, logged clearly; a separate fresh run with no
+    presence event sent (left at its `"unknown"` default) produced zero
+    delivery-ready log lines and zero queue changes after 40s. Clean `bye`
+    shutdown confirmed after each run, `crash_log.txt` untouched throughout
+    this entire entry's work.

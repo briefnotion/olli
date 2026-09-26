@@ -66,6 +66,21 @@ struct TOOL_EVENT
     std::string action_tool;
     json action_arguments;
     std::string origin_id;
+
+    // Optional generic state update this event represents, independent of
+    // action_tool/action_arguments above (../tools/PROTOCOL.md's `event`
+    // shape - a separate `var` field, not reusing `action`, since a
+    // presence event's own action slot is already spoken for by that
+    // person's configured on_near_action/on_away_action). var_name is a
+    // plain string, not an enum - same "no header-wide change for a new
+    // kind" reasoning OLLI_ATTACHMENT's own type field already uses
+    // (comms.h) - whichever olli-side code cares about a given name (right
+    // now: just olla.cpp's own event-draining loop, matching "user.presence")
+    // is free to add another without touching this struct or its parsing.
+    // Both empty when the event carries no var at all - the only case
+    // today's one real producer (presence.cpp) doesn't hit.
+    std::string var_name;
+    std::string var_value;
 };
 
 // Matches tools/olli_link/olli_link.hpp's own EVENT_NO_ORIGIN_ID exactly -

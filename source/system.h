@@ -21,10 +21,13 @@ class CLASS_SYSTEM
         // IO_WORKER_CLASS's class comment). main.cpp constructs an
         // IO_WORKER_CLASS alongside this.
 
-        // Who olli is talking to this session - see USER_IDENTITY's own
-        // comment in helper_olli.h. Populated once in main.cpp, right where
-        // setings_vars.profile_name is resolved.
-        USER_IDENTITY user;
+        // Who olli is talking to this session used to live here (USER_
+        // IDENTITY user) - moved to COMMS (comms.h, comms.user) 2026-09-26
+        // once it grew a genuinely live-changing field (presence) that
+        // needs the same cross-thread visibility COMMS::busy_count()
+        // already has, not a write-once settings-adjacent value like the
+        // rest of this class. See USER_IDENTITY's own comment in
+        // helper_olli.h.
 
         // Remote-tool connections used to be accepted here
         // (REMOTE_TOOL_LISTENER remote_tools, tools/PROTOCOL.md/

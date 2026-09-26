@@ -3649,3 +3649,50 @@ it can actually act under its persona's judgment, not just talk about it.
     delivery-ready log lines and zero queue changes after 40s. Clean `bye`
     shutdown confirmed after each run, `crash_log.txt` untouched throughout
     this entire entry's work.
+- **Built 2026-09-26 (continued): subcon's reasoning loop gained a third
+  stage, `RESULTING`, so it produces an actual finding/outcome, not just a
+  procedure.** Caught by re-reading `history`'s real contents (the previous
+  entry's own live samples): every stored `SUBCON_TODO_RESULT` only ever
+  held `reasoning` (why picked) and `plan` (a 5-6 step how-to, e.g. "Locate
+  the RAG collection source... Check timestamps... Cross-reference...") -
+  never a result. A how-to isn't sayable to a user; a finding is.
+  - `SUBCON_TODO_RESULT` gained a third field, `finding`. `SUBCON_STAGE`
+    gained `RESULTING`, following `PLANNING` rather than replacing it - the
+    user's own call: keep "how would you do it" and "what did you find" as
+    two distinct, separately-visible things in `history`, not one blended
+    answer ("makes the plan part more prominent also"). PLANNING's own
+    completion now just carries its plan text forward (`chosen_plan`,
+    mirroring how `chosen_reasoning` already carries PRIORITIZING's own
+    text forward) and submits a new prompt - "You just did that. What's
+    the actual result or finding?" - deliberately open/neutral wording,
+    not nudged toward admitting it can't really know. RESULTING's own
+    completion is where the digest-queue note and the history entry both
+    actually get built now, moved from PLANNING's old completion.
+  - The digest-queue note's own content changed to match: was `"Decided to
+    look into: X. Reasoning: Y. Plan: Z"`, now `"Regarding \"X\": <the
+    finding>"` - built from the outcome, not the procedure.
+  - **The deliberate design choice behind building this at all**: subcon
+    has zero tools and zero real data behind any of the 3 fake items (no
+    real RAG state, no real weather, no real conversation history) - a
+    finding stage can't be grounded in anything real right now, so it was
+    guaranteed to fabricate an answer, same as `plan` already does. Built
+    anyway, on purpose - the user's own framing: "lets learn to fail before
+    we succeed. we need some results to see," deliberately choosing to
+    observe what an ungrounded system produces before ever trying to fix
+    that honestly.
+  - **Verified live, and the result is a real finding worth recording
+    precisely**: across 3 real cycles (one per fake item), the model never
+    once hedged or admitted uncertainty - it fabricated specific, concrete
+    "facts" wholesale: *"Two primary collections last updated in 2023...
+    Validation scripts flagged missing files in the 'finance' subset"*
+    (RAG); *"A sudden temperature drop of 15°F overnight... New
+    precipitation forecast for tomorrow"* (weather); *"Two unresolved
+    questions about subscription limits... A pending request for data
+    export access"* (last conversation). Zero tools, zero real data behind
+    any of it, and zero hedging in the output - full-confidence
+    confabulation, not refusal, is what a toolless system actually
+    produces when pushed for a concrete result. Test method: same
+    temporarily-shrunk-timer + temporary-full-dump-log approach as the
+    prior entry, reverted after (git diff confirmed clean - only the real
+    `RESULTING` feature code remains). Clean `bye` shutdown, `crash_log.txt`
+    untouched.

@@ -98,6 +98,15 @@ struct SUBCON_TODO_RESULT
 {
     std::string reasoning; // why it was chosen that time
     std::string plan;      // what it decided to do about it
+    std::string finding;   // what it "found" after (pretend) carrying out plan -
+                            // the actual outcome, not another how-to. Deliberately
+                            // fabricated right now, same as plan already is - subcon
+                            // has no tools and no real data behind any of the fake
+                            // items, so this can't be grounded in anything real yet.
+                            // Kept anyway (the user's own call, 2026-09-26): "let's
+                            // learn to fail before we succeed" - see what a toolless
+                            // system actually produces when pushed for a concrete
+                            // result, rather than solving that honestly up front.
 };
 
 // One candidate for the prioritize stage below - description plus enough
@@ -176,13 +185,22 @@ static void start_subcon_call(ollama_system& instance, COMMS& comms, const std::
 // loop) - a real, if tiny, multi-stage conversation with itself, entirely
 // self-contained to this thread, no wiring anywhere else yet. IDLE waits
 // for the same timer/busy gate the old one-shot test prompt used;
-// PRIORITIZING/PLANNING each cover one async subcon_llm call (submitted,
-// then polled tick by tick, same input()/process() pattern as before) -
-// always resolved one way or another via !is_processing, not gated on
-// last_received.complete/response.empty() also being true, so a genuine
-// network failure can't leave this stuck forever waiting for a condition
-// that will never come.
-enum class SUBCON_STAGE { IDLE, PRIORITIZING, PLANNING };
+// PRIORITIZING/PLANNING/RESULTING each cover one async subcon_llm call
+// (submitted, then polled tick by tick, same input()/process() pattern as
+// before) - always resolved one way or another via !is_processing, not
+// gated on last_received.complete/response.empty() also being true, so a
+// genuine network failure can't leave this stuck forever waiting for a
+// condition that will never come.
+//
+// RESULTING added 2026-09-26 - PLANNING alone only ever produced a
+// procedure ("here's how you'd check this"), never an actual outcome
+// ("here's what you found") - not something sayable to a user, and the
+// whole point of the digest queue is eventually surfacing something
+// sayable. Kept as its own stage rather than folding into PLANNING, per
+// the user's own call: keeps "how would you do it" and "what did you find"
+// as two distinct, separately-visible things in history, not one blended
+// answer.
+enum class SUBCON_STAGE { IDLE, PRIORITIZING, PLANNING, RESULTING };
 
 void SUBCON_WORKER_CLASS::thread_start()
 {
@@ -353,7 +371,8 @@ void SUBCON_WORKER_CLASS::thread_main()
 
     SUBCON_STAGE stage = SUBCON_STAGE::IDLE;
     int chosen_index = -1;
-    std::string chosen_reasoning; // carries PRIORITIZING's own reasoning through to PLANNING's completion, for the queue entry built there
+    std::string chosen_reasoning; // carries PRIORITIZING's own reasoning through to RESULTING's completion, for the queue entry/history built there
+    std::string chosen_plan;      // carries PLANNING's own plan through to RESULTING's completion, same reasoning
 
     RUN = true;
     while (RUN)
@@ -491,22 +510,58 @@ void SUBCON_WORKER_CLASS::thread_main()
             {
                 if (!subcon_llm.last_received.complete || subcon_llm.last_received.response.empty())
                 {
-                    DEBUG_LOG_CLASS::instance().log_event("subcon", "plan call failed or produced nothing");
+                    DEBUG_LOG_CLASS::instance().log_event("subcon", "plan call failed or produced nothing - abandoning this cycle");
+                    stage = SUBCON_STAGE::IDLE;
                 }
                 else
                 {
                     DEBUG_LOG_CLASS::instance().log_event("subcon", "plan: " + subcon_llm.last_received.response);
+                    chosen_plan = subcon_llm.last_received.response;
+
+                    // Ask for the actual outcome, not another how-to - see
+                    // SUBCON_TODO_RESULT's own comment on finding for why
+                    // this is its own stage rather than folded into plan
+                    // above. Deliberately open/neutral wording, not nudged
+                    // toward honesty about having no real way to know - the
+                    // point right now is observing what a toolless system
+                    // actually produces when pushed for a result, not
+                    // solving that up front (user's own call, 2026-09-26).
+                    subcon_comms.INPUT_FROM_USER.set(
+                        "You just did that. What's the actual result or finding? Answer in plain "
+                        "sentences, not JSON. Keep it brief.");
+                    subcon_comms.ENTER_PRESSED = true;
+                    stage = SUBCON_STAGE::RESULTING;
+                }
+
+                subcon_llm.last_received.response.clear();
+            }
+            // RESULTING's own call finished - same "resolved one way or
+            // another" reasoning as the stages above. This is where the
+            // digest queue entry and history both actually get built now -
+            // moved here from PLANNING's own completion (pre-2026-09-26)
+            // once a real finding existed to build them from instead of
+            // just a procedure.
+            else if (stage == SUBCON_STAGE::RESULTING && !subcon_llm.is_processing)
+            {
+                if (!subcon_llm.last_received.complete || subcon_llm.last_received.response.empty())
+                {
+                    DEBUG_LOG_CLASS::instance().log_event("subcon", "result call failed or produced nothing - abandoning this cycle");
+                }
+                else
+                {
+                    DEBUG_LOG_CLASS::instance().log_event("subcon", "finding: " + subcon_llm.last_received.response);
 
                     // The digest queue itself (IDEAS.md's own section) -
                     // the first real place subcon's own conclusions land
                     // that isn't just a debug-log line. delivered stays
-                    // false - nothing reads or clears this yet, since
-                    // actual delivery (presence + not-busy, IDEAS.md's own
-                    // "when to announce" note) isn't built.
+                    // false until the delivery-readiness gate above marks
+                    // it. Built from the finding now, not the plan - a
+                    // finding is what's actually sayable to a user ("I
+                    // looked - nothing was unresolved"), a procedure never
+                    // was.
                     SUBCON_NOTE note;
-                    note.content = "Decided to look into: \"" + fake_todo_items[static_cast<size_t>(chosen_index)].description +
-                                    "\". Reasoning: " + chosen_reasoning +
-                                    " Plan: " + subcon_llm.last_received.response;
+                    note.content = "Regarding \"" + fake_todo_items[static_cast<size_t>(chosen_index)].description +
+                                    "\": " + subcon_llm.last_received.response;
                     tell_later_queue.push_back(note);
                     save_subcon_queue(subcon_queue_path, tell_later_queue);
 
@@ -514,14 +569,16 @@ void SUBCON_WORKER_CLASS::thread_main()
                     // comment) - user's own idea, 2026-09-26: every item
                     // not chosen this cycle gets a little staler, the one
                     // that WAS chosen resets to fresh and keeps a real
-                    // record of what happened, not just a timestamp.
+                    // record of what happened, not just a timestamp - now a
+                    // full (reasoning, plan, finding) triple, not just the
+                    // first two.
                     for (size_t i = 0; i < fake_todo_items.size(); ++i)
                     {
                         if (i == static_cast<size_t>(chosen_index))
                         {
                             fake_todo_items[i].cycles_since_checked = 0;
                             fake_todo_items[i].ever_checked = true;
-                            fake_todo_items[i].history.push_back({chosen_reasoning, subcon_llm.last_received.response});
+                            fake_todo_items[i].history.push_back({chosen_reasoning, chosen_plan, subcon_llm.last_received.response});
                         }
                         else
                         {

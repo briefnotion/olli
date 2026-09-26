@@ -3696,3 +3696,13 @@ it can actually act under its persona's judgment, not just talk about it.
     prior entry, reverted after (git diff confirmed clean - only the real
     `RESULTING` feature code remains). Clean `bye` shutdown, `crash_log.txt`
     untouched.
+- **Fixed 2026-09-26: subcon's think-cycle now defaults off.** Real
+  production had been running non-stop, meaning it was burning real
+  GPU/LLM time every 60s fabricating findings about `fake_todo_items`'
+  made-up topics into that profile's own `subcon/queue.json` - fine for a
+  deliberate test session, not something to leave running unattended.
+  `SUBCON_THINK_CYCLE_ENABLED` (a local `constexpr bool` in `thread_main()`,
+  `subcon_worker.cpp`) gates only the "start a new think-cycle" condition -
+  `exchange()`'s own busy/presence copy and the delivery-readiness check
+  both keep running regardless, since neither costs anything or does
+  anything unwanted on their own. Flip to `true` for testing.

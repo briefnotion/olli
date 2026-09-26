@@ -369,6 +369,17 @@ void SUBCON_WORKER_CLASS::thread_main()
         {"Review the last conversation for anything left unresolved", 0, false, {}}
     };
 
+    // Off by default (2026-09-26) - the whole reasoning loop above still
+    // only has fake_todo_items to work with, so leaving this on burns real
+    // GPU/LLM time every 60s producing fabricated findings about made-up
+    // topics into whatever profile happens to be running - fine for a
+    // deliberate test session, not something to leave running unattended
+    // in real day-to-day use. Flip true for testing; everything else in
+    // this thread (exchange()'s busy/presence copy, the delivery-readiness
+    // check) keeps running either way - only the "start a new think-cycle"
+    // gate below is affected.
+    constexpr bool SUBCON_THINK_CYCLE_ENABLED = false;
+
     SUBCON_STAGE stage = SUBCON_STAGE::IDLE;
     int chosen_index = -1;
     std::string chosen_reasoning; // carries PRIORITIZING's own reasoning through to RESULTING's completion, for the queue entry/history built there
@@ -387,8 +398,9 @@ void SUBCON_WORKER_CLASS::thread_main()
             std::lock_guard<std::mutex> lock(comms_mutex);
 
             // Start a new think-cycle - same gate the old one-shot test
-            // prompt used (timer ready AND the real system currently idle).
-            if (stage == SUBCON_STAGE::IDLE && think_cycle_timer.is_ready() && main_busy_level < 10)
+            // prompt used (timer ready AND the real system currently idle),
+            // plus the enable switch declared above.
+            if (SUBCON_THINK_CYCLE_ENABLED && stage == SUBCON_STAGE::IDLE && think_cycle_timer.is_ready() && main_busy_level < 10)
             {
                 think_cycle_timer.set(60000); // ms - re-arm for the next cycle
 

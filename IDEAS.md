@@ -81,6 +81,27 @@ presence signals you're back - one thing at a time, ranked by actual
 importance, more only if asked ("anything else?") - not a wall of text
 the moment you walk in.
 
+### "When to announce" as just another reasoning task, not a separate mechanism
+
+Idea from 2026-09-26, once the prioritize/plan reasoning loop was actually
+built and live-verified (see `TODO.md`'s own entry): instead of a rigid
+external gate deciding when it's okay to surface what's in the digest
+queue, make "is now a good moment to bring up the tell-later list" one
+more candidate item in the same prioritize/plan loop subcon already uses
+for everything else - reasoned about the same way, using whatever context
+it has (how many things are queued, how important they are, presence,
+time of day), not a hand-coded rule.
+
+One deliberate refinement on top, though: this should layer on top of the
+existing hard mechanical busy-gate (`main_busy_level < 10`), not replace
+it. The busy-gate stays a non-negotiable floor governing whether subcon
+even runs a think-cycle at all; "is this a good moment to speak up"
+becomes something it reasons about *within* that already-safe window, not
+instead of having one. Same reasoning as the second-guess safety fix
+(`TODO.md`'s 2026-09-23 entry) - leaving a real-world-facing decision
+entirely to the model's own judgment, with no structural backstop, is a
+failure mode this project has already hit once.
+
 ### The hard parts (there are two, and they're different kinds of hard)
 
 1. **Curation** - deciding what's worth remembering and how urgently, at

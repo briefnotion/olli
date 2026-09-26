@@ -3425,3 +3425,146 @@ it can actually act under its persona's judgment, not just talk about it.
   of `comms_buffer.busy_count()`. Same `comms_mutex`/`try_lock` protection
   as before, just guarding a smaller, cheaper copy. Verified live again
   with real, correctly-tracking values, clean shutdown confirmed.
+- **Built 2026-09-26: subcon can now actually reason about something, not
+  just prove the pipe works.** Before touching any code, the user asked
+  for a real review of `IDEAS.md`'s own "The subconscious" section against
+  what had actually been built so far - the scaffolding (dedicated thread,
+  isolated LLM, the busy-based pacing) matched the original design closely,
+  but the *content* (a fixed test string, a debug-log line nobody reads)
+  didn't resemble "a subconscious" at all yet. Landed on "Plan B" from that
+  review (a real awareness source, presence, being the closest fit to the
+  original vision) but explicitly deferred wiring anything real in - built
+  the reasoning loop itself first, entirely self-contained to
+  `subcon_worker.cpp`, using fake data the user could freely experiment
+  with.
+  - **A real "talking to itself" loop**: a small `SUBCON_STAGE` state
+    machine (`IDLE -> PRIORITIZING -> PLANNING -> IDLE`), still gated by
+    the existing timer + `main_busy_level < 10`. PRIORITIZING sends a list
+    of candidates and gets back structured `{"chosen_index", "reasoning"}`
+    (Ollama's own structured outputs, same mechanism as the DONE-check fix)
+    via a new `start_subcon_call()` helper - needed because `ollama_system::
+    input()` (the normal submission path) has no way to pass a
+    `response_format` through to `send()` at all, so this mirrors
+    `sidetrack.cpp`'s own `start_second_guess_call()` shape instead.
+    PLANNING is a genuine follow-up in the *same* conversation (so it
+    already knows why it picked that item), producing real free-text steps
+    via the ordinary `input()` path. Both stages resolve one way or
+    another via `!is_processing` alone, not also gated on `complete`/a
+    non-empty response - a genuine network failure leaves `complete=false`
+    forever, so gating on that too would leave the stage stuck permanently
+    waiting for a condition that would never arrive.
+  - **Bonus found along the way**: Qwen3 (`qwen3:8b`, the model already in
+    use) is a real hybrid-reasoning model with its own native thinking
+    mode - `subcon_llm.PROPS.use_thinking = true` was already set (chat
+    itself runs with it off) specifically so subcon gets its own real
+    reasoning, but nothing had ever looked at `last_received.thinking`
+    until now. It's logged alongside the structured decision - genuine
+    step-by-step deliberation, not just an after-the-fact justification
+    field.
+  - **A real bug caught and fixed live**: PLANNING's first version just
+    echoed PRIORITIZING's own JSON back verbatim instead of writing a real
+    plan - the model mimicking the immediately preceding turn's own style,
+    since nothing told it not to (PLANNING intentionally uses no
+    `response_format` at all). Fixed with an explicit "plain sentences,
+    not JSON" instruction in the prompt.
+  - **The persona was updated too** - the original "you have no tools and
+    nothing real to do yet, this is still a test skeleton" wording directly
+    contradicted asking it to prioritize and plan; updated to describe what
+    it can actually do now (think, not act) without overclaiming.
+  - **Verified live, repeatedly**: full prioritize -> plan cycles produced
+    genuine, coherent, on-topic multi-step plans - not scripted output,
+    real inference twice per cycle, ~13-25s apart depending on model load.
+- **Built 2026-09-26: the digest queue itself** (`IDEAS.md`'s own section)
+  - subcon's conclusions now land somewhere that survives a restart,
+  instead of a debug-log line that gets buried in a huge shared file.
+  - **`SUBCON_NOTE`** (`content`, `delivered`) persisted as
+    `subcon/queue.json` - loaded once at thread startup, saved again after
+    every new note. Deliberately minimal - no timestamp/priority/deferred-
+    vs-resurface state yet, since actual delivery logic isn't built and
+    guessing at its shape before it exists would just be wasted design
+    work.
+  - **Verified live, three ways**: a real entry lands after a full cycle;
+    a second cycle correctly appends rather than overwrites; the queue
+    survives a full process restart (loads the existing entries, then
+    appends a third on top - not just "always create fresh").
+  - **A design idea written down, not built**: "is now a good moment to
+    announce the tell-later list" as just one more candidate item in the
+    same prioritize/plan loop, rather than a separate hardcoded delivery
+    mechanism - the user's own idea, elegant because it reuses what
+    already exists instead of adding a new system. Captured in `IDEAS.md`
+    with one deliberate refinement: this should layer on top of the
+    existing hard `main_busy_level` gate, not replace it - the same
+    "never leave a real-world-facing decision entirely to the model's own
+    judgment with no structural backstop" lesson the second-guess safety
+    fix already had to learn once.
+- **Built 2026-09-26: real staleness-aware prioritization**, replacing the
+  flat fake string list. Live testing with the simple version above showed
+  the same item getting picked three-for-three, every time, with no real
+  discrimination between options - not a very convincing demonstration
+  that it was actually reasoning about anything.
+  - **`SUBCON_TODO_ITEM`** (description, `cycles_since_checked`,
+    `ever_checked`, a real `std::vector<SUBCON_TODO_RESULT>` history of
+    every past reasoning+plan for that item - the user's own design,
+    keeping a full record instead of just a last-checked timestamp).
+    `cycles_since_checked` counts completed think-cycles, not real wall-
+    clock time - deliberately, so staleness-driven behavior is actually
+    observable within a normal testing session instead of needing to wait
+    real days.
+  - **Two real prompt-wording bugs found and fixed live, both about the
+    same underlying issue**: the prompt telling the model to "weigh...
+    how long it's been since checked" never said which *direction*
+    mattered, so it initially reasoned that something checked most
+    recently was *more* urgent to check again - backwards from intended.
+    Fixed with an explicit statement of the relationship (longer since
+    checked = more overdue = more worth prioritizing). Separately, "last
+    checked 0 cycle(s) ago" itself read ambiguously - the model
+    interpreted it as "no prior check has occurred" (confusing it with
+    never-checked) rather than "checked most recently, very fresh."
+    Special-cased "checked just last cycle - very fresh" for that one
+    value instead.
+  - **A limitation found, not fixed**: after both wording fixes, one cycle
+    still showed the model's own free-text reasoning arguing for a
+    *different* item ("making other tasks more urgent due to their
+    unchecked status") while `chosen_index` still pointed back to the same
+    item it had just picked - the reasoning and the structured decision
+    disaggreeing within the same response. Nothing enforces that a
+    model's free-text justification actually agrees with its own
+    structured answer in the same call. Not chased further - noise level
+    expected for a fake-data prototype, not a code bug to fix.
+  - **Verified live**: real variety across cycles this time (no longer
+    picking the same item 3-for-3), staleness genuinely factoring into the
+    reasoning, comparative judgments between items visible in the
+    reasoning text ("weather is also overdue... conversation items were
+    reviewed recently, making them less pressing").
+- **Found and fixed 2026-09-26: two real, live crashes surfaced by the work
+  above, both genuine bugs, not prototype rough edges.**
+  - **`dump()`'s UTF-8 strictness on live model text.**
+    `save_subcon_queue()` (new this session) serializes real, free-form
+    model-generated content - `nlohmann::json::dump()`'s default
+    `error_handler_t::strict` throws `json::type_error` on any invalid
+    UTF-8 byte sequence, uncaught, forcing `thread_main()` to unwind with
+    `subcon_llm.chat_thread` still joinable - which terminates the whole
+    program immediately (`std::thread::~thread()`'s own destructor rule,
+    not something a `catch` can intercept after the fact). Same exact
+    crash signature as the 2026-09-24 subcon race fix (`SIGABRT` in
+    `SUBCON_WORKER_CLASS::thread_main()`, via `_Async_state_impl::_M_run`),
+    different root cause. Fixed with `error_handler_t::replace` (swap bad
+    bytes for U+FFFD instead of throwing at all) plus a try/catch as
+    defense-in-depth. Verified with 5 full natural cycles, no crash.
+  - **A genuine shutdown-ordering race, found only because the first fix
+    didn't fully stop the crashing** - reproduced deliberately by sending
+    `bye` while a subcon call was still mid-flight. `thread_stop()` flips
+    `RUN` false; if a call happens to be in flight at that exact moment,
+    the `while(RUN)` loop exits on its very next check without ever
+    getting the chance to see `is_processing` become false and join
+    `chat_thread` through the normal `input()`/`process()` polling -
+    leaving it still joinable right as `subcon_llm` goes out of scope.
+    Exact same bug class, exact same fix, as the 2026-09-22 shutdown
+    thread-join fix already applied to the main chat/background
+    tasks/sidetrack's own instance - `subcon_llm` just never got that
+    treatment, since it didn't exist yet at the time. Fixed by calling
+    `subcon_llm.request_exit()` (already existing, already proven
+    elsewhere) right before `subcon_llm` goes out of scope at the end of
+    `thread_main()`. Verified by deliberately sending `bye` mid-flight
+    four separate times - twice during PRIORITIZING, once during PLANNING,
+    once more for confidence - all clean, no new crash.

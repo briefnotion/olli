@@ -3733,3 +3733,61 @@ it can actually act under its persona's judgment, not just talk about it.
   reverted after (`git diff` confirmed the switch/timer lines are
   byte-identical to what's already pushed - only the real persistence
   feature remains).
+- **Built 2026-09-27: the prioritize stage now decides its own pacing, not
+  just which item to pick.** The user's own design, sketched out as
+  pseudocode (a `select case` over "what am I doing" - zoned out / looking
+  for something to do / thought of something / special) - translated into
+  what's actually buildable inside `thread_main()` alone, per an explicit
+  instruction to stay scoped there so nothing outside subcon could break:
+  - `SUBCON_PRIORITIZE_FORMAT` grew from `{chosen_index, reasoning}` to
+    `{should_run_now, chosen_index, reasoning, wait_minutes}` - one call now
+    answers both "is anything worth doing right now" and, either way, what
+    to do about it. All four required rather than making the unused pair
+    conditional - simpler for structured output to reliably fill in.
+  - `SUBCON_WAIT_MINUTES_MIN`/`_MAX` (1/60) hard-clamp whatever the model
+    proposes - the same lesson this project already paid for once (the
+    second-guess safety fix, `IDEAS.md`'s own "when to announce" note): AI
+    judgment about real-world timing layers on a mechanical bound, it
+    doesn't replace one.
+  - `think_cycle_timer`'s fixed 60s re-arm is gone - it's now set from the
+    model's own (clamped) `wait_minutes` when it decides to wait, or a
+    short default (still 60s) after either a completed cycle or a failure,
+    so the next ask happens soon and the model gets to decide pacing again
+    itself rather than a constant deciding it blindly.
+  - **`SUBCON_TODO_ITEM` switched from counting cycles to real elapsed
+    time** (`last_checked_unix_seconds`, `std::chrono::system_clock` not
+    `steady_clock` - the latter isn't tied to a real calendar time, wrong
+    choice for something persisted and read back after a restart) - a
+    forced follow-on, not a separate ask: "cycles" stopped being a
+    meaningful unit once cycle length itself became variable.
+    `describe_staleness()` replaces the old cycle-counting phrasing with
+    "never checked" / "checked moments ago" / "N minute(s)/hour(s) ago."
+  - **Verified live, both branches, on the `claude` profile**: one fresh
+    run picked `should_run_now: false` on its very first-ever prioritize
+    call (all 3 items still "never checked") - *"None of the tasks are
+    urgent enough to act on immediately... checking RAG collections is
+    foundational... if resources allow"* - proposed and correctly logged
+    30 minutes, no clamping needed, and (correctly) never touched
+    `todo_items.json` at all since nothing was chosen. A second fresh run
+    picked `should_run_now: true`, ran a full cycle, and correctly
+    persisted `last_checked_unix_seconds` as a real Unix timestamp -
+    finding this time was *"no unresolved issues... all queries were
+    addressed"* (contrast with the prior entry's fabricated tropical storm -
+    same toolless fabrication either way, just a different flavor of
+    invented content). Clean `bye` shutdown both runs, `crash_log.txt`
+    untouched. `SUBCON_THINK_CYCLE_ENABLED` left `true` - standing user
+    request for active testing, not reverted like the temporary timer/debug
+    changes used to verify this.
+  - **A real migration bug, caught live the same day on the `ron`
+    profile**: its `todo_items.json` predated this change (old
+    `cycles_since_checked` format) and had `"ever_checked": true` with no
+    `last_checked_unix_seconds` key at all - defaulted to `0` (the Unix
+    epoch), so `describe_staleness()` reported *"497357 hours = ~21,000
+    days"* (~56 years) instead of recognizing pre-migration data. Confirmed
+    self-correcting (the very next time that item was re-picked, its
+    timestamp was set for real and staleness read correctly as "1 minute
+    ago") but still a real wrong-data bug until each affected item happened
+    to get re-picked. Fixed in `from_json` (`SUBCON_TODO_ITEM`): `ever_
+    checked == true` with a still-zero timestamp is unambiguous leftover
+    from the old format (a real check can't have happened at the epoch) -
+    treated as never-checked instead of guessing at a backfill time.

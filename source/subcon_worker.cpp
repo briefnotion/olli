@@ -6,6 +6,7 @@
 #include <chrono>
 #include <thread>
 #include <fstream>
+#include <algorithm> // std::clamp
 
 // The digest queue's own entry (IDEAS.md's "The digest queue" section) -
 // deliberately minimal for now, just enough to give subcon's own
@@ -78,17 +79,35 @@ static void save_subcon_queue(const std::filesystem::path& path, const std::vect
 }
 
 // Structured-output schema (send()'s own response_format parameter, olla.h -
-// same mechanism sidetrack.cpp's DONE-check fix uses) for the "which of
-// these is most important" stage below - forces a clean {"chosen_index":
-// int, "reasoning": string} instead of free text to parse for an index.
+// same mechanism sidetrack.cpp's DONE-check fix uses) for the merged
+// prioritize/pace decision below (thread_main()'s own comment on why this
+// replaced a plain fixed-timer gate, 2026-09-26) - one call now decides
+// both "is anything worth doing right now" and, whichever way that goes,
+// what to do about it: should_run_now + chosen_index/reasoning if so,
+// wait_minutes if not. All four required (not making the unused pair of
+// fields conditional/optional) - simpler for the model to always fill in
+// every field than to reliably omit exactly the right two depending on a
+// sibling field's value; the unused pair is just ignored in code depending
+// on should_run_now.
 static const json SUBCON_PRIORITIZE_FORMAT = {
     {"type", "object"},
     {"properties", {
+        {"should_run_now", {{"type", "boolean"}}},
         {"chosen_index", {{"type", "integer"}}},
-        {"reasoning", {{"type", "string"}}}
+        {"reasoning", {{"type", "string"}}},
+        {"wait_minutes", {{"type", "integer"}}}
     }},
-    {"required", json::array({"chosen_index", "reasoning"})}
+    {"required", json::array({"should_run_now", "chosen_index", "reasoning", "wait_minutes"})}
 };
+
+// Hard floor/ceiling on the model's own wait_minutes proposal - the same
+// lesson this project already learned once (the second-guess safety fix,
+// IDEAS.md's own "when to announce" note): AI judgment about real-world
+// timing layers on top of a mechanical bound, it doesn't replace one
+// entirely. Without this, a proposed 0 could spin the loop tight, or a
+// proposed multi-day wait could effectively turn subcon off silently.
+constexpr int SUBCON_WAIT_MINUTES_MIN = 1;
+constexpr int SUBCON_WAIT_MINUTES_MAX = 60;
 
 // One past cycle where this item was chosen - the user's own idea (2026-
 // 09-26): keep a real history per item, not just a last-checked scalar, so
@@ -110,16 +129,20 @@ struct SUBCON_TODO_RESULT
 };
 
 // One candidate for the prioritize stage below - description plus enough
-// state to reason about staleness, not just the text alone. cycles_since_
-// checked counts completed think-cycles (see thread_main()'s own comment
-// on why cycles, not real wall-clock time), not raw ticks - only advances
-// once per full prioritize/plan cycle, on every item that wasn't the one
-// chosen that cycle.
+// state to reason about staleness, not just the text alone. Real wall-clock
+// time now (2026-09-26), not a cycle count - cycles stopped being a
+// meaningful unit once the model itself started choosing how long to wait
+// between checks (thread_main()'s own comment on the merged prioritize/
+// pace decision) - a fixed-length "cycle" no longer exists to count.
+// last_checked_unix_seconds is std::chrono::system_clock (real wall time,
+// meaningful across a restart), not steady_clock (monotonic but not tied to
+// an actual calendar time, the wrong choice for something persisted to
+// disk and read back after a restart).
 struct SUBCON_TODO_ITEM
 {
     std::string description;
-    int cycles_since_checked = 0;
-    bool ever_checked = false; // needed so "0 cycles ago" and "never" aren't confused
+    int64_t last_checked_unix_seconds = 0;
+    bool ever_checked = false; // needed so "0 seconds ago" and "never" aren't confused
     std::vector<SUBCON_TODO_RESULT> history;
 };
 
@@ -139,7 +162,7 @@ static void to_json(json& j, const SUBCON_TODO_ITEM& item)
 {
     j = json{
         {"description", item.description},
-        {"cycles_since_checked", item.cycles_since_checked},
+        {"last_checked_unix_seconds", item.last_checked_unix_seconds},
         {"ever_checked", item.ever_checked},
         {"history", item.history}
     };
@@ -148,9 +171,23 @@ static void to_json(json& j, const SUBCON_TODO_ITEM& item)
 static void from_json(const json& j, SUBCON_TODO_ITEM& item)
 {
     item.description = j.value("description", "");
-    item.cycles_since_checked = j.value("cycles_since_checked", 0);
+    item.last_checked_unix_seconds = j.value("last_checked_unix_seconds", static_cast<int64_t>(0));
     item.ever_checked = j.value("ever_checked", false);
     item.history = j.value("history", std::vector<SUBCON_TODO_RESULT>{});
+
+    // Real bug, caught live 2026-09-27 on the "ron" profile: a file
+    // persisted by the previous, cycle-counting version of this struct has
+    // "ever_checked": true but no last_checked_unix_seconds key at all
+    // (that field didn't exist yet), which defaults to 0 above - the Unix
+    // epoch. describe_staleness() then reported "497357 hours ago"
+    // (~56 years) instead of recognizing this as stale, pre-migration data.
+    // Since a real check can never have happened at the epoch, ever_checked
+    // = true with a still-zero timestamp is unambiguously old-format
+    // leftover, not a real "checked at second 0" - safe to treat as never
+    // checked (matches ever_checked's own declared purpose) rather than
+    // guessing at a real time to backfill.
+    if (item.ever_checked && item.last_checked_unix_seconds == 0)
+        item.ever_checked = false;
 }
 
 // Loads the persisted todo items from disk - falls back to seed_items (the
@@ -191,36 +228,54 @@ static void save_subcon_todo_items(const std::filesystem::path& path, const std:
     }
 }
 
-// Turns the candidate list into the actual prompt text for the "prioritize"
-// stage below - free function, not inlined, purely to keep thread_main()
-// itself readable. Includes each item's own staleness now, not just its
-// description, so the model has real recency to weigh alongside importance
-// (the user's own original "the 3rd looks important... because I hadn't
-// done it in a while" example).
-static std::string build_prioritize_prompt(const std::vector<SUBCON_TODO_ITEM>& items)
+// Real elapsed time since last_checked_unix_seconds, in the same "never
+// checked" / "very fresh" / "N minutes/hours ago" phrasing the old
+// cycle-counting version used - same reasoning for the "just now" special
+// case as that version's own "0 cycles ago" fix: an unqualified "0 minutes
+// ago" risks reading as "never" rather than "extremely recent."
+static std::string describe_staleness(const SUBCON_TODO_ITEM& item, int64_t now_unix_seconds)
+{
+    if (!item.ever_checked) return "never checked";
+
+    int64_t elapsed_seconds = now_unix_seconds - item.last_checked_unix_seconds;
+    if (elapsed_seconds < 60) return "checked moments ago - very fresh";
+
+    int64_t elapsed_minutes = elapsed_seconds / 60;
+    if (elapsed_minutes < 60)
+        return "last checked " + std::to_string(elapsed_minutes) + " minute(s) ago";
+
+    int64_t elapsed_hours = elapsed_minutes / 60;
+    return "last checked " + std::to_string(elapsed_hours) + " hour(s) ago";
+}
+
+// Turns the candidate list into the actual prompt text for the merged
+// prioritize/pace decision below - free function, not inlined, purely to
+// keep thread_main() itself readable. Includes each item's own staleness
+// now, not just its description, so the model has real recency to weigh
+// alongside importance (the user's own original "the 3rd looks important...
+// because I hadn't done it in a while" example) - and now also asks
+// whether now is even a good moment to act at all, rather than assuming
+// something must always be worth doing the moment it's asked (the user's
+// own idea, 2026-09-26/27: "if it seems not enough time has passed, figure
+// out a good sleep time, for when i should check again").
+static std::string build_prioritize_prompt(const std::vector<SUBCON_TODO_ITEM>& items, int64_t now_unix_seconds)
 {
     std::string prompt = "Here are some things you could look into right now:\n";
     for (size_t i = 0; i < items.size(); ++i)
-    {
-        // "0 cycles ago" reads ambiguously - found live 2026-09-26, the
-        // model read it as "no prior check has occurred" (confusing it
-        // with never_checked) instead of "checked most recently, very
-        // fresh." Special-cased to avoid that specific misreading.
-        std::string staleness;
-        if (!items[i].ever_checked)
-            staleness = "never checked";
-        else if (items[i].cycles_since_checked == 0)
-            staleness = "checked just last cycle - very fresh";
-        else
-            staleness = "last checked " + std::to_string(items[i].cycles_since_checked) + " cycle(s) ago";
-        prompt += std::to_string(i) + ". " + items[i].description + " (" + staleness + ")\n";
-    }
-    prompt += "Which one is most important to look into right now, and why? Weigh both "
-              "how important it is and how overdue it is - the longer it's been since "
-              "something was checked (or if it's never been checked at all), the more "
-              "it's worth prioritizing; something checked very recently is less urgent "
-              "precisely because it was just confirmed. Set chosen_index to the number "
-              "of your choice and reasoning to a brief explanation.";
+        prompt += std::to_string(i) + ". " + items[i].description + " (" + describe_staleness(items[i], now_unix_seconds) + ")\n";
+
+    prompt += "First, decide whether now is actually a good moment to look into any of "
+              "these, or whether nothing here is urgent enough yet and it'd make more "
+              "sense to check back later. Weigh both how important something is and how "
+              "overdue it is - the longer it's been since something was checked (or if "
+              "it's never been checked at all), the more it's worth prioritizing; "
+              "something checked very recently is less urgent precisely because it was "
+              "just confirmed. If nothing is worth acting on right now, set should_run_now "
+              "to false and wait_minutes to how long you'd actually wait before checking "
+              "again - a real judgment call, not a fixed number. If something is worth "
+              "doing now, set should_run_now to true, chosen_index to the number of your "
+              "choice, and wait_minutes to 0. Always set reasoning to a brief explanation "
+              "of your decision either way.";
     return prompt;
 }
 
@@ -432,7 +487,10 @@ void SUBCON_WORKER_CLASS::thread_main()
     // the seed for a fresh profile (load_subcon_todo_items() below falls
     // back to this on a missing/unparseable file) - once persisted,
     // fake_todo_items itself is loaded from disk, not rebuilt from this
-    // literal every time.
+    // literal every time. Aggregate-initialized positionally against
+    // SUBCON_TODO_ITEM's own declared order (description,
+    // last_checked_unix_seconds, ever_checked, history) - 0/false/{} is
+    // "never checked" regardless of which type last_checked_unix_seconds is.
     std::vector<SUBCON_TODO_ITEM> seed_todo_items = {
         {"Check whether the RAG collections are up to date", 0, false, {}},
         {"See if there's been any change in the weather worth mentioning", 0, false, {}},
@@ -441,10 +499,9 @@ void SUBCON_WORKER_CLASS::thread_main()
 
     // Persisted to disk now (2026-09-26) - same directory as queue.json,
     // same load/save shape. Closes a real gap: before this, a restart wiped
-    // every item's cycles_since_checked/ever_checked/history back to
-    // fresh, as if no cycle had ever run. Also the actual point of this
-    // change - the user wanted a way to see these outside of a temporary
-    // debug-log hack.
+    // every item's staleness/ever_checked/history back to fresh, as if no
+    // cycle had ever run. Also the actual point of this change - the user
+    // wanted a way to see these outside of a temporary debug-log hack.
     std::filesystem::path subcon_todo_items_path = subcon_llm.PROPS.OLLI_DIRECTORY / "todo_items.json";
     std::vector<SUBCON_TODO_ITEM> fake_todo_items = load_subcon_todo_items(subcon_todo_items_path, seed_todo_items);
 
@@ -457,7 +514,7 @@ void SUBCON_WORKER_CLASS::thread_main()
     // this thread (exchange()'s busy/presence copy, the delivery-readiness
     // check) keeps running either way - only the "start a new think-cycle"
     // gate below is affected.
-    constexpr bool SUBCON_THINK_CYCLE_ENABLED = false;
+    constexpr bool SUBCON_THINK_CYCLE_ENABLED = true;
 
     SUBCON_STAGE stage = SUBCON_STAGE::IDLE;
     int chosen_index = -1;
@@ -478,12 +535,15 @@ void SUBCON_WORKER_CLASS::thread_main()
 
             // Start a new think-cycle - same gate the old one-shot test
             // prompt used (timer ready AND the real system currently idle),
-            // plus the enable switch declared above.
+            // plus the enable switch declared above. No re-arm here anymore
+            // (2026-09-26/27) - think_cycle_timer's own next interval is now
+            // a real decision the model makes as part of this call's own
+            // result (see the completion branch below), not a fixed
+            // constant set blindly at dispatch time.
             if (SUBCON_THINK_CYCLE_ENABLED && stage == SUBCON_STAGE::IDLE && think_cycle_timer.is_ready() && main_busy_level < 10)
             {
-                think_cycle_timer.set(60000); // ms - re-arm for the next cycle
-
-                start_subcon_call(subcon_llm, subcon_comms, build_prioritize_prompt(fake_todo_items), SUBCON_PRIORITIZE_FORMAT);
+                int64_t now_unix_seconds = static_cast<int64_t>(std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()));
+                start_subcon_call(subcon_llm, subcon_comms, build_prioritize_prompt(fake_todo_items, now_unix_seconds), SUBCON_PRIORITIZE_FORMAT);
                 stage = SUBCON_STAGE::PRIORITIZING;
                 DEBUG_LOG_CLASS::instance().log_event("subcon", "think-cycle started: prioritizing");
             }
@@ -538,7 +598,11 @@ void SUBCON_WORKER_CLASS::thread_main()
             {
                 if (!subcon_llm.last_received.complete || subcon_llm.last_received.response.empty())
                 {
-                    DEBUG_LOG_CLASS::instance().log_event("subcon", "prioritize call failed or produced nothing - abandoning this cycle");
+                    // A failure isn't a real "wait" decision the model made -
+                    // just retry soon rather than either spinning tight or
+                    // going quiet indefinitely.
+                    DEBUG_LOG_CLASS::instance().log_event("subcon", "prioritize call failed or produced nothing - checking again shortly");
+                    think_cycle_timer.set(60000); // ms
                     stage = SUBCON_STAGE::IDLE;
                 }
                 else
@@ -546,23 +610,43 @@ void SUBCON_WORKER_CLASS::thread_main()
                     try
                     {
                         json parsed = json::parse(subcon_llm.last_received.response);
+                        bool should_run_now = parsed.at("should_run_now").get<bool>();
                         chosen_index = parsed.at("chosen_index").get<int>();
                         chosen_reasoning = parsed.at("reasoning").get<std::string>();
+                        int wait_minutes = parsed.at("wait_minutes").get<int>();
 
-                        if (chosen_index >= 0 && chosen_index < static_cast<int>(fake_todo_items.size()))
+                        // Qwen3's own real thinking trace (use_thinking =
+                        // true, set above) - generated either way, just not
+                        // looked at until now. Not the same as 'reasoning'
+                        // above (which is the model explicitly asked to
+                        // justify its answer after the fact) - this is its
+                        // actual step-by-step reasoning before landing on
+                        // that answer. Logged regardless of which branch
+                        // below is taken.
+                        if (!subcon_llm.last_received.thinking.empty())
+                            DEBUG_LOG_CLASS::instance().log_event("subcon", "thinking: " + subcon_llm.last_received.thinking);
+
+                        if (!should_run_now)
+                        {
+                            // The actual point of this whole change - the
+                            // model itself decides nothing's worth acting on
+                            // right now, and how long to wait, instead of a
+                            // fixed timer always finding *something* to do
+                            // every single tick. Clamped regardless of what
+                            // it proposed - SUBCON_WAIT_MINUTES_MIN/MAX's
+                            // own comment explains why a hard bound stays
+                            // even though this is otherwise the model's call.
+                            int clamped_minutes = std::clamp(wait_minutes, SUBCON_WAIT_MINUTES_MIN, SUBCON_WAIT_MINUTES_MAX);
+                            DEBUG_LOG_CLASS::instance().log_event("subcon",
+                                "staying idle - " + chosen_reasoning + " (checking again in " +
+                                std::to_string(clamped_minutes) + " minute(s), proposed " + std::to_string(wait_minutes) + ")");
+                            think_cycle_timer.set(clamped_minutes * 60000);
+                            stage = SUBCON_STAGE::IDLE;
+                        }
+                        else if (chosen_index >= 0 && chosen_index < static_cast<int>(fake_todo_items.size()))
                         {
                             DEBUG_LOG_CLASS::instance().log_event("subcon",
                                 "chose: \"" + fake_todo_items[static_cast<size_t>(chosen_index)].description + "\" - " + chosen_reasoning);
-
-                            // Qwen3's own real thinking trace (use_thinking
-                            // = true, set above) - generated either way,
-                            // just not looked at until now. Not the same as
-                            // 'reasoning' above (which is the model
-                            // explicitly asked to justify its answer after
-                            // the fact) - this is its actual step-by-step
-                            // reasoning before landing on that answer.
-                            if (!subcon_llm.last_received.thinking.empty())
-                                DEBUG_LOG_CLASS::instance().log_event("subcon", "thinking: " + subcon_llm.last_received.thinking);
 
                             // No response_format this time (plain input(),
                             // not start_subcon_call()) - but found live
@@ -582,13 +666,15 @@ void SUBCON_WORKER_CLASS::thread_main()
                         }
                         else
                         {
-                            DEBUG_LOG_CLASS::instance().log_event("subcon", "chosen_index out of range - abandoning this cycle");
+                            DEBUG_LOG_CLASS::instance().log_event("subcon", "should_run_now was true but chosen_index out of range - checking again shortly");
+                            think_cycle_timer.set(60000); // ms
                             stage = SUBCON_STAGE::IDLE;
                         }
                     }
                     catch (const std::exception& e)
                     {
                         DEBUG_LOG_CLASS::instance().log_event("subcon", std::string("prioritize reply wasn't valid structured JSON: ") + e.what());
+                        think_cycle_timer.set(60000); // ms
                         stage = SUBCON_STAGE::IDLE;
                     }
                 }
@@ -657,29 +743,31 @@ void SUBCON_WORKER_CLASS::thread_main()
                     save_subcon_queue(subcon_queue_path, tell_later_queue);
 
                     // Staleness bookkeeping (SUBCON_TODO_ITEM's own
-                    // comment) - user's own idea, 2026-09-26: every item
-                    // not chosen this cycle gets a little staler, the one
-                    // that WAS chosen resets to fresh and keeps a real
-                    // record of what happened, not just a timestamp - now a
-                    // full (reasoning, plan, finding) triple, not just the
-                    // first two.
-                    for (size_t i = 0; i < fake_todo_items.size(); ++i)
-                    {
-                        if (i == static_cast<size_t>(chosen_index))
-                        {
-                            fake_todo_items[i].cycles_since_checked = 0;
-                            fake_todo_items[i].ever_checked = true;
-                            fake_todo_items[i].history.push_back({chosen_reasoning, chosen_plan, subcon_llm.last_received.response});
-                        }
-                        else
-                        {
-                            fake_todo_items[i].cycles_since_checked++;
-                        }
-                    }
+                    // comment) - user's own idea, 2026-09-26, now tracked in
+                    // real elapsed time rather than a cycle count (2026-09-
+                    // 27): only the chosen item needs touching - its own
+                    // last_checked_unix_seconds moves to now and it keeps a
+                    // real record of what happened via history. Every other
+                    // item needs no update at all anymore - its own
+                    // staleness is just "now minus its own last_checked_
+                    // unix_seconds," computed fresh wherever it's needed
+                    // (describe_staleness()) rather than incremented by hand
+                    // every cycle.
+                    fake_todo_items[static_cast<size_t>(chosen_index)].last_checked_unix_seconds =
+                        static_cast<int64_t>(std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()));
+                    fake_todo_items[static_cast<size_t>(chosen_index)].ever_checked = true;
+                    fake_todo_items[static_cast<size_t>(chosen_index)].history.push_back({chosen_reasoning, chosen_plan, subcon_llm.last_received.response});
 
                     save_subcon_todo_items(subcon_todo_items_path, fake_todo_items);
                 }
 
+                // Whether this cycle succeeded or failed, ask again
+                // reasonably soon - the model gets to decide for itself,
+                // next time it's asked, whether anything (including
+                // whatever it just did) is worth acting on again or whether
+                // to propose a longer wait; this is just the gap until that
+                // next ask happens, not a decision about pacing itself.
+                think_cycle_timer.set(60000); // ms
                 subcon_llm.last_received.response.clear();
                 stage = SUBCON_STAGE::IDLE;
             }

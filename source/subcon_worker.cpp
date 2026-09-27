@@ -123,6 +123,74 @@ struct SUBCON_TODO_ITEM
     std::vector<SUBCON_TODO_RESULT> history;
 };
 
+static void to_json(json& j, const SUBCON_TODO_RESULT& result)
+{
+    j = json{{"reasoning", result.reasoning}, {"plan", result.plan}, {"finding", result.finding}};
+}
+
+static void from_json(const json& j, SUBCON_TODO_RESULT& result)
+{
+    result.reasoning = j.value("reasoning", "");
+    result.plan = j.value("plan", "");
+    result.finding = j.value("finding", "");
+}
+
+static void to_json(json& j, const SUBCON_TODO_ITEM& item)
+{
+    j = json{
+        {"description", item.description},
+        {"cycles_since_checked", item.cycles_since_checked},
+        {"ever_checked", item.ever_checked},
+        {"history", item.history}
+    };
+}
+
+static void from_json(const json& j, SUBCON_TODO_ITEM& item)
+{
+    item.description = j.value("description", "");
+    item.cycles_since_checked = j.value("cycles_since_checked", 0);
+    item.ever_checked = j.value("ever_checked", false);
+    item.history = j.value("history", std::vector<SUBCON_TODO_RESULT>{});
+}
+
+// Loads the persisted todo items from disk - falls back to seed_items (the
+// hardcoded fake list, thread_main()'s own declaration) on a missing file
+// (first run for this profile) or any parse trouble, rather than an empty
+// list, since an empty list would leave the reasoning loop with nothing to
+// prioritize over at all - unlike the queue above, where empty is a
+// perfectly normal starting state.
+static std::vector<SUBCON_TODO_ITEM> load_subcon_todo_items(const std::filesystem::path& path, const std::vector<SUBCON_TODO_ITEM>& seed_items)
+{
+    std::ifstream file(path);
+    if (!file) return seed_items;
+
+    try
+    {
+        json data;
+        file >> data;
+        return data.get<std::vector<SUBCON_TODO_ITEM>>();
+    }
+    catch (const std::exception&) { return seed_items; /* treat as first run */ }
+}
+
+// Same UTF-8-safety shape as save_subcon_queue() above (its own comment
+// explains why error_handler_t::replace + a try/catch, not just one or the
+// other) - reasoning/plan/finding are all live, free-form model output same
+// as a queue note's content is.
+static void save_subcon_todo_items(const std::filesystem::path& path, const std::vector<SUBCON_TODO_ITEM>& items)
+{
+    try
+    {
+        std::ofstream file(path);
+        if (!file) return;
+        file << json(items).dump(2, ' ', false, json::error_handler_t::replace);
+    }
+    catch (const std::exception& e)
+    {
+        DEBUG_LOG_CLASS::instance().log_event("subcon", std::string("failed to save todo items: ") + e.what());
+    }
+}
+
 // Turns the candidate list into the actual prompt text for the "prioritize"
 // stage below - free function, not inlined, purely to keep thread_main()
 // itself readable. Includes each item's own staleness now, not just its
@@ -360,14 +428,25 @@ void SUBCON_WORKER_CLASS::thread_main()
     // Fake data to play with (user's own explicit request) - not wired to
     // anything real yet (no presence, no real awareness sources). Purely
     // for proving the prioritize/plan reasoning loop itself works before
-    // worrying about where real candidates would come from. Descriptions
-    // only here - cycles_since_checked/ever_checked/history all start at
-    // their own defaults (SUBCON_TODO_ITEM's own declaration).
-    std::vector<SUBCON_TODO_ITEM> fake_todo_items = {
+    // worrying about where real candidates would come from. Used only as
+    // the seed for a fresh profile (load_subcon_todo_items() below falls
+    // back to this on a missing/unparseable file) - once persisted,
+    // fake_todo_items itself is loaded from disk, not rebuilt from this
+    // literal every time.
+    std::vector<SUBCON_TODO_ITEM> seed_todo_items = {
         {"Check whether the RAG collections are up to date", 0, false, {}},
         {"See if there's been any change in the weather worth mentioning", 0, false, {}},
         {"Review the last conversation for anything left unresolved", 0, false, {}}
     };
+
+    // Persisted to disk now (2026-09-26) - same directory as queue.json,
+    // same load/save shape. Closes a real gap: before this, a restart wiped
+    // every item's cycles_since_checked/ever_checked/history back to
+    // fresh, as if no cycle had ever run. Also the actual point of this
+    // change - the user wanted a way to see these outside of a temporary
+    // debug-log hack.
+    std::filesystem::path subcon_todo_items_path = subcon_llm.PROPS.OLLI_DIRECTORY / "todo_items.json";
+    std::vector<SUBCON_TODO_ITEM> fake_todo_items = load_subcon_todo_items(subcon_todo_items_path, seed_todo_items);
 
     // Off by default (2026-09-26) - the whole reasoning loop above still
     // only has fake_todo_items to work with, so leaving this on burns real
@@ -597,6 +676,8 @@ void SUBCON_WORKER_CLASS::thread_main()
                             fake_todo_items[i].cycles_since_checked++;
                         }
                     }
+
+                    save_subcon_todo_items(subcon_todo_items_path, fake_todo_items);
                 }
 
                 subcon_llm.last_received.response.clear();

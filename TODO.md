@@ -3706,3 +3706,30 @@ it can actually act under its persona's judgment, not just talk about it.
   `exchange()`'s own busy/presence copy and the delivery-readiness check
   both keep running regardless, since neither costs anything or does
   anything unwanted on their own. Flip to `true` for testing.
+- **Built 2026-09-26 (continued): `SUBCON_TODO_ITEM`s (the reasoning loop's
+  own candidate list, staleness bookkeeping, and per-item `history`) are
+  now persisted to `subcon/todo_items.json`**, same directory and load/save
+  shape as the digest queue's own `queue.json` (`load_subcon_todo_items()`/
+  `save_subcon_todo_items()`, same UTF-8-safe `error_handler_t::replace`
+  precaution as `save_subcon_queue()` already needed - `reasoning`/`plan`/
+  `finding` are all live model text). The user's actual ask was simpler -
+  "I need a way to see the SUBCON_TODO_ITEMs" - this both answers it (just
+  read the file, no temp debug hack needed) and closes a real gap flagged
+  earlier the same day: previously a restart reset every item's staleness/
+  history back to fresh, as if no cycle had ever run. The hardcoded 3-item
+  list is now only a *seed* (`load_subcon_todo_items()` falls back to it on
+  a missing/unparseable file, i.e. a fresh profile) - once a file exists,
+  it's the source of truth, not the literal in `thread_main()`.
+  **Verified live, both directions**: fresh run seeded correctly and wrote
+  a real cycle's result to disk (also caught a fresh live instance of the
+  already-documented "reasoning disagrees with chosen_index" quirk - the
+  stored `reasoning` argued for a different item than the one it was filed
+  under, same class as before, not a new bug); a full restart correctly
+  loaded the prior state back in and continued from it - the untouched
+  item's history stayed put, and both un-chosen items' `cycles_since_
+  checked` kept incrementing (0→1, 1→2) rather than resetting. Clean `bye`
+  shutdown both times, `crash_log.txt` untouched. Test method: same
+  temporarily-flipped-switch + shrunk-timer approach as prior entries,
+  reverted after (`git diff` confirmed the switch/timer lines are
+  byte-identical to what's already pushed - only the real persistence
+  feature remains).

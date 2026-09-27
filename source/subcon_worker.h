@@ -74,11 +74,22 @@ class SUBCON_WORKER_CLASS
         // over by exchange() below each tick, same reasoning/shape as
         // main_busy_level just above - a plain copy, not the whole
         // USER_IDENTITY, since presence is the only field of it that
-        // changes live right now. Not read by thread_main() for anything
-        // yet - nothing writes a real value into comms.user.presence yet
-        // either (that's still open, see TODO.md/IDEAS.md) - this is just
-        // the copy existing, ready for when there's something to gate on.
+        // changes live right now. Read by thread_main()'s own delivery-
+        // readiness gate (presence == "near" && main_busy_level < 10).
         std::string user_presence = "unknown";
+
+        // Set by thread_main()'s own ANNOUNCING stage when a queued note is
+        // ready to actually be said, drained by exchange() below (empty
+        // after a successful drain). Deliberately a plain string, not a
+        // COMMS field - see this class's own 2026-09-27 design note: a
+        // remote tool's own pre-authored action (clock.cpp's on_expire_tool)
+        // never touches a COMMS field either, it travels as its own
+        // separate queue entry and gets executed directly - the same
+        // "carry it as plain data, hand it to the real chat directly"
+        // shape, not something staged through a shared/contested buffer
+        // field that the live conversation could be writing to at the same
+        // moment.
+        std::string pending_announcement;
 
         // Runs on the background thread - only ever invoked internally,
         // via thread_start()'s own lambda (same access rights as any
@@ -99,7 +110,18 @@ class SUBCON_WORKER_CLASS
         // background thread; if the attempt fails, main_busy_level just
         // keeps last tick's value and this tries again next time, same as
         // leaving it alone would anyway.
-        void exchange(COMMS& comms);
+        //
+        // Returns whatever pending_announcement holds (empty = nothing to
+        // say), draining it in the same call - 2026-09-27, the first time
+        // this class hands anything back out. The caller (main.cpp) is
+        // responsible for actually doing something with a non-empty
+        // result (calling chat.integrate_tool_result()) - this function
+        // only carries the text across the thread boundary, it has no
+        // access to the real chat instance itself to narrate it directly.
+        // On a missed lock (contention), returns empty and tries again
+        // next tick, same as the busy/presence copy - a missed drain just
+        // means the announcement waits one more tick, not lost.
+        std::string exchange(COMMS& comms);
 
         // Set by main.cpp, once, before thread_start() - a one-way copy of
         // chat's own PROPS (same model/host/port, so the subconscious is

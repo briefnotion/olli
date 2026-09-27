@@ -436,11 +436,18 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
             // chat.comms.
             io_worker.exchange(comms, &tool_worker);
 
-            // One-way snapshot only (subcon_worker.h's own comment on
-            // exchange()) - gives subcon_worker's own thread something
-            // current to read (e.g. COMMS::busy_count()) without it ever
-            // touching the real comms directly from its own thread.
-            subcon_worker.exchange(comms);
+            // No longer strictly one-way (2026-09-27) - still gives
+            // subcon_worker's own thread something current to read (e.g.
+            // COMMS::busy_count()), but now also carries back whatever
+            // subcon has decided is worth actually saying (subcon_worker.h's
+            // own comment on exchange()/pending_announcement for why this
+            // travels as plain text, not a COMMS field). Empty in the
+            // overwhelmingly common case - only main.cpp can act on a
+            // non-empty result, since exchange() itself has no access to
+            // chat to narrate it directly.
+            std::string subcon_announcement = subcon_worker.exchange(comms);
+            if (!subcon_announcement.empty())
+                chat.integrate_tool_result(&tool_worker, comms, "", subcon_announcement);
 
             // Ctrl+C - see COMMS::EXIT_REQUESTED's comment (comms.h) for
             // why this needs its own handling instead of a real SIGINT.

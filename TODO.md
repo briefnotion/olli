@@ -3791,3 +3791,97 @@ it can actually act under its persona's judgment, not just talk about it.
     checked == true` with a still-zero timestamp is unambiguous leftover
     from the old format (a real check can't have happened at the epoch) -
     treated as never-checked instead of guessing at a backfill time.
+- **Built 2026-09-27: subcon gets its first real tool, `TOOL_WEB_SEARCH`.**
+  First step off "test of futility" fabrication toward findings grounded in
+  something real. Deliberately just this one, not all 4 built-ins
+  (`populate_default_tools()`, `olla.cpp`) - `TOOL_TASK_RUNNER` can execute
+  arbitrary `.task` automations (real actions) and `TOOL_DELEGATOR` spawns
+  sub-conversations, neither fits the "deliberately passive toolset"
+  principle (`IDEAS.md`); `TOOL_WEB_SEARCH` is read-only real-world lookup,
+  exactly what that principle allows. Fully self-contained to `thread_
+  main()` - no other files touched - since it's a direct `curl` call, not a
+  remote tool, so it needs no `tool_worker` access at all (confirmed by
+  reading `TOOL_WEB_SEARCH::check()`'s own signature: its `CLASS_SYSTEM*`
+  parameter is unnamed, never touched, safe with the `nullptr` subcon
+  already passes everywhere). `OLLAMA_OPENING`'s persona text updated to
+  match - was "You have no tools yet," now describes the real (still
+  narrow: lookup-only, no real-world action) capability.
+  Real RAG access was explicitly *not* pursued the same way, and this is
+  worth remembering: `rag_search` etc. are a remote tool (a separate
+  `rag_tool` process via `tool_worker`'s shared socket), not a built-in -
+  giving subcon that would need an actual `TOOL_WORKER_CLASS*`, which can't
+  come from inside `thread_main()` alone (a new member on `SUBCON_WORKER_
+  CLASS`, set once by `main.cpp`, same shape `PROPS` already uses) - a
+  small, explicitly-flagged exception to "stay in `thread_main()`," not
+  taken today.
+  **Verified live across 4 cycles** (`review last conversation` picked
+  twice, `RAG collections` twice, `weather` never came up) - no crash
+  either way, confirming the tool coexists safely with subcon's `nullptr`-
+  system/`nullptr`-tool_worker pattern. It never actually called
+  `web_search` in any of the 4 - unsurprising, since nothing in the PLAN/
+  RESULT prompts invites tool use, only one line in `OLLAMA_OPENING` even
+  mentions it exists. Left as "available, not explicitly prompted" on
+  purpose, matching the user's own read: the main chat already reaches for
+  `web_search` reliably with no such nudge, so the same underlying model
+  should behave the same way here once it lands on a genuinely searchable
+  topic (deferred watching for that rather than forcing it via a prompt
+  addition).
+- **Built 2026-09-27: subcon can now actually say something to the real
+  user - the first real delivery, not just a `delivered=true` flag.** The
+  user's own design: `exchange()` carries the message out (like `IO_WORKER_
+  CLASS`'s own relay), but as plain text, not a COMMS field - reusing
+  `INPUT_FROM_LLM` as a staging buffer was considered and rejected live,
+  once the user pointed out it'd collide with the real chat's own live
+  generation writing to that same field at the same moment. The actual
+  precedent followed instead was traced from `clock.cpp`'s own
+  `on_expire_tool`: a pre-authored action never touches a COMMS field
+  either - it travels as its own queue entry and gets executed directly.
+  - `SUBCON_WORKER_CLASS::exchange()` signature changed from `void` to
+    `std::string` - still copies busy/presence in, and now also drains a
+    new `pending_announcement` member (set by subcon's own thread,
+    cleared once handed out - a missed drain from lock contention just
+    waits one more tick, same as everything else `exchange()` copies).
+  - New `SUBCON_STAGE::ANNOUNCING` - the user's own "special" case from
+    their pseudocode sketch. Unlike the other three stages, no `subcon_llm`
+    call at all - the text was already decided by an earlier cycle; this
+    stage just stages the chosen `SUBCON_NOTE`'s content into `pending_
+    announcement`, marks it delivered, saves the queue, and returns to
+    `IDLE`, all synchronously in the same tick. The delivery-readiness
+    check (presence near + idle + `stage == IDLE` + nothing already
+    staged) now transitions into this stage instead of flipping `delivered`
+    inline - deliberately does NOT interrupt an in-flight PRIORITIZING/
+    PLANNING/RESULTING call, even though the user's own pseudocode's
+    "special" case describes interrupting - presence/idle timing isn't
+    urgent the way a real alert would be, so a genuine mid-call interrupt
+    stays explicit future scope, not folded in here.
+  - `main.cpp` - the one unavoidable piece outside `subcon_worker.cpp`:
+    `exchange()` itself has no access to the real `chat` instance, so it
+    can carry the text across the thread boundary but can't narrate it.
+    `main.cpp` now checks `exchange()`'s return value and calls `chat.
+    integrate_tool_result(&tool_worker, comms, "", subcon_announcement)` -
+    the exact same "narrate this unsolicited text in persona" mechanism a
+    remote-tool event already uses.
+  - **Verified live end-to-end, real narration confirmed**: staged a real
+    queued note, watched it drain through `exchange()`, land in `main.cpp`,
+    produce a real `[DIRECTOR_NOTE]` on the actual `chat` instance, and get
+    spoken as a genuine assistant turn - *"The system reviewed the last
+    conversation and prioritized unresolved issues because options 0 and 1
+    are overdue..."* - subcon's first real words to the user, ever. Queue
+    note confirmed `delivered: true` on disk afterward. Clean `bye`
+    shutdown, `crash_log.txt` untouched.
+  - **A real, if expected, UX problem surfaced immediately on `ron`**: a
+    large backlog (141 notes accumulated across the whole day's testing)
+    started draining at the 30s delivery-check cadence, producing rapid,
+    visibly repetitive announcements - not a bug, just a fixed-length
+    backlog meeting a fixed-interval drain rate for the first time. Left
+    running deliberately rather than intervened on. Also surfaced, precisely
+    named by the user mid-observation: most of the actual content is
+    hollow ("no unresolved issues," "RAG collections are up-to-date," "no
+    significant weather changes") rather than either wildly fabricated or
+    genuinely informative - the mechanism (notice → decide → announce)
+    works end to end, there's just nothing real yet for it to have
+    genuinely noticed. Same root cause as the "test of futility" finding,
+    a new symptom of it: confident emptiness, not just confident
+    fabrication. Underscores the same conclusion as before - real content
+    sources are the actual next thing this needs, not more delivery
+    plumbing.

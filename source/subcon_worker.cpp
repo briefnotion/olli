@@ -323,7 +323,15 @@ static void start_subcon_call(ollama_system& instance, COMMS& comms, const std::
 // the user's own call: keeps "how would you do it" and "what did you find"
 // as two distinct, separately-visible things in history, not one blended
 // answer.
-enum class SUBCON_STAGE { IDLE, PRIORITIZING, PLANNING, RESULTING };
+//
+// ANNOUNCING added 2026-09-27 - the user's own "special" case from a
+// pseudocode sketch of this whole state machine (something happened, need
+// to communicate a big thought to the upper system, then clean up). Unlike
+// the other three, it involves no subcon_llm call at all - the text to say
+// was already decided (whichever SUBCON_NOTE the delivery-readiness check
+// picked), this stage just stages it into pending_announcement for
+// exchange() to carry out and immediately resolves, same tick.
+enum class SUBCON_STAGE { IDLE, PRIORITIZING, PLANNING, RESULTING, ANNOUNCING };
 
 void SUBCON_WORKER_CLASS::thread_start()
 {
@@ -337,22 +345,29 @@ void SUBCON_WORKER_CLASS::thread_stop()
     THREAD_CONTROL.wait_for_thread_to_finish();
 }
 
-void SUBCON_WORKER_CLASS::exchange(COMMS& comms)
+std::string SUBCON_WORKER_CLASS::exchange(COMMS& comms)
 {
     // try_lock, not a blocking lock_guard - see this class's own header
     // comment for why: a missed copy here is harmless (main_busy_level
     // just keeps last tick's value, refreshed again next tick), so the
     // main thread should never wait on subcon's own background thread for
     // this. If thread_main() happens to hold comms_mutex right now, just
-    // skip this tick's copy entirely rather than stalling.
+    // skip this tick's copy entirely rather than stalling - an
+    // undrained pending_announcement just waits one more tick too.
     std::unique_lock<std::mutex> lock(comms_mutex, std::try_to_lock);
-    if (!lock.owns_lock()) return;
+    if (!lock.owns_lock()) return "";
 
     // Just the busy level and presence for now, not the whole comms -
     // comms_buffer stays unused/stale until subcon actually needs more than
     // this (subcon_worker.h's own comment on both members).
     main_busy_level = comms.busy_count();
     user_presence = comms.user.presence;
+
+    // Drain, not peek - once handed out, this copy's job is done. Empty
+    // string (the common case) means nothing to announce this tick.
+    std::string announcement = pending_announcement;
+    pending_announcement.clear();
+    return announcement;
 }
 
 void SUBCON_WORKER_CLASS::thread_main()
@@ -406,13 +421,20 @@ void SUBCON_WORKER_CLASS::thread_main()
     subcon_llm.PROPS.stream_output = false;
     subcon_llm.PROPS.stream_thinking = false;
 
-    // Empty on purpose - subcon has no tools yet (deliberately passive for
-    // now, IDEAS.md's own "subconscious" section). Local, not a class
-    // member, same reasoning as subcon_llm above: self-contained to this
-    // thread, nothing outside thread_main() needs to reach in. open()'s
-    // only use of it is looping tool->configure(*this) per entry - a no-op
-    // on empty.
+    // First real tool (2026-09-27) - was empty/deliberately passive
+    // (IDEAS.md's own "subconscious" section, "deliberately passive
+    // toolset" principle). TOOL_WEB_SEARCH specifically, not TOOL_TASK_
+    // RUNNER/TOOL_DELEGATOR (olla.cpp's own populate_default_tools() has
+    // all 4 real built-ins) - it's read-only real-world lookup, exactly the
+    // kind of thing that principle is fine with; task runner can execute
+    // arbitrary .task automations (real actions) and delegator spawns
+    // sub-conversations, neither of which belongs here. Needs no tool_
+    // worker access at all - it's a direct curl call, same as the main
+    // chat's own copy, not a remote tool - so this stays fully self-
+    // contained to this thread, same as everything else declared here.
+    // Local, not a class member, same reasoning as subcon_llm above.
     std::vector<std::unique_ptr<TOOL_BASE>> subcon_tools_list;
+    subcon_tools_list.push_back(std::make_unique<TOOL_WEB_SEARCH>());
 
     // Own persona, not the default (which is written for a general
     // assistant with tool guidance and was leaking through - visible in an
@@ -427,10 +449,12 @@ void SUBCON_WORKER_CLASS::thread_main()
     subcon_llm.OLLAMA_OPENING =
         "You are Olli's subconscious: a background reasoning process, "
         "separate from the main conversation the user is having with Olli. "
-        "You have no tools yet - you can only think, not act. When given a "
-        "list of things to consider, pick the one that matters most right "
-        "now and explain why; when asked to plan, describe the concrete "
-        "steps briefly and plainly.";
+        "You can look things up (web search) but you cannot take any "
+        "real-world action - no controlling devices, no sending anything, "
+        "nothing that changes the outside world. When given a list of "
+        "things to consider, pick the one that matters most right now and "
+        "explain why; when asked to plan, describe the concrete steps "
+        "briefly and plainly.";
 
     // One-arg overload, not the (tools_list, Properties) one - that one
     // does PROPS = Properties first thing (olla.cpp), which would stomp the
@@ -520,6 +544,7 @@ void SUBCON_WORKER_CLASS::thread_main()
     int chosen_index = -1;
     std::string chosen_reasoning; // carries PRIORITIZING's own reasoning through to RESULTING's completion, for the queue entry/history built there
     std::string chosen_plan;      // carries PLANNING's own plan through to RESULTING's completion, same reasoning
+    int announcing_note_index = -1; // which tell_later_queue entry ANNOUNCING is currently staging, set by the delivery-readiness check below
 
     RUN = true;
     while (RUN)
@@ -548,40 +573,56 @@ void SUBCON_WORKER_CLASS::thread_main()
                 DEBUG_LOG_CLASS::instance().log_event("subcon", "think-cycle started: prioritizing");
             }
 
-            // Delivery-readiness check - independent of stage above (a
-            // previously-queued note can become ready to surface while a
-            // new reasoning cycle is or isn't running). "near" matches
-            // presence.cpp's own vocabulary (profile.is_near) - see
+            // Delivery-readiness check - independent of the reasoning-cycle
+            // stages (a previously-queued note can become ready to surface
+            // while a new reasoning cycle is or isn't running), but only
+            // actually acts when stage == IDLE and nothing's already
+            // staged - doesn't interrupt an in-flight PRIORITIZING/PLANNING/
+            // RESULTING call (the user's own pseudocode's "special" case
+            // does say "interrupt whatever was going on" for something
+            // urgent, but presence/idle timing isn't that - a genuine
+            // interrupt-mid-call is real future scope, not this). "near"
+            // matches presence.cpp's own vocabulary (profile.is_near) - see
             // comms.h/olla.cpp's own PART 5 for where this value actually
-            // comes from. Marks at most one note per firing (the oldest
+            // comes from. Picks at most one note per firing (the oldest
             // undelivered one), not the whole backlog at once - a cheap way
             // to get "one thing at a time" (IDEAS.md's own digest-queue
             // section) without new pacing machinery, given this timer only
             // fires once per delivery_check_timer.set() interval above.
-            //
-            // Still just marking delivered=true here, not actually saying
-            // anything to the user - there's no real narration channel from
-            // this thread into the main chat's own conversation yet (that's
-            // separate, bigger wiring - subcon has no access to the real
-            // comms at all beyond this one busy/presence copy). This proves
-            // the readiness-gating logic itself before that gets built.
             if (delivery_check_timer.is_ready())
             {
                 delivery_check_timer.set(30000); // ms - re-arm for the next check
 
-                if (user_presence == "near" && main_busy_level < 10)
+                if (stage == SUBCON_STAGE::IDLE && pending_announcement.empty() &&
+                    user_presence == "near" && main_busy_level < 10)
                 {
-                    for (auto& note : tell_later_queue)
+                    for (size_t i = 0; i < tell_later_queue.size(); ++i)
                     {
-                        if (note.delivered) continue;
+                        if (tell_later_queue[i].delivered) continue;
 
-                        note.delivered = true;
-                        save_subcon_queue(subcon_queue_path, tell_later_queue);
-                        DEBUG_LOG_CLASS::instance().log_event("subcon",
-                            "delivery-ready (presence near, idle): \"" + note.content + "\"");
+                        announcing_note_index = static_cast<int>(i);
+                        stage = SUBCON_STAGE::ANNOUNCING;
                         break;
                     }
                 }
+            }
+
+            // ANNOUNCING itself - synchronous, no subcon_llm call, resolves
+            // in the same tick it's entered. Stages the note's own content
+            // into pending_announcement for exchange() to carry out to
+            // main.cpp (subcon_worker.h's own comment on why this is a
+            // plain string, not a COMMS field), marks it delivered, and
+            // "cleans up" (the user's own pseudocode wording) by clearing
+            // announcing_note_index and returning to IDLE.
+            if (stage == SUBCON_STAGE::ANNOUNCING)
+            {
+                pending_announcement = tell_later_queue[static_cast<size_t>(announcing_note_index)].content;
+                tell_later_queue[static_cast<size_t>(announcing_note_index)].delivered = true;
+                save_subcon_queue(subcon_queue_path, tell_later_queue);
+                DEBUG_LOG_CLASS::instance().log_event("subcon", "announcing: \"" + pending_announcement + "\"");
+
+                announcing_note_index = -1;
+                stage = SUBCON_STAGE::IDLE;
             }
 
             // Drives whatever's currently in flight, if anything - same

@@ -46,6 +46,37 @@ per tick, on its own thread: it watches `TextToSpeech::isSpeaking()` and
 its own - folded into `IO_WORKER_CLASS`'s existing ~20ms tick instead, since
 nothing about it needs its own thread).
 
+Text isn't handed to `espeak-ng` raw. `display_with_tts()` runs each chunk
+of streamed LLM output through `tts_filter()` (`stringthings.cpp`) first,
+which turns markdown into something that sounds right instead of being read
+symbol by symbol:
+
+| LLM writes | Spoken as |
+|---|---|
+| `**bold**` / `__bold__` | higher pitch, slightly slower (`<prosody>`) |
+| `*italic*` / `_italic_` | espeak-ng's milder `<emphasis>` |
+| `## Heading` | the heading text, then a 500ms pause |
+| blank line between paragraphs | a 300ms pause |
+| `[text](url)` | just the link text |
+| `https://www.example.com/path` | just the site name, "example.com" |
+| ```` ``` ```` code block | "code block" |
+| table | cells separated by pauses, separator rows dropped |
+| emoji | dropped |
+| `snake_case` | "snake case" |
+
+`espeak-ng` runs with `-m` (SSML input) for the emphasis/pause tags, so
+`tts_filter()` also escapes any literal `&`, `<`, `>`. Anything passed to
+`TextToSpeech` must go through `tts_filter()` first. The pitch/rate/pause
+values are named constants (`kTtsBoldOpen` etc.) at the top of the TTS
+section in `stringthings.cpp`.
+
+Because speech is streamed in chunks, a link or code block can arrive split
+across two of them. `tts_hold_point()` finds an unfinished construct at the
+end of `tts_pending` (open ```` ``` ````, unclosed `**`, half-arrived
+`[text](url`, a URL still arriving, a heading line with no newline yet) and
+`display_with_tts()` holds that tail back until it completes - or until
+nothing new has arrived for 1.5s, so a stray `[` can never stall speech.
+
 ### The settings folder (`~/olli_files/`)
 
 Created automatically on first run, and used for persistence rather than

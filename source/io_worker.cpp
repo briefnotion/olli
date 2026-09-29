@@ -4,6 +4,7 @@
 #include <thread>
 
 #include "olla.h"
+#include "stringthings.h"
 #include "tool_worker.h"
 
 #include <fcntl.h>
@@ -104,7 +105,10 @@ bool TextToSpeech::synthesize(const std::string& text, const std::string& wavPat
         close(pipefd[0]);
         close(pipefd[1]);
         redirectStdoutStderrToDevNull();
+        // -m: input is SSML (tts_filter()'s output uses <prosody>/
+        // <emphasis>/<break> tags and escapes literal &, <, >).
         execlp("espeak-ng", "espeak-ng",
+               "-m",
                "-v", voice_.c_str(),
                "-s", std::to_string(speed_).c_str(),
                "-w", wavPath.c_str(),
@@ -776,6 +780,8 @@ void IO_WORKER_CLASS::create(const std::filesystem::path& audio_shared_path)
 
 void IO_WORKER_CLASS::speak(const std::string& text)
 {
+    // text must already be SSML-safe (espeak-ng runs with -m) - pass it
+    // through tts_filter() first if it could contain &, <, or >.
     if (tts) tts->speakAsync(text);
 }
 
@@ -873,19 +879,44 @@ void IO_WORKER_CLASS::display_with_tts(COMMS& comms_tty_stt)
     // every tick (see thread_main()'s own comment, step 5/9), so anything
     // not yet spoken has to live in tts_pending instead, surviving across
     // ticks independent of comms_tty_stt's own lifetime.
-    tts_pending += comms_tty_stt.INPUT_FROM_LLM.drain();
+    std::string incoming = comms_tty_stt.INPUT_FROM_LLM.drain();
+    if (!incoming.empty())
+    {
+        tts_pending += incoming;
+        tts_pending_last_added = std::chrono::steady_clock::now();
+    }
 
     // Speak once idle, chunking into "whatever arrived since it last went
     // idle" instead of one call per streamed token, without needing a
     // punctuation/length heuristic.
     if (!tts->isSpeaking() && !tts_pending.empty())
     {
+        // Hold back an unfinished markdown construct at the end (open ```
+        // fence, half-arrived [link](url), URL still streaming) so
+        // tts_filter() sees it whole instead of split across two chunks.
+        // Once nothing new has arrived for a while, give up waiting and
+        // send it as-is, so a stray "[" or unclosed fence can't stall
+        // speech forever.
+        size_t hold = tts_hold_point(tts_pending);
+        if (hold != std::string::npos &&
+            std::chrono::steady_clock::now() - tts_pending_last_added >= std::chrono::milliseconds(1500))
+        {
+            hold = std::string::npos;
+        }
+        std::string ready = tts_pending.substr(0, hold);
+
         // Drained either way so disabled speech doesn't just pile up and
         // dump out once re-enabled - ENABLE_TTS_OUTPUT (copied through
         // comms_buffer -> comms_tty_stt same as every other field) only
-        // gates whether it's actually spoken.
-        if (comms_tty_stt.ENABLE_TTS_OUTPUT) tts->speakAsync(tts_pending);
-        tts_pending.clear();
+        // gates whether it's actually spoken. tts_filter() strips markdown
+        // (**bold**, `code`, # headings, links, URLs, tables, emoji) so
+        // espeak-ng doesn't read the symbols aloud - this call was lost
+        // when AUDIO_CONTROL_CLASS was folded into this class.
+        if (!ready.empty())
+        {
+            if (comms_tty_stt.ENABLE_TTS_OUTPUT) tts->speakAsync(tts_filter(ready));
+            tts_pending.erase(0, ready.size());
+        }
     }
 }
 

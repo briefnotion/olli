@@ -132,6 +132,20 @@ class SUBCON_WORKER_CLASS
         // that function's own comments for why).
         OLLAMA_SYSTEM_PROPERTIES PROPS;
 
+        // Set by main.cpp, once, before thread_start() - same pattern as
+        // PROPS just above (written before the background thread even
+        // exists, never touched again afterward, so no locking needed to
+        // read it safely from thread_main()). 2026-09-27: gives subcon full
+        // tool access (the same tool_worker the real chat shares), the
+        // user's own explicit choice over a curated/read-only subset - see
+        // TODO.md's own entry for the reasoning. subcon_llm.drains_events
+        // is set false in thread_main() specifically so this sharing stays
+        // safe (olla.h's own comment on that flag) - full access to
+        // dispatch/receive calls, structurally excluded from the one part
+        // of tool_worker sharing (ambient events) that's still unsafe for
+        // multiple consumers.
+        TOOL_WORKER_CLASS* tool_worker = nullptr;
+
         void thread_start();
         void thread_stop();
 };

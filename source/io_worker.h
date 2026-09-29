@@ -2,6 +2,7 @@
 #define IO_WORKER_H
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <filesystem>
@@ -352,6 +353,9 @@ class IO_WORKER_CLASS
         // independent of comms_stt_tts's own lifetime. See
         // display_with_tts()'s own comment.
         std::string tts_pending;
+        // When tts_pending last grew - display_with_tts() stops holding
+        // back an unfinished markdown construct once this goes stale.
+        std::chrono::steady_clock::time_point tts_pending_last_added;
 
         // The web channel's own copy - same round-trip shape as
         // comms_keyboard/comms_stt_tts above, see comms_buffer's own

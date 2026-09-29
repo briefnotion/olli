@@ -2719,6 +2719,42 @@ it can actually act under its persona's judgment, not just talk about it.
     fixes the burst regardless of which subsystem is actually slow to
     drain.
 
+- **TTS markdown filtering + emphasis (2026-09-29) - built, NOT yet
+  live-tested by ear.** olli was reading `**thingymabob**` aloud as
+  "asterisk asterisk...". Root cause: `tts_filter()` (`stringthings.cpp`)
+  already existed but its only call was dropped in b6f456a when
+  `AUDIO_CONTROL_CLASS` was folded into `IO_WORKER_CLASS` - restored in
+  `display_with_tts()`. Extended it to handle links, bare URLs (site name
+  only), tables, emoji, code blocks ("code block"), and `_` -> space
+  instead of erased. Added SSML emphasis/pauses (`espeak-ng -m`): bold ->
+  `<prosody pitch="+15%" rate="90%">`, italics -> `<emphasis>`, headings ->
+  500ms break, paragraphs -> 300ms break; literal `&<>` escaped. New
+  `tts_hold_point()` holds back an unfinished construct at the end of a
+  streamed chunk (1.5s timeout fallback). See README "How it works" for
+  the full table. Verified: builds clean, filter unit-tested on sample
+  strings, espeak-ng accepts the SSML without speaking the tags (phoneme
+  output identical to plain text). **To test live:** ask for a reply with
+  bold words, a link, a list, and a heading; check bold isn't too strong
+  or too subtle (tune `kTtsBoldOpen`), and that nothing gets stuck or
+  delayed at the end of a reply.
+  - Known, accepted: every `|` becomes a comma even outside tables;
+    espeak-ng is silent on `<`/`>` ("x < 5" is heard as "x 5") -
+    pre-existing espeak behavior, could map to "less than"/"greater than"
+    if wanted.
+- **TTS issues noticed while reading the code (2026-09-29), not fixed -
+  the user deferred these, unverified, from reading only:**
+  - An interrupt ("stop talking") calls `stop_speaking()` but never
+    clears `tts_pending` - the same tick's `display_with_tts()` sees TTS
+    idle and speaks the backlog anyway.
+  - `TextToSpeech::speak()` resets `stopRequested_ = false` on entry, so a
+    `stop()` landing between the worker popping an item and `speak()`
+    taking its lock is lost and that item plays in full.
+  - First chunk of a reply is often just a token or two (TTS is idle, so
+    it's sent right away), then a pause while the rest accumulates.
+  - Voca resumes the instant aplay exits - no echo-tail guard like
+    `kBeepMuteGuardSec` for beeps - and `speaking_` briefly drops false
+    between queued chunks, which could flap Voca pause/resume.
+
 ## Remote access
 
 - **Done 2026-09-10: a browser-driven web interface**, alongside (not
@@ -3885,3 +3921,114 @@ it can actually act under its persona's judgment, not just talk about it.
     fabrication. Underscores the same conclusion as before - real content
     sources are the actual next thing this needs, not more delivery
     plumbing.
+- **Built 2026-09-29: subcon has full tool access now, not a curated
+  subset - the user's own explicit, informed choice.** Considered a
+  read-only curated allowlist first (a middle ground between zero tools
+  and full parity), but ruled out once it became clear remote tools don't
+  work like built-ins do: there's no per-instance list to curate, just one
+  shared, dynamically-updating registry `tool_worker` maintains - "read
+  access to RAG" would mean "read access to everything currently
+  connected, including `set_hue_light`" unless real filtering logic got
+  built, which is genuinely nontrivial. Full access reuses everything
+  as-is; the safety property moves from "structurally cannot act" to
+  "the prompt says not to" - a real, deliberate departure from the
+  original "deliberately passive toolset" principle (`IDEAS.md`), accepted
+  specifically because subcon's own prompts are always developer-authored
+  and narrow, never reacting to open-ended real user conversation the way
+  the second-guess routine that principle was originally reacting to does.
+  - `subcon_tools_list` now built via `populate_default_tools()`
+    (`olla.cpp`), the same 4 built-ins `chat`/`sidetrack` get, not a
+    hand-picked subset.
+  - New `SUBCON_WORKER_CLASS::tool_worker` (a `TOOL_WORKER_CLASS*`), set
+    once by `main.cpp` before `thread_start()` - identical pattern to
+    `PROPS`, safe with no locking since it's written before the background
+    thread exists and never touched again. `thread_main()`'s own
+    `input()`/`process()` calls now pass it instead of `nullptr`.
+  - **New `ollama_system::drains_events` flag (`olla.h`/`.cpp`) - the one
+    genuinely new safety mechanism this required.** Ordinary calls/results
+    are already safe to share (id-based claiming, live-verified back on
+    2026-09-22), but ambient `TOOL_EVENT`s (a timer firing, presence
+    changing) have no `call_id` at all and are drained blindly by
+    whichever instance's `process()` tick runs next - sharing `tool_worker`
+    naively would put subcon in that same blind competition, risking
+    silently absorbing a real event meant for the actual user. `drains_
+    events` (default `true`, set `false` only for `subcon_llm`) gates just
+    the event-draining loop in `process()`'s PART 5, leaving the
+    result-claiming loop right above it untouched.
+  - **Verified live, the critical safety property specifically**: fired 3
+    synthetic presence events at a running instance with subcon's full
+    tool access wired in - all 3 landed exclusively under `chat`'s own
+    narration, zero absorbed by subcon. Also stress-tested with ~20 forced
+    reasoning cycles in a row (see the force-run entry below) with zero
+    crashes.
+  - `OLLAMA_OPENING` rewritten to match: was "you have no tools yet," now
+    explicitly instructed to never actually use action-capable tools
+    (device control, automations) despite technically having them,
+    matching the accepted prompt-reliant tradeoff above.
+- **Refreshed 2026-09-29: the 3 fake topics became 5, chosen so each one
+  has something real subcon can now actually check**, not just
+  plausible-sounding fake ones. "Check whether the RAG collections are up
+  to date" dropped entirely (the user's own call: "it never failed" - no
+  topic ever produced a real, discriminating answer). Replaced/added:
+  lights left on (`list_hue_lights`), weather (`web_search`), last
+  conversation (`rag_search` against the real, already-auto-synced
+  `conversations` collection - a genuine correction mid-session, this
+  turned out to already exist, not a dead end as first assumed), personal
+  notes for anything time-sensitive (`rag_search` against the real
+  `Notes` collection - closest of all five to the original subconscious
+  brainstorm's own seed scenario), and running timers (`list_timers`/
+  `check_timer`).
+- **Real finding, not yet resolved: across every topic and every tool
+  category now available, subcon has never once actually issued a real
+  tool call - confirmed live, repeatedly, deliberately.** RAG (both
+  collections), web search, hue lights, and clock timers all separately
+  produced confident, specific-sounding fabrications instead of a real
+  call - *"the living room ceiling light is dimmed to 20%,"* *"temperature
+  drop from 21°C to 18°C,"* *"two active timers,"* none of it real.
+  `grep -c "tool_calls"` across a full stress-test run (~20 forced
+  cycles, `SUBCON_FORCE_RUN_FOR_TESTING`, see below): **0**. Leading
+  theory, untested: the RESULT stage's own prompt - *"You just did that.
+  What's the actual result or finding?"* - is phrased in the past tense,
+  presupposing the check already happened, which may be training the
+  model to narrate a plausible completed action rather than actually
+  invoke a tool in that turn. Worth trying present-tense, explicit-
+  invitation wording next ("check this now using whatever tool applies").
+  Parked here, not fixed - "we haven't made too much progress on subcon,"
+  the user's own words, picking back up another day.
+  - Two small, reusable testing tools added alongside this investigation,
+    both default-off, both meant to stay in the source for next time:
+    `SUBCON_FORCE_RUN_FOR_TESTING` (forces every prioritize decision into
+    a real cycle regardless of what the model actually decided, logging
+    the real decision first) and confirmation that the self-paced
+    wait_minutes clamp (1-60) is completely unaffected by it - the force-
+    override sits entirely on top, changing nothing about the real pacing
+    logic underneath.
+  - Also caught, not a subcon bug: forcing `should_run_now` to `true`
+    doesn't guarantee a valid `chosen_index` - when the model says
+    `false`, it doesn't reliably provide a real index either, since the
+    prompt never asked it to care in that branch. Harmless in normal
+    operation (the existing out-of-range fallback already handles it
+    silently), only visible because of the forced-override testing itself.
+- **Fixed 2026-09-29: a real, dated regression - sidetrack's own second-
+  guess "correction" follow-up could read its own prior turn's JSON aloud
+  over TTS.** Caught live, by ear, while testing an unrelated TTS change
+  from a separate session. Root cause precisely dated via `git log -S`:
+  `run_second_guess()`'s stage 5 prompt (`"Go ahead - correct what was
+  wrong..."`) was introduced in `7597c04` (2026-09-23), *before* stage 4's
+  own DONE-check was converted to structured JSON output in `f0daf1a`
+  (2026-09-24) - nobody went back to guard the already-existing stage 5
+  prompt once stage 4 started producing a JSON-shaped turn immediately
+  before it. Exact same "JSON mimicry" bug already found and fixed once
+  for subcon's own PLANNING stage (2026-09-26) - a plain-text follow-up
+  right after a structured-output turn tends to imitate that turn's own
+  shape unless told not to, and stage 5 streams straight into the real,
+  shared `comms.INPUT_FROM_LLM` (unlike stage 4's own non-streaming DONE-
+  check, which never reaches the user at all). Fixed with the same one-
+  line guard already proven for subcon: `"Answer in plain sentences, not
+  JSON."` appended to stage 5's own prompt. **Not yet live-verified** -
+  `needs_correction: true` (the only path that exercises stage 5 at all)
+  didn't fire naturally across 5 separate attempts this session, despite
+  trying prompts likely to provoke it (a refusal, a compound request, a
+  vague follow-up). Low risk regardless - pure prompt-text addition, no
+  parsing or control-flow touched, builds clean. Revisit and actually
+  hear it fixed another day.

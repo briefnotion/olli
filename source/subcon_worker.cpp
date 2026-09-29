@@ -411,6 +411,16 @@ void SUBCON_WORKER_CLASS::thread_main()
     // forced true rather than inherited from the PROPS copy above.
     subcon_llm.PROPS.use_thinking = true;
 
+    // 2026-09-27, alongside full tool access (subcon_tools_list below) -
+    // see olla.h's own comment on drains_events for the full reasoning.
+    // Sharing tool_worker (this->tool_worker, set once by main.cpp before
+    // thread_start()) is safe for dispatching/receiving subcon's own calls
+    // (id-based, already proven), but ambient events (a timer firing,
+    // presence changing) have no such correlation - without this, subcon
+    // would compete with the real chat to drain them, risking silently
+    // absorbing one that was meant to reach the user.
+    subcon_llm.drains_events = false;
+
     // No display to stream into - subcon_comms below is blank/never shown
     // anywhere, so there's nothing for incremental chunks to write to.
     // send() (olla.cpp) only takes the streaming code path at all if either
@@ -421,40 +431,45 @@ void SUBCON_WORKER_CLASS::thread_main()
     subcon_llm.PROPS.stream_output = false;
     subcon_llm.PROPS.stream_thinking = false;
 
-    // First real tool (2026-09-27) - was empty/deliberately passive
-    // (IDEAS.md's own "subconscious" section, "deliberately passive
-    // toolset" principle). TOOL_WEB_SEARCH specifically, not TOOL_TASK_
-    // RUNNER/TOOL_DELEGATOR (olla.cpp's own populate_default_tools() has
-    // all 4 real built-ins) - it's read-only real-world lookup, exactly the
-    // kind of thing that principle is fine with; task runner can execute
-    // arbitrary .task automations (real actions) and delegator spawns
-    // sub-conversations, neither of which belongs here. Needs no tool_
-    // worker access at all - it's a direct curl call, same as the main
-    // chat's own copy, not a remote tool - so this stays fully self-
-    // contained to this thread, same as everything else declared here.
-    // Local, not a class member, same reasoning as subcon_llm above.
+    // Full tool access as of 2026-09-27 - was TOOL_WEB_SEARCH alone, before
+    // that empty/deliberately passive (IDEAS.md's own "subconscious"
+    // section, "deliberately passive toolset" principle). The user's own
+    // explicit, informed choice over a curated read-only subset - see
+    // TODO.md's own entry for the full reasoning: this relies on the
+    // prompt (OLLAMA_OPENING below) instructing passivity rather than
+    // structurally preventing action, a real, deliberate departure from
+    // the original passive-toolset principle, accepted because subcon's
+    // own prompts are always developer-authored and narrow (never reacting
+    // to open-ended real user conversation the way the second-guess
+    // routine that principle was originally reacting to does).
+    // populate_default_tools() (olla.cpp) - the same 4 built-ins chat/
+    // sidetrack get, not a hand-picked subset anymore. Local, not a class
+    // member, same reasoning as subcon_llm above.
     std::vector<std::unique_ptr<TOOL_BASE>> subcon_tools_list;
-    subcon_tools_list.push_back(std::make_unique<TOOL_WEB_SEARCH>());
+    populate_default_tools(subcon_tools_list);
 
     // Own persona, not the default (which is written for a general
     // assistant with tool guidance and was leaking through - visible in an
     // earlier live test as an in-character reply that had nothing to do
-    // with what subcon actually is). Updated from the original "nothing
-    // real to do yet" placeholder - that wording actively contradicted the
-    // prioritize/plan prompts now being sent below. Still a placeholder,
-    // not the real design (IDEAS.md's own section covers what that should
-    // eventually be) - just no longer self-contradictory. Set before
+    // with what subcon actually is). Updated again for full tool access
+    // (2026-09-27) - explicitly instructed to stay observational despite
+    // technically having the same real-world-action tools the main chat
+    // does, since nothing structural prevents it anymore. Set before
     // open() - that's what seeds the protected opening message with it
     // (same order TOOL_DELEGATOR's own instance uses, tools.cpp).
     subcon_llm.OLLAMA_OPENING =
         "You are Olli's subconscious: a background reasoning process, "
         "separate from the main conversation the user is having with Olli. "
-        "You can look things up (web search) but you cannot take any "
-        "real-world action - no controlling devices, no sending anything, "
-        "nothing that changes the outside world. When given a list of "
-        "things to consider, pick the one that matters most right now and "
-        "explain why; when asked to plan, describe the concrete steps "
-        "briefly and plainly.";
+        "You have the same tools Olli's main conversation does, including "
+        "ones that can take real-world action (controlling devices, "
+        "running automations). You must never actually use those - only "
+        "look things up (web search, checking status, reading data). Never "
+        "control a device, send anything, or change anything in the "
+        "outside world, even if it seems helpful or is close to something "
+        "you were asked to look into. When given a list of things to "
+        "consider, pick the one that matters most right now and explain "
+        "why; when asked to plan, describe the concrete steps briefly and "
+        "plainly.";
 
     // One-arg overload, not the (tools_list, Properties) one - that one
     // does PROPS = Properties first thing (olla.cpp), which would stomp the
@@ -504,21 +519,40 @@ void SUBCON_WORKER_CLASS::thread_main()
     TIMED_IS_READY_SIMPLE delivery_check_timer;
     delivery_check_timer.set(30000); // ms
 
-    // Fake data to play with (user's own explicit request) - not wired to
-    // anything real yet (no presence, no real awareness sources). Purely
-    // for proving the prioritize/plan reasoning loop itself works before
-    // worrying about where real candidates would come from. Used only as
-    // the seed for a fresh profile (load_subcon_todo_items() below falls
-    // back to this on a missing/unparseable file) - once persisted,
+    // Seed data for a fresh profile only (load_subcon_todo_items() below
+    // falls back to this on a missing/unparseable file) - once persisted,
     // fake_todo_items itself is loaded from disk, not rebuilt from this
     // literal every time. Aggregate-initialized positionally against
     // SUBCON_TODO_ITEM's own declared order (description,
     // last_checked_unix_seconds, ever_checked, history) - 0/false/{} is
     // "never checked" regardless of which type last_checked_unix_seconds is.
+    //
+    // Refreshed 2026-09-27, now that subcon has full tool access
+    // (populate_default_tools() + tool_worker, above) - chosen deliberately
+    // for having a real, checkable answer through something subcon can
+    // actually reach, not just plausible-sounding fake topics anymore:
+    //   - lights: list_hue_lights (read-only, real device state)
+    //   - weather: web_search (real search results)
+    //   - last conversation: rag_search against the real, auto-synced
+    //     "conversations" collection (tools/rag/rag_db/rag_sync.cpp) - not
+    //     a dead end like it looked at first; olli already indexes its own
+    //     past chat_logs/ there.
+    //   - notes: rag_search against the real "Notes" collection - closest
+    //     of all five to the original subconscious brainstorm's own seed
+    //     scenario (IDEAS.md: noticing a job-offer email worth mentioning),
+    //     just notes instead of email.
+    //   - timers: clock's own list_timers/check_timer (read-only).
+    //
+    // "Check whether the RAG collections are up to date" (the original
+    // first item) dropped, not just replaced - the user's own call: it
+    // "never failed," nothing about it ever produces a real, discriminating
+    // answer, unlike the five below.
     std::vector<SUBCON_TODO_ITEM> seed_todo_items = {
-        {"Check whether the RAG collections are up to date", 0, false, {}},
+        {"Check whether any lights were left on that probably shouldn't be", 0, false, {}},
         {"See if there's been any change in the weather worth mentioning", 0, false, {}},
-        {"Review the last conversation for anything left unresolved", 0, false, {}}
+        {"Review the last conversation for anything left unresolved", 0, false, {}},
+        {"Check my notes for anything time-sensitive or coming up soon", 0, false, {}},
+        {"Check if any timers are currently running or about to expire", 0, false, {}}
     };
 
     // Persisted to disk now (2026-09-26) - same directory as queue.json,
@@ -538,7 +572,18 @@ void SUBCON_WORKER_CLASS::thread_main()
     // this thread (exchange()'s busy/presence copy, the delivery-readiness
     // check) keeps running either way - only the "start a new think-cycle"
     // gate below is affected.
-    constexpr bool SUBCON_THINK_CYCLE_ENABLED = true;
+    constexpr bool SUBCON_THINK_CYCLE_ENABLED = false;
+
+    // TEMP-SMOKETEST (2026-09-27): forces every prioritize decision into a
+    // real PLAN/RESULT cycle regardless of what should_run_now actually
+    // says, purely to get more real tool-call opportunities to observe
+    // faster - the self-paced wait logic itself is working exactly as
+    // intended (real, sensible waits, not the concern here) and is
+    // deliberately left completely untouched otherwise. The model's own
+    // original decision is still parsed and logged before being
+    // overridden, so the real pacing behavior stays visible underneath the
+    // override. Revert to false when done testing.
+    constexpr bool SUBCON_FORCE_RUN_FOR_TESTING = false;
 
     SUBCON_STAGE stage = SUBCON_STAGE::IDLE;
     int chosen_index = -1;
@@ -628,8 +673,8 @@ void SUBCON_WORKER_CLASS::thread_main()
             // Drives whatever's currently in flight, if anything - same
             // async submit-and-poll pattern the old one-shot version used,
             // shared across every stage.
-            subcon_llm.input(subcon_comms, nullptr);
-            subcon_llm.process(subcon_io_worker, nullptr, subcon_tools_list, nullptr, subcon_comms);
+            subcon_llm.input(subcon_comms, tool_worker);
+            subcon_llm.process(subcon_io_worker, nullptr, subcon_tools_list, tool_worker, subcon_comms);
 
             // PRIORITIZING's own call finished (one way or another - see
             // this section's own comment above, SUBCON_STAGE's own
@@ -655,6 +700,18 @@ void SUBCON_WORKER_CLASS::thread_main()
                         chosen_index = parsed.at("chosen_index").get<int>();
                         chosen_reasoning = parsed.at("reasoning").get<std::string>();
                         int wait_minutes = parsed.at("wait_minutes").get<int>();
+
+                        // TEMP-SMOKETEST - see SUBCON_FORCE_RUN_FOR_TESTING's
+                        // own comment above. Logs the real, unmodified
+                        // decision first, so the actual pacing behavior
+                        // stays visible even while this forces past it.
+                        if (SUBCON_FORCE_RUN_FOR_TESTING && !should_run_now)
+                        {
+                            DEBUG_LOG_CLASS::instance().log_event("subcon",
+                                "[TEMP-SMOKETEST] would have stayed idle (" + chosen_reasoning +
+                                ", proposed " + std::to_string(wait_minutes) + " min) - forcing a run anyway");
+                            should_run_now = true;
+                        }
 
                         // Qwen3's own real thinking trace (use_thinking =
                         // true, set above) - generated either way, just not

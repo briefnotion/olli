@@ -356,8 +356,21 @@ void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ollama_system
             // Streaming back on for this one - this is the real content the
             // user should actually see/hear, unlike the DONE-check above.
             SIDETRACK_CHAT_INSTANCE.PROPS.stream_output = true;
+            // "Answer in plain sentences, not JSON" - real bug, caught live
+            // 2026-09-29 (heard over TTS): this prompt immediately follows
+            // stage 4's own structured-output DONE-check reply
+            // (SECOND_GUESS_RESULT_FORMAT, above) in the same conversation,
+            // and streams straight into the real, shared comms - the exact
+            // "JSON mimicry" bug already found and fixed once for subcon's
+            // own PLANNING stage (subcon_worker.cpp) - a plain-text
+            // follow-up right after a structured-JSON turn tends to
+            // imitate that turn's own shape unless told not to. This
+            // prompt predates the DONE-check's own conversion to
+            // structured output (7597c04, 2026-09-23, vs. f0daf1a,
+            // 2026-09-24) and never got the same guard added afterward.
             comms.INPUT_FROM_USER.set("Go ahead - correct what was wrong, or actually follow through on "
-                                     "what you already claimed. Nothing beyond that.");
+                                     "what you already claimed. Nothing beyond that. Answer in plain "
+                                     "sentences, not JSON.");
             start_second_guess_call(SIDETRACK_CHAT_INSTANCE, comms, tool_worker);
             second_guess_stage = 5;
         }

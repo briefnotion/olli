@@ -14,6 +14,10 @@
 
 #include "stringthings.h"
 
+#include <algorithm>
+#include <cstdint>
+#include <regex>
+
 using namespace std;
 
 int count_char_in_string(string& Text, char Character)
@@ -32,14 +36,200 @@ string char_buf_to_string(char Buf[], int Buf_Len)
   //return ret_str;
 }
 
+namespace {
+
+// Emoji and pictograph code points - espeak-ng either reads these out by
+// name ("grinning face") or chokes on them, neither of which is wanted.
+bool tts_is_emoji(uint32_t cp)
+{
+  return (cp >= 0x1F000 && cp <= 0x1FAFF)   // emoticons, pictographs, flags
+      || (cp >= 0x2600 && cp <= 0x27BF)     // misc symbols, dingbats
+      || (cp >= 0x2B00 && cp <= 0x2BFF)     // stars, arrows (e.g. U+2B50)
+      || (cp >= 0x2300 && cp <= 0x23FF)     // watch, hourglass, etc.
+      || (cp >= 0xFE00 && cp <= 0xFE0F)     // variation selectors
+      || (cp >= 0xE0020 && cp <= 0xE007F)   // tag sequences
+      || cp == 0x200D                       // zero-width joiner
+      || cp == 0x20E3;                      // combining keycap
+}
+
+std::string tts_strip_emoji(const std::string& text)
+{
+  std::string out;
+  out.reserve(text.size());
+  size_t i = 0;
+  while (i < text.size())
+  {
+    unsigned char c = static_cast<unsigned char>(text[i]);
+    size_t len = (c < 0x80) ? 1 : ((c >> 5) == 0x6) ? 2 : ((c >> 4) == 0xE) ? 3 : ((c >> 3) == 0x1E) ? 4 : 1;
+    if (len == 1 || i + len > text.size())
+    {
+      out += text[i];
+      i++;
+      continue;
+    }
+    uint32_t cp = (len == 2) ? (c & 0x1F) : (len == 3) ? (c & 0x0F) : (c & 0x07);
+    for (size_t k = 1; k < len; k++)
+    {
+      cp = (cp << 6) | (static_cast<unsigned char>(text[i + k]) & 0x3F);
+    }
+    if (!tts_is_emoji(cp)) out.append(text, i, len);
+    i += len;
+  }
+  return out;
+}
+
+// "https://www.example.com/some/path" -> "example.com"
+std::string tts_url_to_site(const std::string& url)
+{
+  std::string host = url;
+  size_t scheme = host.find("://");
+  if (scheme != std::string::npos) host.erase(0, scheme + 3);
+  if (host.rfind("www.", 0) == 0) host.erase(0, 4);
+  size_t end = host.find_first_of("/?#:");
+  if (end != std::string::npos) host.erase(end);
+  while (!host.empty() && std::string(".,;!?'\"").find(host.back()) != std::string::npos) host.pop_back();
+  return host.empty() ? "link" : host;
+}
+
+// Markdown table separator rows ("|---|:---:|") and horizontal rules
+// ("---") - nothing worth speaking, and espeak-ng reads dashes aloud.
+bool tts_is_table_separator(const std::string& line)
+{
+  return line.find('-') != std::string::npos
+      && line.find_first_not_of("|-: \t\r") == std::string::npos;
+}
+
+// tts_filter()'s output goes to espeak-ng in SSML mode (-m), so any
+// literal &, <, > in the LLM's text must be escaped before tags are added.
+std::string tts_ssml_escape(const std::string& text)
+{
+  std::string out;
+  out.reserve(text.size());
+  for (char c : text)
+  {
+    if (c == '&') out += "&amp;";
+    else if (c == '<') out += "&lt;";
+    else if (c == '>') out += "&gt;";
+    else out += c;
+  }
+  return out;
+}
+
+// Emphasis/pause tuning. Bold uses <prosody> rather than <emphasis> since
+// LLMs bold a lot and prosody's strength is adjustable here; italics use
+// espeak-ng's own milder <emphasis>.
+const char* const kTtsBoldOpen = "<prosody pitch=\"+15%\" rate=\"90%\">";
+const char* const kTtsBoldClose = "</prosody>";
+const char* const kTtsItalicOpen = "<emphasis level=\"moderate\">";
+const char* const kTtsItalicClose = "</emphasis>";
+const char* const kTtsHeadingBreak = "<break time=\"500ms\"/>";
+const char* const kTtsParagraphBreak = "<break time=\"300ms\"/>";
+
+} // namespace
+
 /**
- * @brief Filters out unwanted LLM artifacts like markdown formatting for clean TTS output.
+ * @brief Filters out unwanted LLM artifacts like markdown bolding (**) for TTS.
  */
 std::string tts_filter(const std::string& text) {
     std::string result = text;
-    
-    // 1. Remove Markdown Bold/Italic indicators (** , __ , * , _)
-    const std::vector<std::string> md_artifacts = {"**", "__", "*", "_", "`", "#"};
+
+    // 1. Code blocks - replaced whole, before the backtick erase below
+    // would lose track of where they start/end. An unclosed fence (only
+    // reaches here once display_with_tts() has given up waiting for the
+    // closing one) runs to the end of the text.
+    static const std::regex code_block(R"(```[\s\S]*?(```|$))");
+    result = std::regex_replace(result, code_block, " code block. ");
+
+    // 2. Markdown links - "[the docs](https://...)" -> "the docs".
+    static const std::regex md_link(R"(\[([^\]]*)\]\([^)]*\))");
+    result = std::regex_replace(result, md_link, "$1");
+
+    // 3. Bare URLs - just the site name, e.g. "example.com". Before the
+    // underscore replacement below, which would split a URL apart.
+    static const std::regex url(R"((https?://|www\.)[^\s)>\]]+)");
+    {
+        std::string out;
+        auto begin = std::sregex_iterator(result.begin(), result.end(), url);
+        size_t last = 0;
+        for (auto it = begin; it != std::sregex_iterator(); ++it)
+        {
+            out.append(result, last, static_cast<size_t>(it->position()) - last);
+            out += tts_url_to_site(it->str());
+            // Sentence punctuation right after a URL ("see example.com.")
+            // gets swallowed into the match - put it back so the pause stays.
+            std::string match = it->str();
+            size_t punct = match.find_last_not_of(".,;!?'\"");
+            if (punct != std::string::npos) out += match.substr(punct + 1);
+            last = static_cast<size_t>(it->position() + it->length());
+        }
+        out.append(result, last, std::string::npos);
+        result = out;
+    }
+
+    // 4. Tables - drop separator rows, then turn remaining pipes into a
+    // pause instead of espeak-ng's "vertical line".
+    {
+        std::string out;
+        size_t start = 0;
+        while (start <= result.size())
+        {
+            size_t nl = result.find('\n', start);
+            std::string line = result.substr(start, nl == std::string::npos ? std::string::npos : nl - start);
+            if (!tts_is_table_separator(line))
+            {
+                // Table row: drop the outer pipes and end the row with a
+                // period so rows don't run together once newlines collapse.
+                size_t first = line.find_first_not_of(" \t\r");
+                size_t lastc = line.find_last_not_of(" \t\r");
+                if (first != std::string::npos && line[first] == '|' && line[lastc] == '|' && lastc > first)
+                {
+                    line = line.substr(first + 1, lastc - first - 1) + ".";
+                }
+                out += line;
+            }
+            if (nl == std::string::npos) break;
+            out += '\n';
+            start = nl + 1;
+        }
+        result = out;
+    }
+    std::replace(result.begin(), result.end(), '|', ',');
+
+    // 5. Emoji.
+    result = tts_strip_emoji(result);
+
+    // 6. SSML - escape first, then add tags, so only our own tags are
+    // markup. See kTtsBoldOpen etc. above for the tuning.
+    result = tts_ssml_escape(result);
+
+    // Headings - "## Setup" -> "Setup" plus a pause, so it doesn't run
+    // straight into the next sentence once newlines collapse.
+    static const std::regex heading(R"((^|\n)[ \t]*#{1,6}[ \t]+([^\n]*))");
+    result = std::regex_replace(result, heading, std::string("$1$2") + kTtsHeadingBreak);
+
+    // Paragraph breaks - a blank line gets a short pause instead of
+    // collapsing into a single space.
+    static const std::regex paragraph(R"(\n[ \t]*\n\s*)");
+    result = std::regex_replace(result, paragraph, std::string(" ") + kTtsParagraphBreak + " ");
+
+    // Bold - **text** / __text__. Single line only, so a stray ** can't
+    // swallow everything up to the next one.
+    static const std::regex bold_star(R"(\*\*([^*\n]+?)\*\*)");
+    static const std::regex bold_under(R"(__([^_\n]+?)__)");
+    result = std::regex_replace(result, bold_star, std::string(kTtsBoldOpen) + "$1" + kTtsBoldClose);
+    result = std::regex_replace(result, bold_under, std::string(kTtsBoldOpen) + "$1" + kTtsBoldClose);
+
+    // Italics - *text* needs a non-space right after the opening * so a
+    // "* item" bullet isn't mistaken for one. _text_ needs to stand alone
+    // as a word so snake_case_names aren't.
+    static const std::regex italic_star(R"(\*([^\s*][^*\n]*?)\*)");
+    static const std::regex italic_under(R"((^|[\s(])_([^_\s][^_\n]*?)_(?=[\s.,;:!?)]|$))");
+    result = std::regex_replace(result, italic_star, std::string(kTtsItalicOpen) + "$1" + kTtsItalicClose);
+    result = std::regex_replace(result, italic_under, std::string("$1") + kTtsItalicOpen + "$2" + kTtsItalicClose);
+
+    // 7. Remove leftover Markdown indicators (** , __ , * , `, #) - anything
+    // not already turned into emphasis above (unpaired, bullets, etc.)
+    const std::vector<std::string> md_artifacts = {"**", "__", "*", "`", "#"};
     for (const auto& artifact : md_artifacts) {
         size_t pos = 0;
         while ((pos = result.find(artifact, pos)) != std::string::npos) {
@@ -47,7 +237,13 @@ std::string tts_filter(const std::string& text) {
         }
     }
 
-    // 2. Clean up excessive whitespace/newlines that cause awkward TTS pauses
+    // A lone _ is more often a word separator (snake_case, file_names) than
+    // markdown italics, so it becomes a space rather than being erased -
+    // "snake_case" reads as "snake case", not "snakecase". Runs after the
+    // "__" erase above so __bold__ markers are still dropped outright.
+    std::replace(result.begin(), result.end(), '_', ' ');
+
+    // 8. Clean up excessive whitespace/newlines that cause awkward TTS pauses
     std::string cleaned;
     bool last_was_space = false;
     for (size_t i = 0; i < result.length(); ++i) {
@@ -63,6 +259,93 @@ std::string tts_filter(const std::string& text) {
     }
 
     return cleaned;
+}
+
+size_t tts_hold_point(const std::string& text)
+{
+    size_t hold = std::string::npos;
+    auto hold_at = [&hold](size_t pos) { hold = std::min(hold, pos); };
+
+    // Unclosed code fence - odd number of ``` so far.
+    {
+        size_t count = 0;
+        size_t last = std::string::npos;
+        size_t pos = 0;
+        while ((pos = text.find("```", pos)) != std::string::npos)
+        {
+            count++;
+            last = pos;
+            pos += 3;
+        }
+        if (count % 2 == 1) hold_at(last);
+    }
+
+    // Unclosed bold - odd number of ** (or __) so far, so the closing one
+    // hasn't arrived yet and tts_filter() couldn't pair them up.
+    for (const char* marker : {"**", "__"})
+    {
+        size_t count = 0;
+        size_t last = std::string::npos;
+        size_t pos = 0;
+        while ((pos = text.find(marker, pos)) != std::string::npos)
+        {
+            count++;
+            last = pos;
+            pos += 2;
+        }
+        if (count % 2 == 1) hold_at(last);
+    }
+
+    // Heading line still arriving - its pause goes at the end of the line,
+    // so wait until the newline shows up.
+    {
+        size_t line = text.rfind('\n');
+        line = (line == std::string::npos) ? 0 : line + 1;
+        size_t first = text.find_first_not_of(" \t", line);
+        if (first != std::string::npos && text[first] == '#') hold_at(line);
+    }
+
+    // One or two trailing backticks - could be the start of a fence.
+    if (!text.empty() && text.back() == '`')
+    {
+        size_t start = text.find_last_not_of('`');
+        start = (start == std::string::npos) ? 0 : start + 1;
+        if (text.size() - start < 3) hold_at(start);
+    }
+
+    // Link still arriving - "[text", "[text]", or "[text](url".
+    {
+        size_t open = text.rfind('[');
+        if (open != std::string::npos)
+        {
+            size_t close = text.find(']', open);
+            if (close == std::string::npos || close == text.size() - 1)
+            {
+                hold_at(open);
+            }
+            else if (text[close + 1] == '(' && text.find(')', close + 1) == std::string::npos)
+            {
+                hold_at(open);
+            }
+        }
+    }
+
+    // Trailing word that is (or could still become) a URL - it's only
+    // complete once whitespace follows it.
+    {
+        size_t word = text.find_last_of(" \t\r\n");
+        word = (word == std::string::npos) ? 0 : word + 1;
+        std::string tail = text.substr(word);
+        if (!tail.empty())
+        {
+            bool url_like = tail.rfind("http", 0) == 0 || tail.rfind("www.", 0) == 0
+                         || std::string("https://").rfind(tail, 0) == 0
+                         || std::string("www.").rfind(tail, 0) == 0;
+            if (url_like) hold_at(word);
+        }
+    }
+
+    return hold;
 }
 
 string filter_non_printable(const std::string& input)

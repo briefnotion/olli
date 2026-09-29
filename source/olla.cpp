@@ -1054,62 +1054,73 @@ void ollama_system::process(IO_WORKER_CLASS& io_worker, CLASS_SYSTEM* system, st
         // every call it's ever dispatched - and frame the narration
         // accordingly instead of always implying it just answered whatever
         // the current conversation happens to be about.
-        TOOL_EVENT event;
-        while (tool_worker->get_pending_event(event))
+        //
+        // Gated on drains_events (olla.h's own comment on it) - unlike the
+        // result-claiming loop just above, which is safe for any instance
+        // to share (id-based), this one has no way to tell "mine" from
+        // "someone else's" at all, so an instance that shouldn't compete
+        // for ambient events (subcon_worker's own subcon_llm) opts out
+        // here entirely rather than risk silently absorbing one meant for
+        // the real chat.
+        if (drains_events)
         {
-            tool_calls_this_turn = 0;
-
-            // Generic var update (TOOL_EVENT's own comment, remote_tools.h) -
-            // applied before narration/action below, so if anything ever
-            // reads comms.user.presence while building this turn's own
-            // prompt/persona, it sees the fresh value, not last tick's.
-            // Presence (tools/presence/presence.cpp) is the one real
-            // producer right now; a second var name would just be another
-            // else-if here, no wire/struct/parsing changes needed.
-            if (event.var_name == "user.presence")
-                comms.user.presence = event.var_value;
-
-            if (!event.message.empty())
+            TOOL_EVENT event;
+            while (tool_worker->get_pending_event(event))
             {
-                log("[RemoteTools] Event from remote tool: " + event.message + "\n");
+                tool_calls_this_turn = 0;
 
-                // origin_id (remote_tools.h) and owned_tool_call_ids
-                // (olla.h) are fully wired end-to-end and verified correct -
-                // DELIBERATELY not yet acted on here. An is_own-based
-                // "this wasn't triggered by anything you asked" framing
-                // reliably provoked the model into issuing its own follow-up
-                // tool call (instead of plain text) far more often than the
-                // default framing ever did, and that collided - live,
-                // reproduced 3 of 4 attempts - with the pre-authored
-                // on_expire_tool action from the SAME event, which dispatches
-                // through the separate pending_tool_calls queue
-                // (handle_instance_tools(), tools.cpp). integrate_tool_result()
-                // -> send() below is a fully synchronous, blocking call on
-                // whichever thread is running process() - olla.h's own
-                // comment on pending_tool_calls already documents the
-                // underlying gap ("last_received gets reset at the top of
-                // every send() call, so anything sitting in it could be
-                // silently dropped if a new turn started first" - a
-                // PRE-EXISTING race, not introduced here) - when it hung,
-                // the entire program stopped ticking for minutes, not just a
-                // narration quality issue. Root cause not confirmed (no
-                // ptrace access in the sandbox this was investigated in) -
-                // revisit once it can be debugged properly with a real
-                // debugger, then compute is_own again here and restore the
-                // framing distinction (see git history around 2026-09-22 for
-                // the removed version).
-                std::string framing = "";
+                // Generic var update (TOOL_EVENT's own comment, remote_tools.h) -
+                // applied before narration/action below, so if anything ever
+                // reads comms.user.presence while building this turn's own
+                // prompt/persona, it sees the fresh value, not last tick's.
+                // Presence (tools/presence/presence.cpp) is the one real
+                // producer right now; a second var name would just be another
+                // else-if here, no wire/struct/parsing changes needed.
+                if (event.var_name == "user.presence")
+                    comms.user.presence = event.var_value;
 
-                integrate_tool_result(tool_worker, comms, framing, event.message);
-            }
+                if (!event.message.empty())
+                {
+                    log("[RemoteTools] Event from remote tool: " + event.message + "\n");
 
-            if (!event.action_tool.empty())
-            {
-                pending_tool_calls.push({
-                    "system_action_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()),
-                    event.action_tool,
-                    event.action_arguments
-                });
+                    // origin_id (remote_tools.h) and owned_tool_call_ids
+                    // (olla.h) are fully wired end-to-end and verified correct -
+                    // DELIBERATELY not yet acted on here. An is_own-based
+                    // "this wasn't triggered by anything you asked" framing
+                    // reliably provoked the model into issuing its own follow-up
+                    // tool call (instead of plain text) far more often than the
+                    // default framing ever did, and that collided - live,
+                    // reproduced 3 of 4 attempts - with the pre-authored
+                    // on_expire_tool action from the SAME event, which dispatches
+                    // through the separate pending_tool_calls queue
+                    // (handle_instance_tools(), tools.cpp). integrate_tool_result()
+                    // -> send() below is a fully synchronous, blocking call on
+                    // whichever thread is running process() - olla.h's own
+                    // comment on pending_tool_calls already documents the
+                    // underlying gap ("last_received gets reset at the top of
+                    // every send() call, so anything sitting in it could be
+                    // silently dropped if a new turn started first" - a
+                    // PRE-EXISTING race, not introduced here) - when it hung,
+                    // the entire program stopped ticking for minutes, not just a
+                    // narration quality issue. Root cause not confirmed (no
+                    // ptrace access in the sandbox this was investigated in) -
+                    // revisit once it can be debugged properly with a real
+                    // debugger, then compute is_own again here and restore the
+                    // framing distinction (see git history around 2026-09-22 for
+                    // the removed version).
+                    std::string framing = "";
+
+                    integrate_tool_result(tool_worker, comms, framing, event.message);
+                }
+
+                if (!event.action_tool.empty())
+                {
+                    pending_tool_calls.push({
+                        "system_action_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()),
+                        event.action_tool,
+                        event.action_arguments
+                    });
+                }
             }
         }
     }

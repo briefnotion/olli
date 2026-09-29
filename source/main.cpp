@@ -399,7 +399,15 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         // start.
         subcon_worker.PROPS = chat.PROPS;
 
-        subcon_worker.thread_start(); // skeleton only for now - see subcon_worker.h
+        // Full tool access (2026-09-27, subcon_worker.h's own comment) -
+        // the same tool_worker chat/sidetrack/background tasks all share.
+        // Safe to set here, before thread_start(): written before subcon's
+        // own background thread exists, never touched again afterward.
+        // tool_worker.thread_start() already ran above, so it's a valid,
+        // live object by the time subcon's own thread ever reads it.
+        subcon_worker.tool_worker = &tool_worker;
+
+        subcon_worker.thread_start();
 
         // No separate priming call needed here (there used to be one - a
         // one-off get_response()+display() to flush chat.open()'s startup

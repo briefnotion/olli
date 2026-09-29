@@ -407,6 +407,25 @@ class ollama_system {
         // far regardless.
         std::vector<std::string> owned_tool_call_ids;
 
+        // True for every normal instance - false only for subcon_worker's
+        // own subcon_llm (set directly in SUBCON_WORKER_CLASS::thread_main(),
+        // subcon_worker.cpp). Guards process()'s own PART 5 event-draining
+        // loop (olla.cpp) specifically, not the result-claiming loop right
+        // above it in the same PART 5 - results are already safe to share
+        // (outstanding_tool_call_ids above, id-based, live-verified 2026-
+        // 09-22), but pending_events has no call_id to correlate against at
+        // all, so it's drained blindly by whichever instance's process()
+        // tick happens to run next (see the PART 5 comment on this in
+        // olla.cpp). Subcon sharing tool_worker (2026-09-27, for full tool
+        // access) would otherwise put it in that same blind competition,
+        // meaning it could silently absorb a real presence/timer event that
+        // was meant to reach the real chat, into its own isolated
+        // conversation where it'd never be seen. This flag lets subcon keep
+        // full, safe call/result access while structurally opting out of
+        // the one part of tool_worker sharing that's still genuinely unsafe
+        // for multiple consumers.
+        bool drains_events = true;
+
         ollama_system_status status;
 
         std::vector<Message> history;

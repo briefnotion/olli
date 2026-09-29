@@ -30,8 +30,19 @@ string char_buf_to_string(char* Buf, int Buf_Len);
 
 /**
  * @brief Filters out unwanted LLM artifacts like markdown bolding (**) for TTS.
+ *  Output is SSML for espeak-ng -m: literal &, <, > are escaped, and bold/
+ *  italics/headings/paragraphs become <prosody>/<emphasis>/<break> tags.
  */
 std::string tts_filter(const std::string& text);
+
+/**
+ * @brief Where an unfinished markdown construct (open ``` fence, unclosed
+ *  **bold**, half-arrived
+ *  [link](url), URL still streaming in) starts at the end of streamed TTS
+ *  text, or npos if everything is complete. Text from here on should be held
+ *  back until more arrives, so tts_filter() sees the construct whole.
+ */
+size_t tts_hold_point(const std::string& text);
 
 string filter_non_printable(const string& input);
 // Filter out non printable characters from string by replacing 

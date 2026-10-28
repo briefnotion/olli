@@ -422,6 +422,17 @@ Three housekeeping routines run off the main thread (`sidetrack.cpp`):
    when the timer fires. A stale or "poisoned" context can't outlive 30
    minutes of silence.
 
+### The background "subconscious" (subcon)
+
+A separate thread with its own LLM conversation works through a short list of
+recurring tasks while you're not talking to Olli (weather for Lafayette, past
+conversations, notes, lights left on while you're away, forgotten timers),
+decides whether anything it found is actually worth telling you, and passes the
+worthwhile bits to the chat at a sensible moment - when you're home, Olli is
+idle, and it isn't the middle of the night. Each task has a hard limit on how
+often it may run. See [SUBCON.md](SUBCON.md) for how it works, the files it keeps
+in `<profile>/subcon/`, how to add or change a task, and its known limits.
+
 ---
 
 ## Notes & limitations

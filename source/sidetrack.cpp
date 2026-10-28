@@ -2,6 +2,7 @@
 #define SIDETRACK_CPP
 
 #include "sidetrack.h"
+#include "tool_worker.h" // TOOL_WORKER_CLASS::get_pending_result()
 
 // Small helper for building the "(Took action on review: ...)" fallback
 // note run_second_guess() commits whenever a real tool call happened with
@@ -79,12 +80,45 @@ static const json SECOND_GUESS_RESULT_FORMAT = {
     {"required", json::array({"needs_correction"})}
 };
 
+// Collects the results of any remote tool calls instance has dispatched.
+// handle_instance_tools() only queues a remote call (outstanding_tool_call_ids
+// plus tool_worker->put_pending_call()); the answer comes back through
+// get_pending_result(), which ollama_system::process() drains in its PART 5
+// (olla.cpp). Nothing runs process() on SIDETRACK_CHAT_INSTANCE, so without
+// this a remote call's result was never collected - it never reached the
+// instance's history or the debug log, and sat in tool_worker's queue for good.
+//
+// Records the result only (send_tool_result), unlike PART 5, which also has
+// the model narrate it via integrate_tool_result(). That narration is a
+// synchronous send() that would block the main thread and overwrite
+// last_received - the DONE-check's structured reply, or the answer stage 6
+// commits - so it is left out on purpose.
+static void collect_second_guess_results(ollama_system& instance, TOOL_WORKER_CLASS* tool_worker)
+{
+    if (!tool_worker) return;
+
+    TOOL_RESULT result;
+    for (auto it = instance.outstanding_tool_call_ids.begin(); it != instance.outstanding_tool_call_ids.end(); )
+    {
+        if (tool_worker->get_pending_result(*it, result))
+        {
+            instance.send_tool_result(result.call_id, result.response);
+            it = instance.outstanding_tool_call_ids.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+}
+
 // Dispatches any tool calls the last call produced - same shape
 // ollama_system::process()'s own background_tasks handling uses for
 // exactly this kind of tick-spanning secondary instance (olla.cpp, PART 2)
 // - joins the thread once it's done, and reports whether this round is
 // truly finished: not just "the network call returned," but also "no tool
-// call is still sitting there waiting to be dispatched or narrated."
+// call is still waiting to be dispatched, and every remote one dispatched
+// has had its result collected."
 static bool poll_second_guess_call(IO_WORKER_CLASS& io_worker, ollama_system& instance, COMMS& comms,
                                     std::vector<std::unique_ptr<TOOL_BASE>>& tools_list,
                                     TOOL_WORKER_CLASS* tool_worker,
@@ -109,6 +143,7 @@ static bool poll_second_guess_call(IO_WORKER_CLASS& io_worker, ollama_system& in
     }
 
     instance.handle_instance_tools(io_worker, system, tools_list, tool_worker, comms);
+    collect_second_guess_results(instance, tool_worker);
 
     if (!instance.is_processing && instance.chat_thread.joinable())
     {
@@ -121,7 +156,14 @@ static bool poll_second_guess_call(IO_WORKER_CLASS& io_worker, ollama_system& in
     // !complete result explicitly; gating advancement on complete here
     // stalled stage 3/5 forever on any interrupt, since a call that ends
     // interrupted never becomes complete after the fact.
-    return !instance.is_processing && instance.last_received.tool_calls.empty();
+    //
+    // outstanding_tool_call_ids must be empty too, so a remote action has
+    // actually finished before the next review looks at its effects. A call
+    // that never answers can't stall this forever: tool_worker hands back a
+    // timeout error as its result (CALL_TIMEOUT_SECONDS, tool_worker.h).
+    return !instance.is_processing &&
+           instance.last_received.tool_calls.empty() &&
+           instance.outstanding_tool_call_ids.empty();
 }
 
 void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ollama_system& main_instance, COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, CLASS_SYSTEM* system)
@@ -356,21 +398,21 @@ void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ollama_system
             // Streaming back on for this one - this is the real content the
             // user should actually see/hear, unlike the DONE-check above.
             SIDETRACK_CHAT_INSTANCE.PROPS.stream_output = true;
-            // "Answer in plain sentences, not JSON" - real bug, caught live
-            // 2026-09-29 (heard over TTS): this prompt immediately follows
-            // stage 4's own structured-output DONE-check reply
-            // (SECOND_GUESS_RESULT_FORMAT, above) in the same conversation,
-            // and streams straight into the real, shared comms - the exact
-            // "JSON mimicry" bug already found and fixed once for subcon's
-            // own PLANNING stage (subcon_worker.cpp) - a plain-text
-            // follow-up right after a structured-JSON turn tends to
-            // imitate that turn's own shape unless told not to. This
-            // prompt predates the DONE-check's own conversion to
-            // structured output (7597c04, 2026-09-23, vs. f0daf1a,
-            // 2026-09-24) and never got the same guard added afterward.
+            // This prompt follows stage 4's structured-output DONE-check
+            // reply (SECOND_GUESS_RESULT_FORMAT, above) in the same
+            // conversation and streams straight into the real, shared comms,
+            // so it is spoken. A plain-text follow-up right after a JSON turn
+            // can imitate that turn's shape - heard over TTS once, 2026-09-29
+            // - hence the explicit "reply in plain text". The first guard for
+            // that, "Answer in plain sentences, not JSON.", also cut how often
+            // a correction actually called a tool (2-3 of 6 against 5-6 of 6
+            // without it, tested straight against Ollama, 2026-10-28): told
+            // only to answer in sentences, the model narrates "let me fix
+            // that" instead of acting. Naming the action path next to the
+            // text path keeps both.
             comms.INPUT_FROM_USER.set("Go ahead - correct what was wrong, or actually follow through on "
-                                     "what you already claimed. Nothing beyond that. Answer in plain "
-                                     "sentences, not JSON.");
+                                     "what you already claimed. Nothing beyond that. If it needs an "
+                                     "action, use your tools; otherwise reply in plain text.");
             start_second_guess_call(SIDETRACK_CHAT_INSTANCE, comms, tool_worker);
             second_guess_stage = 5;
         }

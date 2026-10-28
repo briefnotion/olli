@@ -2,34 +2,46 @@
 
 #include "olla.h" // ollama_system
 #include "io_worker.h" // IO_WORKER_CLASS - see subcon_io_worker's own comment below
+#include "subcon_tasks.h" // SUBCON_TODO_ITEM / SUBCON_NOTE and the cap/delivery rules around them
 
 #include <chrono>
 #include <thread>
 #include <fstream>
 #include <algorithm> // std::clamp
 
-// The digest queue's own entry (IDEAS.md's "The digest queue" section) -
-// deliberately minimal for now, just enough to give subcon's own
-// conclusions somewhere real to land instead of a debug-log line that
-// disappears on the next test run. No timestamp/priority/deferred-vs-
-// resurface state yet - those are real design questions for once actual
-// delivery (presence + not-busy, IDEAS.md's own "when to announce" note)
-// is being built, not before.
-struct SUBCON_NOTE
+// Writes a file so a crash or kill mid-write can't leave it half-written:
+// the full text goes to a sibling temp file first, then rename() swaps it
+// into place (atomic on the same filesystem). Found in review 2026-10-28:
+// truncating and rewriting in place meant an interrupted write left a file
+// that then failed to parse, which load treats as a first run - silently
+// resetting every task's run cap and losing the history. Returns false if
+// anything went wrong (the caller's existing try/catch handles throws).
+static bool write_file_atomically(const std::filesystem::path& path, const std::string& text)
 {
-    std::string content;
-    bool delivered = false;
-};
-
-static void to_json(json& j, const SUBCON_NOTE& note)
-{
-    j = json{{"content", note.content}, {"delivered", note.delivered}};
+    std::filesystem::path temp_path = path;
+    temp_path += ".tmp";
+    {
+        std::ofstream file(temp_path, std::ios::trunc);
+        if (!file) return false;
+        file << text;
+        file.flush();
+        if (!file) return false;
+    }
+    std::error_code ec;
+    std::filesystem::rename(temp_path, path, ec);
+    return !ec;
 }
 
-static void from_json(const json& j, SUBCON_NOTE& note)
+// A file that exists but won't parse is moved aside (path + ".corrupt")
+// instead of being treated as absent and overwritten by the next save - so
+// whatever was in it can still be recovered by hand.
+static void set_aside_corrupt_file(const std::filesystem::path& path)
 {
-    note.content = j.value("content", "");
-    note.delivered = j.value("delivered", false);
+    std::filesystem::path aside = path;
+    aside += ".corrupt";
+    std::error_code ec;
+    std::filesystem::rename(path, aside, ec);
+    DEBUG_LOG_CLASS::instance().log_event("subcon", "couldn't read " + path.filename().string() + " - moved it aside as " + aside.filename().string() + " and starting fresh");
 }
 
 // Loads the persisted queue from disk - missing file (first run) or any
@@ -47,7 +59,13 @@ static std::vector<SUBCON_NOTE> load_subcon_queue(const std::filesystem::path& p
         file >> data;
         queue = data.get<std::vector<SUBCON_NOTE>>();
     }
-    catch (const std::exception&) { /* treat as empty, same as a missing file */ }
+    catch (const std::exception&)
+    {
+        // Treated as empty, same as a missing file - but the unreadable
+        // file itself is kept aside rather than overwritten by the next save.
+        file.close();
+        set_aside_corrupt_file(path);
+    }
 
     return queue;
 }
@@ -68,9 +86,8 @@ static void save_subcon_queue(const std::filesystem::path& path, const std::vect
     // smaller problem than crashing the whole program over it.
     try
     {
-        std::ofstream file(path);
-        if (!file) return;
-        file << json(queue).dump(2, ' ', false, json::error_handler_t::replace);
+        if (!write_file_atomically(path, json(queue).dump(2, ' ', false, json::error_handler_t::replace)))
+            DEBUG_LOG_CLASS::instance().log_event("subcon", "failed to write " + path.filename().string());
     }
     catch (const std::exception& e)
     {
@@ -109,118 +126,16 @@ static const json SUBCON_PRIORITIZE_FORMAT = {
 constexpr int SUBCON_WAIT_MINUTES_MIN = 1;
 constexpr int SUBCON_WAIT_MINUTES_MAX = 60;
 
-// One past cycle where this item was chosen - the user's own idea (2026-
-// 09-26): keep a real history per item, not just a last-checked scalar, so
-// there's a record of what was actually decided/planned each time, not
-// just when.
-struct SUBCON_TODO_RESULT
-{
-    std::string reasoning; // why it was chosen that time
-    std::string plan;      // what it decided to do about it
-    std::string finding;   // what it "found" after (pretend) carrying out plan -
-                            // the actual outcome, not another how-to. Deliberately
-                            // fabricated right now, same as plan already is - subcon
-                            // has no tools and no real data behind any of the fake
-                            // items, so this can't be grounded in anything real yet.
-                            // Kept anyway (the user's own call, 2026-09-26): "let's
-                            // learn to fail before we succeed" - see what a toolless
-                            // system actually produces when pushed for a concrete
-                            // result, rather than solving that honestly up front.
-};
-
-// One candidate for the prioritize stage below - description plus enough
-// state to reason about staleness, not just the text alone. Real wall-clock
-// time now (2026-09-26), not a cycle count - cycles stopped being a
-// meaningful unit once the model itself started choosing how long to wait
-// between checks (thread_main()'s own comment on the merged prioritize/
-// pace decision) - a fixed-length "cycle" no longer exists to count.
-// last_checked_unix_seconds is std::chrono::system_clock (real wall time,
-// meaningful across a restart), not steady_clock (monotonic but not tied to
-// an actual calendar time, the wrong choice for something persisted to
-// disk and read back after a restart).
-struct SUBCON_TODO_ITEM
-{
-    std::string description;
-    int64_t last_checked_unix_seconds = 0;
-    bool ever_checked = false; // needed so "0 seconds ago" and "never" aren't confused
-    std::vector<SUBCON_TODO_RESULT> history;
-};
-
-static void to_json(json& j, const SUBCON_TODO_RESULT& result)
-{
-    j = json{{"reasoning", result.reasoning}, {"plan", result.plan}, {"finding", result.finding}};
-}
-
-static void from_json(const json& j, SUBCON_TODO_RESULT& result)
-{
-    result.reasoning = j.value("reasoning", "");
-    result.plan = j.value("plan", "");
-    result.finding = j.value("finding", "");
-}
-
-static void to_json(json& j, const SUBCON_TODO_ITEM& item)
-{
-    j = json{
-        {"description", item.description},
-        {"last_checked_unix_seconds", item.last_checked_unix_seconds},
-        {"ever_checked", item.ever_checked},
-        {"history", item.history}
-    };
-}
-
-static void from_json(const json& j, SUBCON_TODO_ITEM& item)
-{
-    item.description = j.value("description", "");
-    item.last_checked_unix_seconds = j.value("last_checked_unix_seconds", static_cast<int64_t>(0));
-    item.ever_checked = j.value("ever_checked", false);
-    item.history = j.value("history", std::vector<SUBCON_TODO_RESULT>{});
-
-    // Real bug, caught live 2026-09-27 on the "ron" profile: a file
-    // persisted by the previous, cycle-counting version of this struct has
-    // "ever_checked": true but no last_checked_unix_seconds key at all
-    // (that field didn't exist yet), which defaults to 0 above - the Unix
-    // epoch. describe_staleness() then reported "497357 hours ago"
-    // (~56 years) instead of recognizing this as stale, pre-migration data.
-    // Since a real check can never have happened at the epoch, ever_checked
-    // = true with a still-zero timestamp is unambiguously old-format
-    // leftover, not a real "checked at second 0" - safe to treat as never
-    // checked (matches ever_checked's own declared purpose) rather than
-    // guessing at a real time to backfill.
-    if (item.ever_checked && item.last_checked_unix_seconds == 0)
-        item.ever_checked = false;
-}
-
-// Loads the persisted todo items from disk - falls back to seed_items (the
-// hardcoded fake list, thread_main()'s own declaration) on a missing file
-// (first run for this profile) or any parse trouble, rather than an empty
-// list, since an empty list would leave the reasoning loop with nothing to
-// prioritize over at all - unlike the queue above, where empty is a
-// perfectly normal starting state.
-static std::vector<SUBCON_TODO_ITEM> load_subcon_todo_items(const std::filesystem::path& path, const std::vector<SUBCON_TODO_ITEM>& seed_items)
-{
-    std::ifstream file(path);
-    if (!file) return seed_items;
-
-    try
-    {
-        json data;
-        file >> data;
-        return data.get<std::vector<SUBCON_TODO_ITEM>>();
-    }
-    catch (const std::exception&) { return seed_items; /* treat as first run */ }
-}
-
 // Same UTF-8-safety shape as save_subcon_queue() above (its own comment
 // explains why error_handler_t::replace + a try/catch, not just one or the
-// other) - reasoning/plan/finding are all live, free-form model output same
-// as a queue note's content is.
+// other) - reasoning/plan/finding are all live, free-form model output
+// same as a queue note's content is.
 static void save_subcon_todo_items(const std::filesystem::path& path, const std::vector<SUBCON_TODO_ITEM>& items)
 {
     try
     {
-        std::ofstream file(path);
-        if (!file) return;
-        file << json(items).dump(2, ' ', false, json::error_handler_t::replace);
+        if (!write_file_atomically(path, json(items).dump(2, ' ', false, json::error_handler_t::replace)))
+            DEBUG_LOG_CLASS::instance().log_event("subcon", "failed to write " + path.filename().string());
     }
     catch (const std::exception& e)
     {
@@ -228,41 +143,140 @@ static void save_subcon_todo_items(const std::filesystem::path& path, const std:
     }
 }
 
-// Real elapsed time since last_checked_unix_seconds, in the same "never
-// checked" / "very fresh" / "N minutes/hours ago" phrasing the old
-// cycle-counting version used - same reasoning for the "just now" special
-// case as that version's own "0 cycles ago" fix: an unqualified "0 minutes
-// ago" risks reading as "never" rather than "extremely recent."
-static std::string describe_staleness(const SUBCON_TODO_ITEM& item, int64_t now_unix_seconds)
+// Tasks dropped by reconcile_subcon_tasks() (subcon_tasks.h) are appended
+// here rather than discarded - they carry real history (what was found,
+// and when), and nothing about retiring a task says that history is
+// worthless. Never read back by subcon itself, only there for a person.
+static void archive_retired_subcon_tasks(const std::filesystem::path& path, const std::vector<SUBCON_TODO_ITEM>& retired)
 {
-    if (!item.ever_checked) return "never checked";
+    if (retired.empty()) return;
 
-    int64_t elapsed_seconds = now_unix_seconds - item.last_checked_unix_seconds;
-    if (elapsed_seconds < 60) return "checked moments ago - very fresh";
+    json archive = json::array();
+    {
+        std::ifstream existing(path);
+        if (existing)
+        {
+            bool readable = true;
+            try { existing >> archive; }
+            catch (const std::exception&) { readable = false; }
+            if (!readable || !archive.is_array())
+            {
+                existing.close();
+                set_aside_corrupt_file(path);
+                archive = json::array();
+            }
+        }
+    }
+    for (const SUBCON_TODO_ITEM& item : retired) archive.push_back(item);
 
-    int64_t elapsed_minutes = elapsed_seconds / 60;
-    if (elapsed_minutes < 60)
-        return "last checked " + std::to_string(elapsed_minutes) + " minute(s) ago";
+    try
+    {
+        if (!write_file_atomically(path, archive.dump(2, ' ', false, json::error_handler_t::replace)))
+            DEBUG_LOG_CLASS::instance().log_event("subcon", "failed to write " + path.filename().string());
+    }
+    catch (const std::exception& e)
+    {
+        DEBUG_LOG_CLASS::instance().log_event("subcon", std::string("failed to archive retired tasks: ") + e.what());
+    }
+}
 
-    int64_t elapsed_hours = elapsed_minutes / 60;
-    return "last checked " + std::to_string(elapsed_hours) + " hour(s) ago";
+// Loads the persisted task list and brings it in line with the task
+// definitions in code (subcon_task_defs(), subcon_tasks.h) - a missing
+// file (first run for this profile) or any parse trouble starts from the
+// definitions alone, rather than an empty list, since an empty list would
+// leave the reasoning loop with nothing to prioritize over at all -
+// unlike the queue above, where empty is a perfectly normal starting
+// state. Anything saved that no longer matches a definition (including
+// everything saved before tasks had keys) goes to retired_path, not away.
+static std::vector<SUBCON_TODO_ITEM> load_subcon_todo_items(const std::filesystem::path& path, const std::filesystem::path& retired_path)
+{
+    std::vector<SUBCON_TODO_ITEM> loaded;
+    {
+        std::ifstream file(path);
+        if (file)
+        {
+            try
+            {
+                json data;
+                file >> data;
+                loaded = data.get<std::vector<SUBCON_TODO_ITEM>>();
+            }
+            catch (const std::exception&)
+            {
+                // Treated as a first run - but kept aside, not overwritten:
+                // it holds every task's run times and history.
+                loaded.clear();
+                file.close();
+                set_aside_corrupt_file(path);
+            }
+        }
+    }
+
+    std::vector<SUBCON_TODO_ITEM> retired;
+    std::vector<SUBCON_TODO_ITEM> items = reconcile_subcon_tasks(loaded, subcon_task_defs(), retired);
+    if (!retired.empty())
+    {
+        archive_retired_subcon_tasks(retired_path, retired);
+        DEBUG_LOG_CLASS::instance().log_event("subcon", "retired " + std::to_string(retired.size()) + " old task(s) to " + retired_path.filename().string());
+    }
+    return items;
+}
+
+// Which tasks the prioritize stage may even be offered right now (cap and
+// minimum gap both allow it - subcon_check_eligibility(), subcon_tasks.h),
+// as indices into items. eligibility is filled in parallel to items (one
+// entry per item, eligible or not) for the caller to read run counts and
+// the next-eligible time from.
+static std::vector<size_t> eligible_task_indices(const std::vector<SUBCON_TODO_ITEM>& items, int64_t now_unix_seconds,
+                                                 int64_t last_arrival_unix_seconds, std::vector<SUBCON_ELIGIBILITY>& eligibility)
+{
+    std::vector<size_t> indices;
+    eligibility.clear();
+    for (size_t i = 0; i < items.size(); ++i)
+    {
+        eligibility.push_back(subcon_check_eligibility(items[i], now_unix_seconds, last_arrival_unix_seconds));
+        if (eligibility.back().eligible) indices.push_back(i);
+    }
+    return indices;
+}
+
+static std::string describe_presence(const std::string& presence)
+{
+    if (presence == "near") return "The user is at home.";
+    if (presence == "away") return "The user is away from home.";
+    return "It isn't known whether the user is home.";
 }
 
 // Turns the candidate list into the actual prompt text for the merged
 // prioritize/pace decision below - free function, not inlined, purely to
-// keep thread_main() itself readable. Includes each item's own staleness
-// now, not just its description, so the model has real recency to weigh
-// alongside importance (the user's own original "the 3rd looks important...
-// because I hadn't done it in a while" example) - and now also asks
-// whether now is even a good moment to act at all, rather than assuming
-// something must always be worth doing the moment it's asked (the user's
-// own idea, 2026-09-26/27: "if it seems not enough time has passed, figure
-// out a good sleep time, for when i should check again").
-static std::string build_prioritize_prompt(const std::vector<SUBCON_TODO_ITEM>& items, int64_t now_unix_seconds)
+// keep thread_main() itself readable. Only lists tasks that are allowed to
+// run right now (eligible_indices) - a capped task is not offered, rather
+// than offered with a note asking the model to please not choose it. The
+// numbers shown are each task's own index in items, so chosen_index maps
+// straight back without a translation table. Includes each item's own
+// staleness and how much of its allowance is used, not just its
+// description, so the model has real recency to weigh alongside
+// importance (the user's own original "the 3rd looks important... because
+// I hadn't done it in a while" example) - and also asks whether now is
+// even a good moment to act at all, rather than assuming something must
+// always be worth doing the moment it's asked (the user's own idea,
+// 2026-09-26/27: "if it seems not enough time has passed, figure out a
+// good sleep time, for when i should check again"). The time of day and
+// whether the user is home are included because several tasks depend on
+// them (weather in the morning, lights while away).
+static std::string build_prioritize_prompt(const std::vector<SUBCON_TODO_ITEM>& items, const std::vector<size_t>& eligible_indices,
+                                           const std::vector<SUBCON_ELIGIBILITY>& eligibility, int64_t now_unix_seconds,
+                                           const std::string& presence)
 {
-    std::string prompt = "Here are some things you could look into right now:\n";
-    for (size_t i = 0; i < items.size(); ++i)
-        prompt += std::to_string(i) + ". " + items[i].description + " (" + describe_staleness(items[i], now_unix_seconds) + ")\n";
+    std::string prompt = "It is " + subcon_describe_local_time(now_unix_seconds) + ". " + describe_presence(presence) + "\n";
+    prompt += "Here are some things you could look into right now:\n";
+    for (size_t i : eligible_indices)
+    {
+        prompt += std::to_string(i) + ". " + items[i].description + " (" + subcon_describe_staleness(items[i], now_unix_seconds);
+        if (items[i].max_runs_per_window > 0)
+            prompt += "; done " + std::to_string(eligibility[i].runs_in_window) + " of " + std::to_string(items[i].max_runs_per_window) + " allowed in this period";
+        prompt += ")\n";
+    }
 
     prompt += "First, decide whether now is actually a good moment to look into any of "
               "these, or whether nothing here is urgent enough yet and it'd make more "
@@ -279,12 +293,121 @@ static std::string build_prioritize_prompt(const std::vector<SUBCON_TODO_ITEM>& 
     return prompt;
 }
 
+// The turn that has to carry the real tool call - phrased as an
+// instruction to act, not a request for a plan: found 2026-10-28 that
+// "what are the concrete steps to actually do it?" got a text description
+// of steps and zero tool calls in 0/6 direct trials, where "Do this now
+// using your tools" got a real call in 6/6. how_to is the task's own
+// concrete hint (which tool, what to look for). Deliberately does NOT
+// mention what the task found last time: tried that first ("for
+// comparison, last time...") and the model answered "similar to the last
+// check" from that text without calling anything. The comparison is
+// made in the finding stage instead, once there are fresh tool results to
+// compare against (build_finding_prompt()).
+static std::string build_act_prompt(const SUBCON_TODO_ITEM& item)
+{
+    std::string prompt = "Do this now using your tools: \"" + item.description + "\". ";
+    if (!item.how_to.empty()) prompt += item.how_to + " ";
+    prompt += "Call the tool first - don't answer from memory. Answer in plain sentences, not JSON. Keep it brief.";
+    return prompt;
+}
+
+// Structured-output schema for the finding stage - replaces the earlier
+// free-text "what's the actual result?" turn, which could only ever
+// produce text and so queued (and eventually announced) a note after every
+// single cycle, including "no unresolved issues detected" (found
+// 2026-10-28 in ron's queue: 141 notes, all of that kind). noteworthy is
+// the gate: only a true one ever reaches the queue.
+static const json SUBCON_FINDING_FORMAT = {
+    {"type", "object"},
+    {"properties", {
+        {"noteworthy", {{"type", "boolean"}}},
+        {"urgency", {{"type", "string"}, {"enum", json::array({"low", "normal", "urgent"})}}},
+        {"summary", {{"type", "string"}}}
+    }},
+    {"required", json::array({"noteworthy", "urgency", "summary"})}
+};
+
+static std::string build_finding_prompt(const SUBCON_TODO_ITEM& item, int64_t now_unix_seconds, const std::vector<std::string>& already_told)
+{
+    std::string prompt =
+        "Now report what you found. Base it only on what your tool results above actually "
+        "showed - do not guess, and do not fill in anything they didn't say. Set noteworthy "
+        "to true only if the user would genuinely want to be told: something new, changed, "
+        "time-sensitive, or needing attention. Routine, unchanged, all-clear, or empty "
+        "results are not noteworthy. If your tools failed or returned nothing useful, set "
+        "noteworthy to false and say so in summary. Set urgency to \"urgent\" only for "
+        "something that can't wait (such as a severe weather alert), otherwise \"normal\" "
+        "or \"low\". Write summary as one to three plain sentences stating the facts, ready "
+        "to be read aloud - no JSON, no lists, no markdown.";
+
+    // What this task found last time, if recently - for judging "new or
+    // changed" against the fresh results above, not for the model to repeat.
+    if (!item.history.empty())
+    {
+        const SUBCON_TODO_RESULT& last = item.history.back();
+        if (!last.finding.empty() && (last.at_unix == 0 || now_unix_seconds - last.at_unix < 2 * SUBCON_WINDOW_SECONDS))
+            prompt += " For comparison, the previous check of this found: \"" + last.finding + "\" Judge changes by your results above, not by this.";
+    }
+
+    if (!already_told.empty())
+    {
+        prompt += " The user has already been told:";
+        for (const std::string& told : already_told) prompt += " \"" + told + "\"";
+        prompt += " Do not report the same thing again unless it has materially changed.";
+    }
+    return prompt;
+}
+
+// Structured-output schema for the delivery decision - the "when is a good
+// moment to tell the user" judgment (the user's own 2026-10-28 idea: a
+// subcon task of its own). Bounded by subcon_delivery_gate() before it is
+// ever asked (presence, idle, quiet hours, urgent / overdue notes) and
+// clamped after (SUBCON_DELIVERY_WAIT_MINUTES_*), same
+// judgment-on-top-of-a-mechanical-bound shape as the prioritize wait.
+static const json SUBCON_DELIVERY_FORMAT = {
+    {"type", "object"},
+    {"properties", {
+        {"deliver_now", {{"type", "boolean"}}},
+        {"wait_minutes", {{"type", "integer"}}},
+        {"reasoning", {{"type", "string"}}}
+    }},
+    {"required", json::array({"deliver_now", "wait_minutes", "reasoning"})}
+};
+
+static std::string build_delivery_prompt(const std::vector<SUBCON_NOTE>& notes, int64_t now_unix_seconds,
+                                         int64_t last_arrival_unix_seconds, int64_t last_delivery_unix_seconds)
+{
+    std::string prompt = "It is " + subcon_describe_local_time(now_unix_seconds) + ". The user is at home and nothing else is going on.";
+    if (last_arrival_unix_seconds != 0 && now_unix_seconds - last_arrival_unix_seconds < SUBCON_WINDOW_SECONDS)
+        prompt += " They got home " + std::to_string((now_unix_seconds - last_arrival_unix_seconds) / 60) + " minute(s) ago.";
+    if (last_delivery_unix_seconds != 0)
+        prompt += " You last told them something " + std::to_string((now_unix_seconds - last_delivery_unix_seconds) / 60) + " minute(s) ago.";
+
+    prompt += "\nThese are waiting to be told to the user:\n";
+    for (const SUBCON_NOTE& note : notes)
+    {
+        if (note.delivered) continue;
+        prompt += "- (" + note.urgency + ", found " + std::to_string((now_unix_seconds - note.created_unix) / 60) + " minute(s) ago) " +
+                  (note.label.empty() ? "" : note.label + ": ") + note.content + "\n";
+    }
+
+    prompt += "Decide whether this is a good moment to tell them, or whether to wait a while. "
+              "A good moment is a calm one - shortly after they get home, or a quiet point in "
+              "the day - and anything time-sensitive should not wait. If it can wait and you "
+              "just told them something, holding off a bit is fine. If this is a good moment, "
+              "set deliver_now to true and wait_minutes to 0. Otherwise set deliver_now to "
+              "false and wait_minutes to how long you'd hold off before reconsidering. Always "
+              "set reasoning to a brief explanation.";
+    return prompt;
+}
+
 // Same direct chat_thread-spawn shape as sidetrack.cpp's own
 // start_second_guess_call() - needed specifically because ollama_system::
 // input() (the ENTER_PRESSED-driven submission path used for the PLANNING
 // stage below, which just wants free text) has no way to pass a
-// response_format through to send() at all. Only used for the
-// PRIORITIZING stage. comms captured by reference, same as
+// response_format through to send() at all. Used for every structured
+// stage (PRIORITIZING, RESULTING, DELIVERING). comms captured by reference, same as
 // start_second_guess_call()'s own - safe for the same reason that one is:
 // nothing outside this instance's own chat_thread and thread_main()'s own
 // polling ever touches subcon_comms concurrently.
@@ -299,7 +422,14 @@ static void start_subcon_call(ollama_system& instance, COMMS& comms, const std::
             std::lock_guard<std::mutex> lock(output_buffer_mutex);
             comms.INPUT_FROM_USER.set(prompt);
         }
-        instance.send(nullptr, comms, "user", response_format);
+        // An uncaught exception on a std::thread is std::terminate for the
+        // whole program - log it and let the stage resolve as a failed call
+        // (empty response) instead.
+        try { instance.send(nullptr, comms, "user", response_format); }
+        catch (const std::exception& e)
+        {
+            DEBUG_LOG_CLASS::instance().log_event("subcon", std::string("model call threw: ") + e.what());
+        }
         instance.is_processing = false;
     });
 }
@@ -328,10 +458,57 @@ static void start_subcon_call(ollama_system& instance, COMMS& comms, const std::
 // pseudocode sketch of this whole state machine (something happened, need
 // to communicate a big thought to the upper system, then clean up). Unlike
 // the other three, it involves no subcon_llm call at all - the text to say
-// was already decided (whichever SUBCON_NOTE the delivery-readiness check
-// picked), this stage just stages it into pending_announcement for
-// exchange() to carry out and immediately resolves, same tick.
-enum class SUBCON_STAGE { IDLE, PRIORITIZING, PLANNING, RESULTING, ANNOUNCING };
+// was already decided, this stage just stages it into pending_announcement
+// for exchange() to carry out and immediately resolves, same tick. Since
+// 2026-10-28 that text is a digest of every pending note at once
+// (subcon_build_digest()), not one note per firing.
+//
+// 2026-10-28 changes to the cycle (the user's "make real subcon tasks"
+// project): PLANNING is now the act turn, the one that has to make a real
+// tool call, and its completion also waits for any remote tool result to
+// come back; RESULTING is a structured-output finding (noteworthy /
+// urgency / summary) so a quiet "all clear" never reaches the queue; and
+// DELIVERING is a new structured call where the model judges whether this
+// is a good moment to tell the user what's queued. Every cycle (and every
+// delivery decision) starts from a fresh conversation, so the small context
+// window isn't spent carrying earlier cycles' tool results around.
+enum class SUBCON_STAGE { IDLE, PRIORITIZING, PLANNING, RESULTING, DELIVERING, ANNOUNCING };
+
+// The only tools subcon is expected to call. It technically has the whole
+// tool set (the user's own 2026-09-27 call) and is kept passive only by
+// its persona prompt - this list is the audit that makes a slip visible:
+// any call outside it is logged loudly and its finding is thrown away
+// rather than queued (the action itself can't be undone from here). A
+// real structural block would have to live in the tool dispatch, which is
+// outside subcon's own scope.
+static bool is_read_only_tool(const std::string& name)
+{
+    static const char* const allowed[] = {
+        "web_search", "fetch_website_content", "rag_list_collections", "rag_search", "rag_search_documents",
+        "rag_get_document", "list_hue_lights", "check_presence", "list_timers", "check_timer", "get_clock_time"
+    };
+    for (const char* a : allowed)
+        if (name == a) return true;
+    return false;
+}
+
+// How many real tool results subcon_llm's conversation holds, and the name
+// of every tool the model asked for. The conversation is cleared at the
+// start of each cycle, so this is exactly "this cycle." Counted from
+// history rather than tracked as calls are dispatched so a built-in tool
+// (answered synchronously) and a remote one (answered later) are treated
+// the same.
+static int count_subcon_tool_results(ollama_system& instance, std::vector<std::string>& tool_names)
+{
+    std::lock_guard<std::mutex> lock(history_mutex);
+    int count = 0;
+    for (const Message& message : instance.history)
+    {
+        if (message.role == "tool") ++count;
+        for (const ToolCall& tc : message.tool_calls) tool_names.push_back(tc.name);
+    }
+    return count;
+}
 
 void SUBCON_WORKER_CLASS::thread_start()
 {
@@ -519,60 +696,31 @@ void SUBCON_WORKER_CLASS::thread_main()
     TIMED_IS_READY_SIMPLE delivery_check_timer;
     delivery_check_timer.set(30000); // ms
 
-    // Seed data for a fresh profile only (load_subcon_todo_items() below
-    // falls back to this on a missing/unparseable file) - once persisted,
-    // fake_todo_items itself is loaded from disk, not rebuilt from this
-    // literal every time. Aggregate-initialized positionally against
-    // SUBCON_TODO_ITEM's own declared order (description,
-    // last_checked_unix_seconds, ever_checked, history) - 0/false/{} is
-    // "never checked" regardless of which type last_checked_unix_seconds is.
-    //
-    // Refreshed 2026-09-27, now that subcon has full tool access
-    // (populate_default_tools() + tool_worker, above) - chosen deliberately
-    // for having a real, checkable answer through something subcon can
-    // actually reach, not just plausible-sounding fake topics anymore:
-    //   - lights: list_hue_lights (read-only, real device state)
-    //   - weather: web_search (real search results)
-    //   - last conversation: rag_search against the real, auto-synced
-    //     "conversations" collection (tools/rag/rag_db/rag_sync.cpp) - not
-    //     a dead end like it looked at first; olli already indexes its own
-    //     past chat_logs/ there.
-    //   - notes: rag_search against the real "Notes" collection - closest
-    //     of all five to the original subconscious brainstorm's own seed
-    //     scenario (IDEAS.md: noticing a job-offer email worth mentioning),
-    //     just notes instead of email.
-    //   - timers: clock's own list_timers/check_timer (read-only).
-    //
-    // "Check whether the RAG collections are up to date" (the original
-    // first item) dropped, not just replaced - the user's own call: it
-    // "never failed," nothing about it ever produces a real, discriminating
-    // answer, unlike the five below.
-    std::vector<SUBCON_TODO_ITEM> seed_todo_items = {
-        {"Check whether any lights were left on that probably shouldn't be", 0, false, {}},
-        {"See if there's been any change in the weather worth mentioning", 0, false, {}},
-        {"Review the last conversation for anything left unresolved", 0, false, {}},
-        {"Check my notes for anything time-sensitive or coming up soon", 0, false, {}},
-        {"Check if any timers are currently running or about to expire", 0, false, {}}
-    };
-
-    // Persisted to disk now (2026-09-26) - same directory as queue.json,
-    // same load/save shape. Closes a real gap: before this, a restart wiped
-    // every item's staleness/ever_checked/history back to fresh, as if no
-    // cycle had ever run. Also the actual point of this change - the user
-    // wanted a way to see these outside of a temporary debug-log hack.
+    // The tasks themselves are defined in code, subcon_task_defs()
+    // (subcon_tasks.h), and merged into whatever was persisted last run -
+    // see load_subcon_todo_items(). State (last checked, run times,
+    // history) survives for tasks that still exist; a task removed from
+    // the definitions is archived to todo_items_retired.json instead of
+    // lingering in the live list (which is also what retired the earlier
+    // placeholder topics on 2026-10-28). Persisted straight away so a
+    // retired task isn't archived a second time on the next start.
     std::filesystem::path subcon_todo_items_path = subcon_llm.PROPS.OLLI_DIRECTORY / "todo_items.json";
-    std::vector<SUBCON_TODO_ITEM> fake_todo_items = load_subcon_todo_items(subcon_todo_items_path, seed_todo_items);
+    std::filesystem::path subcon_retired_items_path = subcon_llm.PROPS.OLLI_DIRECTORY / "todo_items_retired.json";
+    std::vector<SUBCON_TODO_ITEM> task_items = load_subcon_todo_items(subcon_todo_items_path, subcon_retired_items_path);
+    save_subcon_todo_items(subcon_todo_items_path, task_items);
 
-    // Off by default (2026-09-26) - the whole reasoning loop above still
-    // only has fake_todo_items to work with, so leaving this on burns real
-    // GPU/LLM time every 60s producing fabricated findings about made-up
-    // topics into whatever profile happens to be running - fine for a
-    // deliberate test session, not something to leave running unattended
-    // in real day-to-day use. Flip true for testing; everything else in
+    // On (the user's call, 2026-10-28): subcon now has real tasks, each with
+    // a hard run cap and spacing (subcon_task_defs(), subcon_tasks.h), a
+    // finding gate that keeps "nothing to report" out of the queue, and
+    // delivery rules (presence, idle, quiet hours) - so leaving it running
+    // costs a handful of model calls a day, not one every minute. Before
+    // that it was off by default (2026-09-26) because the loop only had
+    // made-up topics to work with and burned GPU on fabricated findings.
+    // Flip false to turn the whole reasoning cycle off; everything else in
     // this thread (exchange()'s busy/presence copy, the delivery-readiness
-    // check) keeps running either way - only the "start a new think-cycle"
-    // gate below is affected.
-    constexpr bool SUBCON_THINK_CYCLE_ENABLED = false;
+    // check for notes already queued) keeps running either way - only the
+    // "start a new think-cycle" gate below is affected.
+    constexpr bool SUBCON_THINK_CYCLE_ENABLED = true;
 
     // TEMP-SMOKETEST (2026-09-27): forces every prioritize decision into a
     // real PLAN/RESULT cycle regardless of what should_run_now actually
@@ -587,9 +735,12 @@ void SUBCON_WORKER_CLASS::thread_main()
 
     SUBCON_STAGE stage = SUBCON_STAGE::IDLE;
     int chosen_index = -1;
-    std::string chosen_reasoning; // carries PRIORITIZING's own reasoning through to RESULTING's completion, for the queue entry/history built there
-    std::string chosen_plan;      // carries PLANNING's own plan through to RESULTING's completion, same reasoning
-    int announcing_note_index = -1; // which tell_later_queue entry ANNOUNCING is currently staging, set by the delivery-readiness check below
+    std::string chosen_reasoning; // carries PRIORITIZING's own reasoning through to RESULTING's completion, for the history entry built there
+    std::string chosen_plan;      // the act turn's own reply (may be empty if it only made tool calls), same reasoning
+    bool cycle_unsafe = false;    // set when the act turn called a tool outside is_read_only_tool() - its finding is then discarded
+    SUBCON_PRESENCE_TRACKER presence_tracker; // works out the last real arrival home from user_presence - see subcon_tasks.h
+    int64_t last_delivery_unix = 0;       // when something was last handed to the real chat
+    int64_t delivery_hold_until_unix = 0; // the model's own "ask me again after this" for the delivery decision
 
     RUN = true;
     while (RUN)
@@ -603,78 +754,186 @@ void SUBCON_WORKER_CLASS::thread_main()
         {
             std::lock_guard<std::mutex> lock(comms_mutex);
 
+            int64_t now_unix_seconds = static_cast<int64_t>(std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()));
+
+            // The mechanical delivery rules against the situation right now.
+            // A lambda (not inlined) because it is asked twice: once to
+            // decide whether to even start a delivery decision, and again
+            // just before anything is actually announced - the model call
+            // in between can take a minute or more, long enough for the
+            // user to leave, start talking to Olli, or for it to turn 22:00.
+            auto current_delivery_action = [&]()
+            {
+                SUBCON_DELIVERY_INPUT gate_input;
+                gate_input.user_near = (user_presence == "near");
+                gate_input.main_busy_level = main_busy_level;
+                gate_input.now_unix_seconds = now_unix_seconds;
+                gate_input.pending_count = subcon_count_pending(tell_later_queue);
+                gate_input.any_urgent = subcon_any_pending_urgent(tell_later_queue);
+                gate_input.oldest_age_seconds = subcon_oldest_pending_age(tell_later_queue, now_unix_seconds);
+                gate_input.hold_until_unix = delivery_hold_until_unix;
+                return subcon_delivery_gate(gate_input);
+            };
+
+            // "A cycle between leaving and arriving home" (the user's own
+            // definition of a day for task allowances, along with a plain
+            // 24 hours) - presence_tracker decides what counts as a real
+            // arrival (away for a while first, SUBCON_MIN_AWAY_SECONDS). On
+            // one, subcon_window_start() restarts every task's allowance,
+            // and the think timer is pulled in so what just became
+            // allowed is looked at soon rather than at the end of whatever
+            // wait was in progress.
+            if (presence_tracker.update(user_presence, now_unix_seconds))
+            {
+                DEBUG_LOG_CLASS::instance().log_event("subcon", "user arrived home - task allowances start a new period");
+                think_cycle_timer.set(30000); // ms
+            }
+
             // Start a new think-cycle - same gate the old one-shot test
             // prompt used (timer ready AND the real system currently idle),
-            // plus the enable switch declared above. No re-arm here anymore
-            // (2026-09-26/27) - think_cycle_timer's own next interval is now
-            // a real decision the model makes as part of this call's own
+            // plus the enable switch declared above. No re-arm on dispatch
+            // (2026-09-26/27) - think_cycle_timer's own next interval is a
+            // real decision the model makes as part of this call's own
             // result (see the completion branch below), not a fixed
-            // constant set blindly at dispatch time.
+            // constant set blindly at dispatch time. What is new
+            // (2026-10-28): only tasks that are currently allowed to run
+            // (cap and spacing, subcon_check_eligibility()) are offered,
+            // and if none are, the model isn't asked at all - the timer is
+            // simply set for when the soonest one opens up.
             if (SUBCON_THINK_CYCLE_ENABLED && stage == SUBCON_STAGE::IDLE && think_cycle_timer.is_ready() && main_busy_level < 10)
             {
-                int64_t now_unix_seconds = static_cast<int64_t>(std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()));
-                start_subcon_call(subcon_llm, subcon_comms, build_prioritize_prompt(fake_todo_items, now_unix_seconds), SUBCON_PRIORITIZE_FORMAT);
-                stage = SUBCON_STAGE::PRIORITIZING;
-                DEBUG_LOG_CLASS::instance().log_event("subcon", "think-cycle started: prioritizing");
+                std::vector<SUBCON_ELIGIBILITY> eligibility;
+                std::vector<size_t> eligible = eligible_task_indices(task_items, now_unix_seconds, presence_tracker.last_arrival_unix, eligibility);
+
+                if (eligible.empty())
+                {
+                    int64_t soonest = eligibility.front().next_eligible_unix;
+                    for (const SUBCON_ELIGIBILITY& e : eligibility) soonest = std::min(soonest, e.next_eligible_unix);
+
+                    // Capped at the usual maximum wait, not the full time
+                    // until the soonest one opens: coming home reopens
+                    // everything sooner than the clock would, and a
+                    // re-check with nothing eligible costs no model call.
+                    int minutes = std::clamp(static_cast<int>((soonest - now_unix_seconds + 59) / 60), SUBCON_WAIT_MINUTES_MIN, SUBCON_WAIT_MINUTES_MAX);
+                    DEBUG_LOG_CLASS::instance().log_event("subcon", "every task is at its limit right now - checking again in " + std::to_string(minutes) + " minute(s)");
+                    think_cycle_timer.set(minutes * 60000);
+                }
+                else
+                {
+                    // Fresh conversation for every cycle - keeps only the
+                    // protected persona message. With real tool results
+                    // now landing in the conversation, carrying earlier
+                    // cycles along would spend the small context window
+                    // (num_ctx 8192) on things that no longer matter.
+                    subcon_llm.clear_history_keep_protected();
+                    start_subcon_call(subcon_llm, subcon_comms,
+                                      build_prioritize_prompt(task_items, eligible, eligibility, now_unix_seconds, user_presence),
+                                      SUBCON_PRIORITIZE_FORMAT);
+                    stage = SUBCON_STAGE::PRIORITIZING;
+                    DEBUG_LOG_CLASS::instance().log_event("subcon", "think-cycle started: prioritizing");
+                }
             }
 
             // Delivery-readiness check - independent of the reasoning-cycle
             // stages (a previously-queued note can become ready to surface
             // while a new reasoning cycle is or isn't running), but only
-            // actually acts when stage == IDLE and nothing's already
-            // staged - doesn't interrupt an in-flight PRIORITIZING/PLANNING/
-            // RESULTING call (the user's own pseudocode's "special" case
-            // does say "interrupt whatever was going on" for something
-            // urgent, but presence/idle timing isn't that - a genuine
-            // interrupt-mid-call is real future scope, not this). "near"
-            // matches presence.cpp's own vocabulary (profile.is_near) - see
-            // comms.h/olla.cpp's own PART 5 for where this value actually
-            // comes from. Picks at most one note per firing (the oldest
-            // undelivered one), not the whole backlog at once - a cheap way
-            // to get "one thing at a time" (IDEAS.md's own digest-queue
-            // section) without new pacing machinery, given this timer only
-            // fires once per delivery_check_timer.set() interval above.
+            // acts when stage == IDLE and nothing's already staged -
+            // doesn't interrupt an in-flight call (the user's own
+            // pseudocode's "special" case does say "interrupt whatever was
+            // going on" for something urgent, but presence/idle timing
+            // isn't that - a genuine interrupt-mid-call is real future
+            // scope, not this). "near" matches presence.cpp's own
+            // vocabulary (profile.is_near) - see comms.h/olla.cpp's own
+            // PART 5 for where this value actually comes from.
+            //
+            // 2026-10-28, the user's own idea: when to say it is itself
+            // something subcon thinks about. subcon_delivery_gate()
+            // (subcon_tasks.h) holds the mechanical rules - somebody must
+            // be home, the system idle, and not the dead of night, with
+            // urgent or long-waiting notes going straight out - and only
+            // when none of those decide it is the model asked
+            // (DELIVERING). Everything pending goes out together as one
+            // digest, not one note per firing.
             if (delivery_check_timer.is_ready())
             {
                 delivery_check_timer.set(30000); // ms - re-arm for the next check
 
-                if (stage == SUBCON_STAGE::IDLE && pending_announcement.empty() &&
-                    user_presence == "near" && main_busy_level < 10)
+                if (stage == SUBCON_STAGE::IDLE && pending_announcement.empty())
                 {
-                    for (size_t i = 0; i < tell_later_queue.size(); ++i)
+                    int expired = subcon_expire_old_notes(tell_later_queue, now_unix_seconds);
+                    if (expired > 0)
                     {
-                        if (tell_later_queue[i].delivered) continue;
+                        DEBUG_LOG_CLASS::instance().log_event("subcon", "dropped " + std::to_string(expired) + " note(s) that went unheard too long");
+                        save_subcon_queue(subcon_queue_path, tell_later_queue);
+                    }
 
-                        announcing_note_index = static_cast<int>(i);
+                    SUBCON_DELIVERY_ACTION action = current_delivery_action();
+                    if (action == SUBCON_DELIVERY_ACTION::DELIVER_NOW)
+                    {
+                        DEBUG_LOG_CLASS::instance().log_event("subcon", "delivering without asking - an urgent note, or one that has waited too long");
                         stage = SUBCON_STAGE::ANNOUNCING;
-                        break;
+                    }
+                    else if (action == SUBCON_DELIVERY_ACTION::ASK_MODEL)
+                    {
+                        subcon_llm.clear_history_keep_protected();
+                        start_subcon_call(subcon_llm, subcon_comms,
+                                          build_delivery_prompt(tell_later_queue, now_unix_seconds, presence_tracker.last_arrival_unix, last_delivery_unix),
+                                          SUBCON_DELIVERY_FORMAT);
+                        stage = SUBCON_STAGE::DELIVERING;
+                        DEBUG_LOG_CLASS::instance().log_event("subcon", "deciding whether now is a good moment to deliver");
                     }
                 }
             }
 
             // ANNOUNCING itself - synchronous, no subcon_llm call, resolves
-            // in the same tick it's entered. Stages the note's own content
-            // into pending_announcement for exchange() to carry out to
-            // main.cpp (subcon_worker.h's own comment on why this is a
-            // plain string, not a COMMS field), marks it delivered, and
-            // "cleans up" (the user's own pseudocode wording) by clearing
-            // announcing_note_index and returning to IDLE.
+            // in the same tick it's entered. Builds one digest of every
+            // pending note into pending_announcement for exchange() to
+            // carry out to main.cpp (subcon_worker.h's own comment on why
+            // this is a plain string, not a COMMS field), which marks
+            // them all delivered, and returns to IDLE.
             if (stage == SUBCON_STAGE::ANNOUNCING)
             {
-                pending_announcement = tell_later_queue[static_cast<size_t>(announcing_note_index)].content;
-                tell_later_queue[static_cast<size_t>(announcing_note_index)].delivered = true;
-                save_subcon_queue(subcon_queue_path, tell_later_queue);
-                DEBUG_LOG_CLASS::instance().log_event("subcon", "announcing: \"" + pending_announcement + "\"");
+                // Re-checked now, not trusted from when this was decided -
+                // see current_delivery_action()'s own comment. If the
+                // situation changed, the notes simply stay queued and the
+                // regular delivery check picks them up again.
+                std::string digest;
+                if (current_delivery_action() == SUBCON_DELIVERY_ACTION::NOTHING)
+                    DEBUG_LOG_CLASS::instance().log_event("subcon", "conditions changed while deciding - not announcing now");
+                else
+                    digest = subcon_build_digest(tell_later_queue);
 
-                announcing_note_index = -1;
+                if (!digest.empty())
+                {
+                    pending_announcement = digest;
+                    save_subcon_queue(subcon_queue_path, tell_later_queue);
+                    last_delivery_unix = now_unix_seconds;
+                    delivery_hold_until_unix = 0;
+                    DEBUG_LOG_CLASS::instance().log_event("subcon", "announcing: \"" + pending_announcement + "\"");
+                }
                 stage = SUBCON_STAGE::IDLE;
             }
 
             // Drives whatever's currently in flight, if anything - same
             // async submit-and-poll pattern the old one-shot version used,
             // shared across every stage.
-            subcon_llm.input(subcon_comms, tool_worker);
-            subcon_llm.process(subcon_io_worker, nullptr, subcon_tools_list, tool_worker, subcon_comms);
+            // process() can run a synchronous model call itself (narrating
+            // a tool result), and an exception out of one used to unwind
+            // thread_main() entirely - subcon silently stopped for the rest
+            // of the session (found in review 2026-10-28: a cut multi-byte
+            // character in a fetched page). Logged and carried on instead;
+            // the stage's own completion check then sees whatever state was
+            // left.
+            try
+            {
+                subcon_llm.input(subcon_comms, tool_worker);
+                subcon_llm.process(subcon_io_worker, nullptr, subcon_tools_list, tool_worker, subcon_comms);
+            }
+            catch (const std::exception& e)
+            {
+                DEBUG_LOG_CLASS::instance().log_event("subcon", std::string("model/tool processing threw: ") + e.what());
+                subcon_llm.is_processing = false;
+            }
 
             // PRIORITIZING's own call finished (one way or another - see
             // this section's own comment above, SUBCON_STAGE's own
@@ -701,16 +960,46 @@ void SUBCON_WORKER_CLASS::thread_main()
                         chosen_reasoning = parsed.at("reasoning").get<std::string>();
                         int wait_minutes = parsed.at("wait_minutes").get<int>();
 
+                        // Recomputed, not remembered from when the call was
+                        // sent - the answer is checked against what is
+                        // allowed now, and a model that names a task it
+                        // wasn't offered (a capped one) is treated the same
+                        // as an out-of-range index.
+                        std::vector<SUBCON_ELIGIBILITY> eligibility;
+                        std::vector<size_t> eligible = eligible_task_indices(task_items, now_unix_seconds, presence_tracker.last_arrival_unix, eligibility);
+
                         // TEMP-SMOKETEST - see SUBCON_FORCE_RUN_FOR_TESTING's
                         // own comment above. Logs the real, unmodified
                         // decision first, so the actual pacing behavior
                         // stays visible even while this forces past it.
-                        if (SUBCON_FORCE_RUN_FOR_TESTING && !should_run_now)
+                        if (SUBCON_FORCE_RUN_FOR_TESTING && !should_run_now && !eligible.empty())
                         {
                             DEBUG_LOG_CLASS::instance().log_event("subcon",
                                 "[TEMP-SMOKETEST] would have stayed idle (" + chosen_reasoning +
                                 ", proposed " + std::to_string(wait_minutes) + " min) - forcing a run anyway");
                             should_run_now = true;
+
+                            // When the model decides to wait it has no reason
+                            // to fill in a valid chosen_index (the prompt only
+                            // asks for one when it's running something), so a
+                            // forced run used to bounce straight off the range
+                            // check below and no cycle ever completed (found
+                            // 2026-10-28: 7 forced runs, 0 completed). Pick
+                            // the stalest eligible task instead - never-
+                            // checked first, otherwise the oldest last_checked.
+                            if (std::find(eligible.begin(), eligible.end(), static_cast<size_t>(std::max(chosen_index, 0))) == eligible.end() || chosen_index < 0)
+                            {
+                                size_t stalest = eligible.front();
+                                for (size_t i : eligible)
+                                {
+                                    const SUBCON_TODO_ITEM& a = task_items[i];
+                                    const SUBCON_TODO_ITEM& b = task_items[stalest];
+                                    bool older = (!a.ever_checked && b.ever_checked) ||
+                                                 (a.ever_checked == b.ever_checked && a.last_checked_unix_seconds < b.last_checked_unix_seconds);
+                                    if (older) stalest = i;
+                                }
+                                chosen_index = static_cast<int>(stalest);
+                            }
                         }
 
                         // Qwen3's own real thinking trace (use_thinking =
@@ -741,30 +1030,36 @@ void SUBCON_WORKER_CLASS::thread_main()
                             think_cycle_timer.set(clamped_minutes * 60000);
                             stage = SUBCON_STAGE::IDLE;
                         }
-                        else if (chosen_index >= 0 && chosen_index < static_cast<int>(fake_todo_items.size()))
+                        else if (chosen_index >= 0 && std::find(eligible.begin(), eligible.end(), static_cast<size_t>(chosen_index)) != eligible.end())
                         {
-                            DEBUG_LOG_CLASS::instance().log_event("subcon",
-                                "chose: \"" + fake_todo_items[static_cast<size_t>(chosen_index)].description + "\" - " + chosen_reasoning);
+                            SUBCON_TODO_ITEM& chosen = task_items[static_cast<size_t>(chosen_index)];
+                            DEBUG_LOG_CLASS::instance().log_event("subcon", "chose: \"" + chosen.description + "\" - " + chosen_reasoning);
+
+                            // The attempt counts toward the task's allowance
+                            // from the moment it starts, not when it
+                            // finishes - a cycle that fails halfway must not
+                            // be free to retry in a loop.
+                            subcon_record_run(chosen, now_unix_seconds);
+                            save_subcon_todo_items(subcon_todo_items_path, task_items);
 
                             // No response_format this time (plain input(),
-                            // not start_subcon_call()) - but found live
+                            // not start_subcon_call()) - the act turn has to
+                            // be free to answer with tool calls. Found live
                             // that without being told otherwise, the model
                             // just repeated the previous turn's own JSON
                             // shape verbatim instead of writing a real
-                            // plan, apparently mimicking the immediately
+                            // answer, apparently mimicking the immediately
                             // preceding turn's own style even though
-                            // nothing constrains this one to JSON at all.
-                            // Explicit "plain sentences, not JSON" fixes it.
-                            subcon_comms.INPUT_FROM_USER.set(
-                                "Let's do this: \"" + fake_todo_items[static_cast<size_t>(chosen_index)].description +
-                                "\". What are the concrete steps to actually do it? Answer in plain "
-                                "sentences, not JSON. Keep it brief.");
+                            // nothing constrains this one to JSON at all -
+                            // build_act_prompt() carries the explicit
+                            // "plain sentences, not JSON" for that.
+                            subcon_comms.INPUT_FROM_USER.set(build_act_prompt(chosen));
                             subcon_comms.ENTER_PRESSED = true;
                             stage = SUBCON_STAGE::PLANNING;
                         }
                         else
                         {
-                            DEBUG_LOG_CLASS::instance().log_event("subcon", "should_run_now was true but chosen_index out of range - checking again shortly");
+                            DEBUG_LOG_CLASS::instance().log_event("subcon", "should_run_now was true but chosen_index isn't an allowed task - checking again shortly");
                             think_cycle_timer.set(60000); // ms
                             stage = SUBCON_STAGE::IDLE;
                         }
@@ -779,32 +1074,73 @@ void SUBCON_WORKER_CLASS::thread_main()
 
                 subcon_llm.last_received.response.clear();
             }
-            // PLANNING's own call finished - same "resolved one way or
-            // another" reasoning as PRIORITIZING above.
-            else if (stage == SUBCON_STAGE::PLANNING && !subcon_llm.is_processing)
+            // PLANNING's own call (the act turn) finished - same "resolved one way or
+            // another" reasoning as PRIORITIZING above, plus: not while a
+            // tool call is still unfinished. That means both ends of one:
+            // a call the model just asked for that process() hasn't
+            // dispatched yet (last_received.tool_calls - a call can arrive
+            // inside the narration of an earlier one, a tick after
+            // is_processing has already gone false; found live 2026-10-28
+            // when the finding was requested with list_hue_lights asked
+            // for but never run, and the model invented the bulbs), and a
+            // dispatched remote call whose result hasn't come back yet
+            // (outstanding_tool_call_ids - process() PART 5 claims it on a
+            // later tick and narrates it into last_received.response).
+            // Without that wait a tool-only reply would also look like
+            // "produced nothing."
+            //
+            // The finding is only asked for if a real tool was actually
+            // used. Without one the model can only be describing what it
+            // imagines it would have found (the fabrication the 2026-09-26
+            // work kept running into), so there is nothing true to report -
+            // the attempt is recorded as such and the cycle ends.
+            else if (stage == SUBCON_STAGE::PLANNING && !subcon_llm.is_processing &&
+                     subcon_llm.last_received.tool_calls.empty() &&
+                     subcon_llm.outstanding_tool_call_ids.empty())
             {
-                if (!subcon_llm.last_received.complete || subcon_llm.last_received.response.empty())
+                SUBCON_TODO_ITEM& chosen = task_items[static_cast<size_t>(chosen_index)];
+                chosen_plan = subcon_llm.last_received.response;
+                if (!chosen_plan.empty())
+                    DEBUG_LOG_CLASS::instance().log_event("subcon", "act: " + chosen_plan);
+
+                std::vector<std::string> tool_names;
+                int tools_used = count_subcon_tool_results(subcon_llm, tool_names);
+                cycle_unsafe = false;
+                for (const std::string& name : tool_names)
                 {
-                    DEBUG_LOG_CLASS::instance().log_event("subcon", "plan call failed or produced nothing - abandoning this cycle");
+                    if (is_read_only_tool(name)) continue;
+                    cycle_unsafe = true;
+                    DEBUG_LOG_CLASS::instance().log_event("subcon", "[SAFETY] subcon called a tool outside its read-only set: " + name + " - this cycle's finding will be discarded");
+                }
+
+                // Every call the model asked for needs a result in the
+                // conversation (a capped or failed call still gets an
+                // error result) - a call without one means any "finding"
+                // would be built on data the model never saw. Backstop
+                // for the wait above, not a replacement for it.
+                bool every_call_answered = tool_names.size() <= static_cast<size_t>(tools_used);
+
+                if (tools_used == 0 || !every_call_answered)
+                {
+                    DEBUG_LOG_CLASS::instance().log_event("subcon", tools_used == 0
+                        ? "act turn made no real tool call - nothing was actually checked, recording the attempt and moving on"
+                        : "a tool call never got a result - nothing trustworthy to report, recording the attempt and moving on");
+                    SUBCON_TODO_RESULT result;
+                    result.reasoning = chosen_reasoning;
+                    result.plan = chosen_plan;
+                    result.finding = tools_used == 0 ? "(no tool was used - nothing was actually checked)" : "(a tool call never got a result - nothing was reported)";
+                    result.at_unix = now_unix_seconds;
+                    subcon_append_history(chosen, result);
+                    save_subcon_todo_items(subcon_todo_items_path, task_items);
+
+                    think_cycle_timer.set(60000); // ms
                     stage = SUBCON_STAGE::IDLE;
                 }
                 else
                 {
-                    DEBUG_LOG_CLASS::instance().log_event("subcon", "plan: " + subcon_llm.last_received.response);
-                    chosen_plan = subcon_llm.last_received.response;
-
-                    // Ask for the actual outcome, not another how-to - see
-                    // SUBCON_TODO_RESULT's own comment on finding for why
-                    // this is its own stage rather than folded into plan
-                    // above. Deliberately open/neutral wording, not nudged
-                    // toward honesty about having no real way to know - the
-                    // point right now is observing what a toolless system
-                    // actually produces when pushed for a result, not
-                    // solving that up front (user's own call, 2026-09-26).
-                    subcon_comms.INPUT_FROM_USER.set(
-                        "You just did that. What's the actual result or finding? Answer in plain "
-                        "sentences, not JSON. Keep it brief.");
-                    subcon_comms.ENTER_PRESSED = true;
+                    start_subcon_call(subcon_llm, subcon_comms,
+                                      build_finding_prompt(chosen, now_unix_seconds, subcon_recent_told(chosen, now_unix_seconds, 3)),
+                                      SUBCON_FINDING_FORMAT);
                     stage = SUBCON_STAGE::RESULTING;
                 }
 
@@ -812,51 +1148,65 @@ void SUBCON_WORKER_CLASS::thread_main()
             }
             // RESULTING's own call finished - same "resolved one way or
             // another" reasoning as the stages above. This is where the
-            // digest queue entry and history both actually get built now -
-            // moved here from PLANNING's own completion (pre-2026-09-26)
-            // once a real finding existed to build them from instead of
-            // just a procedure.
+            // digest queue entry and history both actually get built - and
+            // where a finding is held back unless it's noteworthy (see
+            // SUBCON_FINDING_FORMAT's own comment).
             else if (stage == SUBCON_STAGE::RESULTING && !subcon_llm.is_processing)
             {
+                SUBCON_TODO_ITEM& chosen = task_items[static_cast<size_t>(chosen_index)];
+
                 if (!subcon_llm.last_received.complete || subcon_llm.last_received.response.empty())
                 {
-                    DEBUG_LOG_CLASS::instance().log_event("subcon", "result call failed or produced nothing - abandoning this cycle");
+                    DEBUG_LOG_CLASS::instance().log_event("subcon", "finding call failed or produced nothing - abandoning this cycle");
                 }
                 else
                 {
-                    DEBUG_LOG_CLASS::instance().log_event("subcon", "finding: " + subcon_llm.last_received.response);
+                    try
+                    {
+                        json parsed = json::parse(subcon_llm.last_received.response);
+                        bool noteworthy = parsed.at("noteworthy").get<bool>();
+                        std::string urgency = parsed.at("urgency").get<std::string>();
+                        std::string summary = parsed.at("summary").get<std::string>();
 
-                    // The digest queue itself (IDEAS.md's own section) -
-                    // the first real place subcon's own conclusions land
-                    // that isn't just a debug-log line. delivered stays
-                    // false until the delivery-readiness gate above marks
-                    // it. Built from the finding now, not the plan - a
-                    // finding is what's actually sayable to a user ("I
-                    // looked - nothing was unresolved"), a procedure never
-                    // was.
-                    SUBCON_NOTE note;
-                    note.content = "Regarding \"" + fake_todo_items[static_cast<size_t>(chosen_index)].description +
-                                    "\": " + subcon_llm.last_received.response;
-                    tell_later_queue.push_back(note);
-                    save_subcon_queue(subcon_queue_path, tell_later_queue);
+                        // A tool outside the read-only set means whatever the
+                        // model "found" came from a side effect, not a look-up
+                        // - never queued, whatever it says about itself.
+                        bool queue_it = noteworthy && !summary.empty() && !cycle_unsafe;
+                        DEBUG_LOG_CLASS::instance().log_event("subcon",
+                            std::string(queue_it ? "finding (worth telling): " : "finding (not queued): ") + summary);
 
-                    // Staleness bookkeeping (SUBCON_TODO_ITEM's own
-                    // comment) - user's own idea, 2026-09-26, now tracked in
-                    // real elapsed time rather than a cycle count (2026-09-
-                    // 27): only the chosen item needs touching - its own
-                    // last_checked_unix_seconds moves to now and it keeps a
-                    // real record of what happened via history. Every other
-                    // item needs no update at all anymore - its own
-                    // staleness is just "now minus its own last_checked_
-                    // unix_seconds," computed fresh wherever it's needed
-                    // (describe_staleness()) rather than incremented by hand
-                    // every cycle.
-                    fake_todo_items[static_cast<size_t>(chosen_index)].last_checked_unix_seconds =
-                        static_cast<int64_t>(std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()));
-                    fake_todo_items[static_cast<size_t>(chosen_index)].ever_checked = true;
-                    fake_todo_items[static_cast<size_t>(chosen_index)].history.push_back({chosen_reasoning, chosen_plan, subcon_llm.last_received.response});
+                        if (queue_it)
+                        {
+                            SUBCON_NOTE note;
+                            note.content = summary;
+                            note.label = chosen.label;
+                            note.urgency = (urgency == "urgent" || urgency == "low") ? urgency : "normal";
+                            note.created_unix = now_unix_seconds;
+                            tell_later_queue.push_back(note);
+                            save_subcon_queue(subcon_queue_path, tell_later_queue);
+                        }
 
-                    save_subcon_todo_items(subcon_todo_items_path, fake_todo_items);
+                        // Staleness bookkeeping (SUBCON_TODO_ITEM's own
+                        // comment) - user's own idea, 2026-09-26, tracked in
+                        // real elapsed time rather than a cycle count (2026-
+                        // 09-27): only the chosen item needs touching - its
+                        // own last_checked_unix_seconds moves to now and it
+                        // keeps a real record of what happened via history.
+                        chosen.last_checked_unix_seconds = now_unix_seconds;
+                        chosen.ever_checked = true;
+                        SUBCON_TODO_RESULT result;
+                        result.reasoning = chosen_reasoning;
+                        result.plan = chosen_plan;
+                        result.finding = summary;
+                        result.at_unix = now_unix_seconds;
+                        result.noteworthy = queue_it;
+                        subcon_append_history(chosen, result);
+                        save_subcon_todo_items(subcon_todo_items_path, task_items);
+                    }
+                    catch (const std::exception& e)
+                    {
+                        DEBUG_LOG_CLASS::instance().log_event("subcon", std::string("finding reply wasn't valid structured JSON: ") + e.what());
+                    }
                 }
 
                 // Whether this cycle succeeded or failed, ask again
@@ -868,6 +1218,53 @@ void SUBCON_WORKER_CLASS::thread_main()
                 think_cycle_timer.set(60000); // ms
                 subcon_llm.last_received.response.clear();
                 stage = SUBCON_STAGE::IDLE;
+            }
+            // DELIVERING's own call finished - the model's say on whether
+            // this is a good moment (see the delivery-readiness check
+            // above for the mechanical rules around it). A failure or an
+            // unreadable reply holds off a while rather than delivering
+            // blind; SUBCON_NOTE_MAX_HOLD_SECONDS still guarantees a note
+            // is never held forever.
+            else if (stage == SUBCON_STAGE::DELIVERING && !subcon_llm.is_processing)
+            {
+                stage = SUBCON_STAGE::IDLE;
+                delivery_hold_until_unix = now_unix_seconds + 10 * 60;
+
+                if (!subcon_llm.last_received.complete || subcon_llm.last_received.response.empty())
+                {
+                    DEBUG_LOG_CLASS::instance().log_event("subcon", "delivery decision failed or produced nothing - holding off 10 minutes");
+                }
+                else
+                {
+                    try
+                    {
+                        json parsed = json::parse(subcon_llm.last_received.response);
+                        bool deliver_now = parsed.at("deliver_now").get<bool>();
+                        int wait_minutes = parsed.at("wait_minutes").get<int>();
+                        std::string reasoning = parsed.at("reasoning").get<std::string>();
+
+                        if (deliver_now)
+                        {
+                            DEBUG_LOG_CLASS::instance().log_event("subcon", "good moment to deliver - " + reasoning);
+                            delivery_hold_until_unix = 0; // the ANNOUNCING re-check must not mistake the failure-default hold above for a wait
+                            stage = SUBCON_STAGE::ANNOUNCING;
+                        }
+                        else
+                        {
+                            int clamped_minutes = std::clamp(wait_minutes, SUBCON_DELIVERY_WAIT_MINUTES_MIN, SUBCON_DELIVERY_WAIT_MINUTES_MAX);
+                            delivery_hold_until_unix = now_unix_seconds + static_cast<int64_t>(clamped_minutes) * 60;
+                            DEBUG_LOG_CLASS::instance().log_event("subcon",
+                                "holding off on delivery - " + reasoning + " (asking again in " + std::to_string(clamped_minutes) +
+                                " minute(s), proposed " + std::to_string(wait_minutes) + ")");
+                        }
+                    }
+                    catch (const std::exception& e)
+                    {
+                        DEBUG_LOG_CLASS::instance().log_event("subcon", std::string("delivery reply wasn't valid structured JSON: ") + e.what() + " - holding off 10 minutes");
+                    }
+                }
+
+                subcon_llm.last_received.response.clear();
             }
         }
 

@@ -3986,7 +3986,37 @@ it can actually act under its persona's judgment, not just talk about it.
   call - *"the living room ceiling light is dimmed to 20%,"* *"temperature
   drop from 21°C to 18°C,"* *"two active timers,"* none of it real.
   `grep -c "tool_calls"` across a full stress-test run (~20 forced
-  cycles, `SUBCON_FORCE_RUN_FOR_TESTING`, see below): **0**. Leading
+  cycles, `SUBCON_FORCE_RUN_FOR_TESTING`, see below): **0**.
+  **Measurement caveat added 2026-10-28:** that count is weaker evidence
+  than it reads. `olla.cpp` logs an assistant reply as `[tool_calls: ...]`
+  only when the reply has *no* text (`final_content.empty() ?
+  summarize_tool_calls(...) : final_content`), so a reply with text *and* a
+  tool call is logged as plain text and would not match that grep. The
+  reliable signal is the tool *result* entry, which is logged regardless
+  of reply text: count `=== subcon / tool ===` blocks. The one subcon run
+  that was dumped in full (the RAG/notes cycle) had no tool entries at all
+  and its finding said "simulated verification," so that run stands; the
+  ~20-cycle total should be re-measured with `/ tool ===` before relying
+  on it. **Re-measured 2026-10-28 (the "0" holds, and the tools ARE in
+  the requests):** 5 completed cycles, one per topic, **0** `subcon /
+  tool ===` entries. A temporary log line in `send()` showed what each of
+  subcon's three model calls per cycle actually carried: prioritize = 0
+  tool defs / `tool_worker` NULL (deliberate - `start_subcon_call()`
+  passes `nullptr`); plan = **21** tool defs, `tool_worker` set, reply
+  contained **0** tool calls; result = **21** tool defs, reply **0** tool
+  calls. So the wiring is fine and the model is simply declining to call
+  anything - the open question is why, not whether it can. Also fixed in
+  passing: `SUBCON_FORCE_RUN_FOR_TESTING` produced no completed cycles at
+  all (7 forced runs, 0 completed) because the model doesn't fill in a
+  valid `chosen_index` when it chooses to wait, so every forced run
+  bounced off the range check; the force path now picks the stalest topic
+  (never-checked first, else oldest). Still default-off test scaffolding.
+  Separately noticed: with every topic ~28 days stale and no way to judge
+  importance, the model said "wait - no urgency signals" every time it
+  was asked. For scale: in `ron`'s Oct 11-28 run the main chat logged 148
+  `chat / tool ===` results, so the model plainly *can* issue tool calls
+  - which makes the prompt-framing theory below more likely than a model
+  limitation. Leading
   theory, untested: the RESULT stage's own prompt - *"You just did that.
   What's the actual result or finding?"* - is phrased in the past tense,
   presupposing the check already happened, which may be training the
@@ -3995,6 +4025,28 @@ it can actually act under its persona's judgment, not just talk about it.
   invitation wording next ("check this now using whatever tool applies").
   Parked here, not fixed - "we haven't made too much progress on subcon,"
   the user's own words, picking back up another day.
+  **ROOT CAUSE FOUND + FIXED 2026-10-28 (uncommitted at time of writing):**
+  not thinking mode (direct Ollama tests: tool calls fine with it on) and
+  not the persona - the PLAN prompt ("what are the concrete steps to
+  actually do it?") asks for a description, and the model answers it in
+  text: 0/6 tool calls in the real flow vs 6/6 for "Do this now using your
+  tools: ...". Rewording only the later RESULT prompt doesn't help (0-1/6)
+  - the first turn after prioritize has to be the act prompt. Fix in
+  `subcon_worker.cpp`: PLANNING's prompt is now the act prompt, and the
+  PLANNING/RESULTING completion branches wait for
+  `outstanding_tool_call_ids.empty()` so a tool-only reply isn't mistaken
+  for "produced nothing". Stage names/flow unchanged (PLANNING's saved
+  text is now what it did, RESULTING still asks for the finding). Live-
+  verified on the `claude` profile (forced-run flags on, then reverted):
+  2 cycles, 2 real `rag_search` calls (`=== subcon / tool ===`), both
+  completed with findings, no crash. Also in this pass (`sidetrack.cpp`):
+  second-guess now collects remote tool results (it never ran `process()`)
+  and its stage-5 prompt no longer carries the "not JSON" guard that had
+  cut its tool-call rate. Result collection was only regression-tested
+  live (a review completed cleanly) - it didn't happen to call a remote
+  tool. Observed, NOT fixed: the RAG conversations collection contains
+  second-guess/subcon JSON noise (`{"needs_correction": false}`, plan text)
+  that comes back in search results.
   - Two small, reusable testing tools added alongside this investigation,
     both default-off, both meant to stay in the source for next time:
     `SUBCON_FORCE_RUN_FOR_TESTING` (forces every prioritize decision into
@@ -4025,10 +4077,88 @@ it can actually act under its persona's judgment, not just talk about it.
   shared `comms.INPUT_FROM_LLM` (unlike stage 4's own non-streaming DONE-
   check, which never reaches the user at all). Fixed with the same one-
   line guard already proven for subcon: `"Answer in plain sentences, not
-  JSON."` appended to stage 5's own prompt. **Not yet live-verified** -
-  `needs_correction: true` (the only path that exercises stage 5 at all)
-  didn't fire naturally across 5 separate attempts this session, despite
-  trying prompts likely to provoke it (a refusal, a compound request, a
-  vague follow-up). Low risk regardless - pure prompt-text addition, no
-  parsing or control-flow touched, builds clean. Revisit and actually
-  hear it fixed another day.
+  JSON."` appended to stage 5's own prompt. **Live-verified 2026-10-28,
+  in real use** (it wasn't possible to trigger on demand on 2026-09-29:
+  `needs_correction: true`, the only path that exercises stage 5 at all,
+  didn't fire naturally across 5 separate attempts that day). The `ron`
+  profile ran continuously from Oct 11 to Oct 28 on the 8b561dd build
+  and, with no deliberate testing, accumulated 71 stage-5 correction
+  prompts (37% of 192 second-guess verdicts): **0** came back as raw JSON,
+  70 were plain text, 1 was a real tool call. Pure prompt-text addition,
+  no parsing or control-flow touched. Not verified *by ear* over TTS
+  specifically - the debug log shows the text the model produced, not what
+  was spoken - but with no JSON in the text there is nothing for TTS to
+  read out. Separate observation from the same data, not a bug in this
+  fix: the correction replies are mostly "Let me fix that" style
+  statements, and only 4 `sidetrack-second-guess / tool` result entries
+  exist across all 71 - most corrections do not end in an executed
+  action, and the same sentence often repeats several turns in a row up to
+  `SECOND_GUESS_MAX_CHAIN`. Not investigated further.
+
+- **Built 2026-10-28: real subcon tasks, hard run limits, a "worth telling"
+  gate, and model-judged delivery** (`SUBCON.md` is the full description;
+  this is the record of how it was built and tested). New header-only
+  `source/subcon_tasks.h` holds the task list and every time rule (all take
+  "now" as a parameter, so they were unit tested with invented timestamps);
+  `subcon_worker.cpp`'s `thread_main()` wires them to the clock and the model.
+  - **Tasks** (defined in code, `subcon_task_defs()`): weather for Lafayette,
+    Louisiana (max 3/period, 4 h apart), past-conversation review (3, 4 h),
+    notes (2, 6 h), lights-left-on while away (4, 2 h), forgotten timers
+    (2, 6 h). A period is the later of 24 h ago or the user's last real
+    arrival home (away >= 10 min first). Caps are enforced in code: a capped
+    task is not offered to the model, and if none are allowed the model isn't
+    asked at all. Saved tasks are merged with the definitions by `key`; ron's
+    three old placeholder topics are retired to `todo_items_retired.json`
+    (verified against ron's real files: 3 retired, 5 new, 141 old notes
+    untouched, not re-archived on the next start).
+  - **Finding gate**: the old free-text "what's the result?" turn queued (and
+    announced) a note after *every* cycle - 141 of them in ron's queue, all
+    "no unresolved issues". It is now structured `{noteworthy, urgency,
+    summary}`; only `noteworthy` reaches the queue, with the last 3 things
+    already told given to the model to avoid repeats. A finding is also
+    refused unless a real tool result exists and every tool call got an
+    answer, and any tool outside a read-only list is logged `[SAFETY]` and
+    its finding discarded.
+  - **Fresh conversation per cycle** (`clear_history_keep_protected()`), so
+    real tool results don't eat the 8192-token context.
+  - **Delivery**: `subcon_delivery_gate()` is the mechanical part (user near,
+    system idle, no speaking 22:00-07:00, urgent or 4 h-old notes bypass the
+    model); otherwise a structured `DELIVERING` call lets the model decide
+    "now" or "ask again in N min" (5-120). Everything waiting goes out as one
+    code-built digest. The gate is re-run right before announcing.
+  - **Bugs found by live testing during this work** (all fixed): (1) a second
+    tool call arriving inside the narration of the first was missed because the
+    act stage looked finished a tick early - the model then *invented*
+    `list_hue_lights` results (fake bulb IDs) and called it "worth telling";
+    the stage now waits for `last_received.tool_calls` and outstanding ids, and
+    refuses a finding if any call is unanswered. (2) Telling the act turn what
+    the task found last time made the model answer "similar to the last check"
+    without calling anything - the comparison moved to the finding stage and
+    the act prompt now says to call the tool first. (3) Review findings: gate
+    re-check before announcing, exceptions in the subcon thread logged instead
+    of silently ending it (or `terminate`), atomic file writes, unreadable files
+    moved aside as `.corrupt`, a 1-second cap-boundary error.
+  - **Verified**: unit tests of `subcon_tasks.h` (caps, gap, arrival reset,
+    flap, quiet hours, delivery gate, digest ordering, expiry, migration of
+    ron's real files, history trimming) all pass; live on the `claude` profile
+    - migration, a corrupt `queue.json`, a real away->near->arrival event,
+    delivery end to end (model said "deliver now", digest handed to the chat
+    and narrated), the lights chain with real hue data, and **15 forced cycles
+    across 3 fresh-start rounds: 15/15 made a real tool call**, 0 safety
+    flags, 0 unanswered calls. `crash_log.txt` untouched. Production build
+    (flags off) also checked: starts, migrates, makes its own idle decision.
+    Not verified: a full real day, and the arrival-resets-allowance path past
+    the gap rule (a gap of hours still applies after arriving).
+  - **Measured**: a chat message sent while a subcon model call was in flight
+    waited ~22 s instead of 3-5 s (Ollama serialises requests).
+  - **Not fixed, out of scope (flagged)**: `main.cpp` hands an announcement to
+    the chat without checking `chat.is_processing`; `tools.cpp`'s
+    `substr(0, 4000)` can cut a UTF-8 character and break the next request
+    (subcon now survives it); presence stays `unknown` after a restart until the
+    next home/away change, so nothing is delivered until then (notes expire
+    after 18 h) - a possible fix is subcon looking presence up itself;
+    the RAG `conversations` collection indexes second-guess/auditor lines
+    (`needs_correction`, "System Auditor Report"), which the conversation task
+    reads as "recurring problems" (it isn't queued as new, but the task is
+    mostly noise until the indexing is fixed); `bye` can take as long as the
+    model call in flight.

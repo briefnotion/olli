@@ -709,7 +709,12 @@ void SUBCON_WORKER_CLASS::thread_main()
     std::vector<SUBCON_TODO_ITEM> task_items = load_subcon_todo_items(subcon_todo_items_path, subcon_retired_items_path);
     save_subcon_todo_items(subcon_todo_items_path, task_items);
 
-    // On (the user's call, 2026-10-28): subcon now has real tasks, each with
+    // OFF (the user's call, 2026-10-29): subcon is moving out of olli into the
+    // standalone tools/subcon tool (TODO.md, "Subcon moved out of olli"), and
+    // this thread must not start new cycles while that tool owns the same
+    // <profile>/subcon/ files. Flip back to true to revert.
+    //
+    // Was on (the user's call, 2026-10-28): subcon now has real tasks, each with
     // a hard run cap and spacing (subcon_task_defs(), subcon_tasks.h), a
     // finding gate that keeps "nothing to report" out of the queue, and
     // delivery rules (presence, idle, quiet hours) - so leaving it running
@@ -720,7 +725,7 @@ void SUBCON_WORKER_CLASS::thread_main()
     // this thread (exchange()'s busy/presence copy, the delivery-readiness
     // check for notes already queued) keeps running either way - only the
     // "start a new think-cycle" gate below is affected.
-    constexpr bool SUBCON_THINK_CYCLE_ENABLED = true;
+    constexpr bool SUBCON_THINK_CYCLE_ENABLED = false;
 
     // TEMP-SMOKETEST (2026-09-27): forces every prioritize decision into a
     // real PLAN/RESULT cycle regardless of what should_run_now actually

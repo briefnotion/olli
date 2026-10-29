@@ -80,6 +80,30 @@ tool needs.
   `select()` call in `main()`, and the `redraw_screen()` call at the bottom
   of the loop - nothing else depends on any of it.
 
+## Two servers: olli and subcon
+
+`template_tool.cpp` already holds **two** `OLLI_LINK`s - one to olli (port
+47601) and one to the subcon tool (port 47603, built with
+`SUBCON_TOOL_PORT`), both from the same `make_register_message()`. Subcon
+speaks the identical protocol, so nothing in CUSTOMIZE #1/#2 changes for it;
+`olli_processing()` simply runs once per link and `handle_call()` is handed
+the link the call arrived on. Keep these rules as you fill in the template
+(the full list is in [`../PROTOCOL.md`](../PROTOCOL.md)'s "Two servers"
+section):
+
+- Answer a call with `send_result()`/`send_error()` on the link passed to
+  `handle_call()` - never stash a single global link.
+- An event that traces back to a call (a timer expiring) goes out only on the
+  link that made the call - remember that link next to the state
+  (`../clock/clock.cpp`'s `ActiveTimer::origin_link`).
+- An ambient event goes out on both links, and ambient state is resent on a
+  link when it (re)connects (`../presence/presence.cpp`'s
+  `sync_state_to_new_links()`).
+- Reset per-identity state only via `all_links_dropped()` (`olli_link.hpp`) -
+  one server dropping must not wipe what the other still uses.
+- A subcon that isn't running is fine: its link quietly retries, and
+  `subcon_link_indicator()` is the only thing it adds to the display.
+
 ## Why `olli_link` is a shared directory, not a copy per tool
 
 `olli_link.hpp`/`olli_link.cpp` used to be copied into each tool's own

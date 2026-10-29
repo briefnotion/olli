@@ -4162,3 +4162,65 @@ it can actually act under its persona's judgment, not just talk about it.
     reads as "recurring problems" (it isn't queued as new, but the task is
     mostly noise until the indexing is fixed); `bye` can take as long as the
     model call in flight.
+
+### Subcon moved out of olli into a standalone remote tool (2026-10-29, built + tested, NOT committed, old in-olli subcon still present)
+
+- **Why:** after a day of watching the in-olli subcon on `ron` (task caps held,
+  no crashes, but none of the queued notes were ever delivered and delivery
+  timing was the hard part), the plan changed: subcon becomes its own remote
+  tool, olli *pulls* ("anything on your mind?"), and subcon is then removed
+  from olli. No delivery gate, no events, no AI used for delivery. A busy
+  signal (subcon declining to start a cycle while olli is busy) is a later
+  idea; `may_start_cycle()` in `tools/subcon/reasoner.cpp` is the seam.
+- **`tools/subcon/`** ([README](tools/subcon/README.md)): registers one tool,
+  `get_subcon_notes`, with olli. It builds one digest of all unread notes and
+  marks them read. It has its own Ollama conversation, the same five tasks and
+  caps as before, a read-only allowlist for tools, and internal copies of
+  web_search / fetch_website_content / get_clock_time.
+- **Mini-olli:** subcon also *serves* the remote-tool protocol on
+  `127.0.0.1:47603`, so the other tools (clock, hue, presence, rag) can be
+  called by subcon's model. Tools therefore hold two links.
+- **`tools/olli_link/`:** `OLLI_LINK` takes an optional port. The
+  single-instance lock is keyed by tool name + port. Calls are answered on the
+  link they arrived on; origin-bound events (timer expiry) go to the link that
+  asked; ambient events (presence) go to both. `tools/PROTOCOL.md` has a
+  "Two servers" section. clock, presence, hue, rag_tool and the template were
+  updated; `olli_display` untouched.
+- **Presence tool:** resyncs after *each link's identity message* (not on
+  connect) and reports "not known yet" until its first poll. Reason: see the
+  olli-side bug below.
+- **`get_subcon_notes` description:** wording measured against olli's model
+  (n=10 per variant, fresh conversation, seeded note). First ask: all wordings
+  called it 10/10. Follow-up ("anything else?") old wording 2/20, new wording
+  18/20; no over-calling on unrelated openers (0/8). The new wording is in
+  `make_register_message()`. If it regresses, the fallback is a persona line
+  (the user's call).
+- **Testing done:** all start orders, olli restarts (presence known after
+  ~60 s, no spurious transition), tool kill/restart recovery, a real
+  away->near arrival, missing-tools skip (rag absent), caps without
+  `--test-ignore-limits`, shutdown timing, crash_log unchanged. Not verified:
+  the exact "not known yet" presence wording (narrow race, never hit in 6
+  tries).
+- **Process note:** the wording experiment ran a test olli with TTS on the real
+  speakers for about an hour. Muted shims for aplay/espeak-ng/paplay are the
+  way to run olli tests silently.
+- **Open / not done:**
+  - **Olli-side bug (`source/remote_tools.cpp`, `REMOTE_TOOL_LISTENER::poll()`,
+    ~lines 114-148):** one `read()`, only the register line is extracted;
+    anything a tool sends right behind it is silently dropped. Worked around
+    tool-side; not fixed in `source/` (needs a go-ahead).
+  - `fetch_website_content` in the subcon tool can reach loopback/LAN hosts.
+  - 4-call-per-reply cap and 12 KB cycle budget are constants, not settings.
+  - Notes are delivered on pull, so a note found while you're away waits for
+    you to ask; deliver-on-reply deferred.
+  - **Do not run both subcons on one profile.** The tool takes a flock on
+    `<state>/subcon.lock`; the old in-olli subcon does not. Retire the old one
+    (keep it under `#if 0`, remove exchange()/announcement wiring from
+    `main.cpp`) only after the tool has been run for real on ron.
+- **Hand-off state (2026-10-29, later):** old in-olli subcon switched off
+  (`SUBCON_THINK_CYCLE_ENABLED = false` in `source/subcon_worker.cpp`, nothing
+  else in `source/` touched; olli compiled, not yet run). `build/install_to_home.sh`
+  now installs `subcon` with the other tools. Ron's 4 pending old notes were
+  marked expired (backup: `~/olli_files_ron/subcon/queue.json.bak-20261029-before-drain`),
+  so the old thread has nothing left to deliver or save. Full removal of the
+  old subcon code (under `#if 0`) is still to do once the tool has run well.

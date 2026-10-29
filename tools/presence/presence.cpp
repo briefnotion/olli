@@ -211,6 +211,14 @@ namespace {
 
     std::vector<PersonProfile> people;
 
+    // True once poll_all_people() has run at least once over the current
+    // `people` - until then every PersonProfile's is_near is just its
+    // default (false), not a real reading, so it must not be sent to a
+    // server as if it were one. Cleared when people is rebuilt from scratch
+    // (load_person_profiles()); deliberately NOT cleared by a reconnect
+    // under the same profile - those readings are still real.
+    bool presence_state_known = false;
+
     // Builds people fresh from settings.people (already-parsed/migrated
     // JSON - see load_settings()) - one PersonProfile per entry, with one
     // BluetoothBackend and one WifiBackend each.
@@ -226,6 +234,38 @@ namespace {
         for (PersonProfile& profile : people) {
             profile.poll();
         }
+        if (!people.empty()) presence_state_known = true;
+    }
+
+    // Sends the current user.presence value as a silent event (no message,
+    // so olli doesn't narrate it - only the var is applied, see
+    // source/olla.cpp PART 5) to a link whose server has just identified
+    // itself, so a server that started after us, or restarted, learns where
+    // things stand right away instead of only at the next real transition.
+    // Only that link gets it - the other server already knows. With more
+    // than one tracked person, "near" if anyone is, matching the
+    // "user.presence assumes one person" caveat on fire_transition_event()
+    // above. Held back (needs_sync stays set) until presence_state_known.
+    //
+    // Armed by the link's "identity" message (see main()), NOT by the
+    // connection coming up: olli's REMOTE_TOOL_LISTENER::poll()
+    // (source/remote_tools.cpp) reads the register line and silently throws
+    // away any bytes that arrived in the same read() after it, and an event
+    // sent right at connect lands exactly there (register and event leave in
+    // the same tick). The identity message only exists once olli has built
+    // its per-connection TOOL_REMOTE, so anything sent after it is read by
+    // the code that actually queues events.
+    void sync_state_to_new_links(OLLI_LINK* links[], bool needs_sync[], int count)
+    {
+        if (!presence_state_known) return;
+
+        bool any_near = std::any_of(people.begin(), people.end(), [](const PersonProfile& p) { return p.is_near; });
+        json var = {{"name", "user.presence"}, {"value", any_near ? "near" : "away"}};
+        for (int i = 0; i < count; ++i) {
+            if (!needs_sync[i] || !links[i]->is_connected()) continue;
+            links[i]->send_event("", nullptr, EVENT_NO_ORIGIN_ID, var);
+            needs_sync[i] = false;
+        }
     }
 
     // Steps through every person; for each one whose trigger is on, fires
@@ -238,13 +278,21 @@ namespace {
     // transition (e.g. "just got home" following "just left") replaces
     // rather than stacks, and auto-clearing 30s later, same convention as
     // the timer line.
-    void run_triggers(OLLI_LINK& link, OLLI_DISPLAY& display)
+    //
+    // A transition is ambient (it traces back to no call), so it goes out
+    // on BOTH servers' links - olli's and subcon's. A link that isn't
+    // connected right now just drops it (send_event() is a no-op then);
+    // sync_state_to_new_links() below is what catches a late-connecting
+    // server up on the current state instead.
+    void run_triggers(OLLI_LINK& link, OLLI_LINK& subcon_link, OLLI_DISPLAY& display)
     {
         for (PersonProfile& profile : people) {
             if (!profile.triggered) continue;
 
             std::string message = profile.name + (profile.is_near ? " just got home." : " just left.");
-            fire_transition_event(link, message, profile.is_near ? profile.on_near_action : profile.on_away_action, profile.is_near);
+            const json& action = profile.is_near ? profile.on_near_action : profile.on_away_action;
+            fire_transition_event(link, message, action, profile.is_near);
+            fire_transition_event(subcon_link, message, action, profile.is_near);
             display.set_activity_line(profile.name, message, 30);
 
             profile.triggered = false;
@@ -322,6 +370,7 @@ namespace {
     void load_person_profiles()
     {
         people.clear();
+        presence_state_known = false;
         for (const PersonSettings& person_settings : settings.people) {
             PersonProfile profile(person_settings.name);
             profile.add_bluetooth_backend(BluetoothBackend(person_settings.bluetooth_mac));
@@ -392,6 +441,15 @@ namespace {
     {
         if (people.empty()) {
             return "No people configured for this profile yet - see get_presence_setup.";
+        }
+
+        // Until the first poll finishes every is_near is just its default
+        // (false) - reporting that as AWAY would be a made-up reading. The
+        // wording deliberately contains neither NEAR nor AWAY: subcon's
+        // parse_presence_text() (tools/subcon/reasoner.cpp) looks for those
+        // two words and treats anything else as "no answer yet".
+        if (!presence_state_known) {
+            return "Presence: not known yet (first check still running).";
         }
 
         std::stringstream ss;
@@ -700,7 +758,15 @@ int main(int argc, char* argv[])
     // settings here at startup the way this file used to, since that meant
     // presence started polling real hardware before olli had even
     // connected, under whatever the shared file happened to hold.
+    // One link per server (olli, and subcon if it's running) - same register
+    // message on both. See ../PROTOCOL.md's "Two servers" section.
     OLLI_LINK link(host, host_addr, make_register_message());
+    OLLI_LINK subcon_link(host, host_addr, make_register_message(), SUBCON_TOOL_PORT);
+    OLLI_LINK* links[2] = {&link, &subcon_link};
+    // Per link: set when that link's server sends its "identity" message,
+    // cleared once the current presence state has been sent on it
+    // (sync_state_to_new_links()).
+    bool needs_sync[2] = {false, false};
     OLLI_DISPLAY display(1); // "No people loaded." until draw_people_list()'s first call corrects this
 
     // connection_status/tool_status are the display's two lower fixed lines
@@ -728,6 +794,10 @@ int main(int argc, char* argv[])
             FD_SET(link.fd(), &read_fds);
             max_fd = link.fd();
         }
+        if (subcon_link.fd() >= 0) {
+            FD_SET(subcon_link.fd(), &read_fds);
+            max_fd = std::max(max_fd, subcon_link.fd());
+        }
 
         int ready = select(max_fd + 1, &read_fds, nullptr, nullptr, &tv);
 
@@ -735,17 +805,40 @@ int main(int argc, char* argv[])
         if (key == 'q' || key == 'Q' || key == 3) quit = true;
 
         bool socket_readable = link.fd() >= 0 && ready > 0 && FD_ISSET(link.fd(), &read_fds);
+        bool subcon_readable = subcon_link.fd() >= 0 && ready > 0 && FD_ISSET(subcon_link.fd(), &read_fds);
 
         if (!quit) {
             link.service(socket_readable);
+            subcon_link.service(subcon_readable);
 
-            if (link.consume_disconnected()) reset_to_default_profile();
+            // Only when NEITHER server is still connected - one dropping
+            // must not wipe the settings the other's link is relying on.
+            if (all_links_dropped(link, subcon_link)) reset_to_default_profile();
 
-            json msg;
-            while (link.next_message(msg)) {
-                std::string type = msg.value("type", "");
-                if (type == "call") tool_status = handle_call(link, msg);
-                else if (type == "identity") handle_identity(msg);
+            // A pending sync belongs to the connection it was armed on - if
+            // that connection is gone, a later reconnect must wait for its
+            // own identity again (see sync_state_to_new_links()).
+            for (int i = 0; i < 2; ++i) {
+                if (!links[i]->is_connected()) needs_sync[i] = false;
+            }
+
+            // Each message is answered on the link it arrived on.
+            // subcon_link's status() is deliberately never shown as the
+            // connection text, only summarized by subcon_link_indicator()
+            // below, so a subcon that isn't running stays quiet.
+            for (int i = 0; i < 2; ++i) {
+                OLLI_LINK* l = links[i];
+                json msg;
+                while (l->next_message(msg)) {
+                    std::string type = msg.value("type", "");
+                    if (type == "call") tool_status = handle_call(*l, msg);
+                    else if (type == "identity") {
+                        handle_identity(msg);
+                        // This server is now ready to take an event -
+                        // catch it up on the current presence state.
+                        if (l->is_connected()) needs_sync[i] = true;
+                    }
+                }
             }
 
             if (!link.status().empty()) connection_status = link.status();
@@ -759,11 +852,12 @@ int main(int argc, char* argv[])
         // nothing to do.
         if (!quit) {
             poll_all_people();
-            run_triggers(link, display);
+            sync_state_to_new_links(links, needs_sync, 2);
+            run_triggers(link, subcon_link, display);
 
             draw_people_list(display);
 
-            display.set_connection(connection_status);
+            display.set_connection(connection_status + subcon_link_indicator(subcon_link));
             display.set_profile(current_profile_name.empty() ? "Profile: (shared default)" : "Profile: " + current_profile_name);
             display.set_tool_status(tool_status);
 

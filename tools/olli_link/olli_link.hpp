@@ -7,11 +7,15 @@
 // or how it answers a call. See template_tool.cpp's olli_processing() for
 // where that tailored logic lives and how it drives this class.
 //
-// One OLLI_LINK per tool process, constructed once in main(). It owns its
-// own socket fd but not the wait for activity on it: main() still runs the
-// single select() call across stdin + the socket (via fd() below) exactly
-// as before this split - only the connect/read/heartbeat logic that used to
-// sit inline in main()'s loop moved in here.
+// One OLLI_LINK per server a tool talks to, constructed once in main() - a
+// tool is a client of olli's listener (port 47601) and, if it wants to be
+// callable by the subcon tool too, of subcon's listener (port 47603) via a
+// second OLLI_LINK built from the same register message (see the
+// constructor below, and ../PROTOCOL.md's "Two servers" section). Each
+// link owns its own socket fd but not the wait for activity on it: main()
+// still runs the single select() call across stdin + every link's socket
+// (via fd() below) exactly as before this split - only the connect/read/
+// heartbeat logic that used to sit inline in main()'s loop moved in here.
 
 #pragma once
 
@@ -48,6 +52,13 @@ struct OLLI_ATTACHMENT {
 // header, per ../PROTOCOL.md's "Repo / build layout" section.
 inline const std::string EVENT_NO_ORIGIN_ID = "no_origin_call";
 
+// The two servers a tool can hold a link to (one OLLI_LINK per server -
+// see the OLLI_LINK constructor below): olli's own remote-tool listener, and
+// the subcon tool's listener (tools/subcon/), which speaks the identical
+// protocol so a tool talks to it exactly as it talks to olli.
+inline constexpr int OLLI_TOOL_PORT = 47601;
+inline constexpr int SUBCON_TOOL_PORT = 47603;
+
 class OLLI_LINK {
     public:
         // host_display is what shows up in status text ("...at 127.0.0.1");
@@ -55,11 +66,25 @@ class OLLI_LINK {
         // main() does its own inet_pton() (see its [host] argument
         // handling) so an invalid address is caught with a clean usage
         // message before anything here is constructed.
-        OLLI_LINK(std::string host_display, in_addr host_addr, nlohmann::json register_message);
+        //
+        // port: which server this link dials. Defaults to olli's, so every
+        // tool written before a tool could hold more than one link keeps
+        // compiling and behaving exactly as it did. A tool that also wants
+        // to be reachable by subcon constructs a second OLLI_LINK on
+        // SUBCON_TOOL_PORT with the same register message - each link
+        // keeps its own socket, queue, heartbeat and single-instance lock.
+        // Results and errors must go back out on the link the call arrived
+        // on; send_event() goes only to this link's server, so an event
+        // meant for several servers is sent on each link in turn.
+        OLLI_LINK(std::string host_display, in_addr host_addr, nlohmann::json register_message, int port = OLLI_TOOL_PORT);
         ~OLLI_LINK();
 
         OLLI_LINK(const OLLI_LINK&) = delete;
         OLLI_LINK& operator=(const OLLI_LINK&) = delete;
+
+        // Which server this link dials, for status text and the tool's own
+        // routing decisions ("olli" or "subcon").
+        const char* server_name() const { return port == SUBCON_TOOL_PORT ? "subcon" : "olli"; }
 
         // Current socket fd, or -1 if not connected right now - for the
         // caller's own select() FD_SET. Never blocks, never does I/O.
@@ -145,6 +170,7 @@ class OLLI_LINK {
         std::string host;
         in_addr host_addr{};
         nlohmann::json register_message;
+        int port;
 
         int sock_fd = -1;
         std::string read_buffer;
@@ -160,10 +186,10 @@ class OLLI_LINK {
         std::string status_text;
         bool disconnected_flag = false;
 
-        // Every remote tool connects to the exact same fixed olli port
-        // (REMOTE_TOOL_PORT, olli_link.cpp) - a second copy of the SAME
-        // tool running at once would both try to register the identical
-        // set of names, with no way for olli to know which one should
+        // Every remote tool connects to the exact same fixed port per server
+        // (OLLI_TOOL_PORT / SUBCON_TOOL_PORT, above) - a second copy of the
+        // SAME tool running at once would both try to register the identical
+        // set of names on that server, with no way for it to know which one should
         // actually answer a given call. Held for this process's whole
         // lifetime (never explicitly closed) via a non-blocking flock() on
         // a lock file keyed off this tool's own registered names
@@ -179,3 +205,31 @@ class OLLI_LINK {
         // instead of re-announcing the same fact every single tick forever.
         bool duplicate_instance_reported = false;
 };
+
+// --- Helpers for a tool holding one link per server (olli + subcon) ---
+//
+// Free functions rather than OLLI_LINK members: the class itself stays
+// strictly one-link-per-server, these only combine two of them.
+
+// True exactly once per drop: if either link was just found disconnected
+// (consume_disconnected() on both is always called, so neither flag can be
+// left stale) AND neither link is still connected. A tool's per-profile
+// state (identity, settings loaded from it) must only be reset in that
+// case - one server going away must not wipe state the other server's
+// still-live link is relying on. See ../clock/clock.cpp's main() for the
+// reference use.
+inline bool all_links_dropped(OLLI_LINK& first, OLLI_LINK& second)
+{
+    bool a = first.consume_disconnected();
+    bool b = second.consume_disconnected();
+    return (a || b) && !first.is_connected() && !second.is_connected();
+}
+
+// Short text for a tool's connection line about the subcon link - the olli
+// link's own status() text keeps the line to itself, this is just appended
+// to it. A subcon that isn't running is simply "not connected", never an
+// error: the link keeps quietly retrying and nothing else is affected.
+inline std::string subcon_link_indicator(const OLLI_LINK& subcon_link)
+{
+    return std::string("  |  subcon: ") + (subcon_link.is_connected() ? "connected" : "not connected");
+}

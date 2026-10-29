@@ -1124,7 +1124,10 @@ int main(int argc, char* argv[])
     // olli-core's old settings.json on first run (see load_hue_settings()).
     switch_profile("");
 
+    // One link per server (olli, and subcon if it's running) - same register
+    // message on both. See ../PROTOCOL.md's "Two servers" section.
     OLLI_LINK link(host, host_addr, make_register_message());
+    OLLI_LINK subcon_link(host, host_addr, make_register_message(), SUBCON_TOOL_PORT);
     OLLI_DISPLAY display(1); // draw_light_list()'s first call corrects this
     init_color_support();    // must run after OLLI_DISPLAY brings up ncurses
 
@@ -1152,6 +1155,10 @@ int main(int argc, char* argv[])
             FD_SET(link.fd(), &read_fds);
             max_fd = link.fd();
         }
+        if (subcon_link.fd() >= 0) {
+            FD_SET(subcon_link.fd(), &read_fds);
+            max_fd = std::max(max_fd, subcon_link.fd());
+        }
 
         int ready = select(max_fd + 1, &read_fds, nullptr, nullptr, &tv);
 
@@ -1159,17 +1166,27 @@ int main(int argc, char* argv[])
         if (key == 'q' || key == 'Q' || key == 3) quit = true; // 3 = Ctrl+C
 
         bool socket_readable = link.fd() >= 0 && ready > 0 && FD_ISSET(link.fd(), &read_fds);
+        bool subcon_readable = subcon_link.fd() >= 0 && ready > 0 && FD_ISSET(subcon_link.fd(), &read_fds);
 
         if (!quit) {
             link.service(socket_readable);
+            subcon_link.service(subcon_readable);
 
-            if (link.consume_disconnected()) reset_to_default_profile();
+            // Only when NEITHER server is still connected - one dropping
+            // must not reset the profile the other's link is relying on.
+            if (all_links_dropped(link, subcon_link)) reset_to_default_profile();
 
-            json msg;
-            while (link.next_message(msg)) {
-                std::string type = msg.value("type", "");
-                if (type == "call") tool_status = handle_call(link, msg);
-                else if (type == "identity") handle_identity(msg);
+            // Each message is answered on the link it arrived on.
+            // subcon_link's status() is deliberately never shown as the
+            // connection text, only summarized by subcon_link_indicator()
+            // below, so a subcon that isn't running stays quiet.
+            for (OLLI_LINK* l : {&link, &subcon_link}) {
+                json msg;
+                while (l->next_message(msg)) {
+                    std::string type = msg.value("type", "");
+                    if (type == "call") tool_status = handle_call(*l, msg);
+                    else if (type == "identity") handle_identity(msg);
+                }
             }
 
             if (!link.status().empty()) connection_status = link.status();
@@ -1189,7 +1206,7 @@ int main(int argc, char* argv[])
         if (!quit) {
             draw_light_list(display);
 
-            display.set_connection(connection_status);
+            display.set_connection(connection_status + subcon_link_indicator(subcon_link));
             display.set_profile(current_profile_name.empty() ? "Profile: (shared default)" : "Profile: " + current_profile_name);
             display.set_tool_status(tool_status);
 

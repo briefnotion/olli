@@ -455,7 +455,10 @@ int main(int argc, char* argv[])
     }
 
     RAG_EMBEDDER embedder;
+    // One link per server (olli, and subcon if it's running) - same register
+    // message on both. See ../../PROTOCOL.md's "Two servers" section.
     OLLI_LINK link(host, host_addr, make_register_message());
+    OLLI_LINK subcon_link(host, host_addr, make_register_message(), SUBCON_TOOL_PORT);
     OLLI_DISPLAY display(2); // "Database: ..." + "Collections: N" - draw_tool_area() keeps this in sync
 
     // connection_status/tool_status are the display's two lower fixed lines
@@ -486,6 +489,10 @@ int main(int argc, char* argv[])
             FD_SET(link.fd(), &read_fds);
             max_fd = link.fd();
         }
+        if (subcon_link.fd() >= 0) {
+            FD_SET(subcon_link.fd(), &read_fds);
+            max_fd = std::max(max_fd, subcon_link.fd());
+        }
 
         int ready = select(max_fd + 1, &read_fds, nullptr, nullptr, &tv);
 
@@ -493,30 +500,40 @@ int main(int argc, char* argv[])
         if (key == 'q' || key == 'Q' || key == 3) quit = true;
 
         bool socket_readable = link.fd() >= 0 && ready > 0 && FD_ISSET(link.fd(), &read_fds);
+        bool subcon_readable = subcon_link.fd() >= 0 && ready > 0 && FD_ISSET(subcon_link.fd(), &read_fds);
 
         if (!quit) {
             link.service(socket_readable);
+            subcon_link.service(subcon_readable);
 
-            json msg;
-            while (link.next_message(msg)) {
-                std::string type = msg.value("type", "");
-                if (type == "call") {
-                    tool_status = handle_call(link, *db, embedder, msg);
-                } else if (type == "identity" && !explicit_profile) {
-                    std::string name = msg.value("name", "");
-                    // Set unconditionally, even when switch_database()
-                    // below turns out to be a no-op (name matches what's
-                    // already open) - this is "have we heard from olli at
-                    // all about which profile is active", not "did the db
-                    // path just change". See the periodic-sync block below
-                    // for why that distinction matters.
-                    identity_received = true;
-                    switch_database(db, db_path, profile_name, name, tool_status,
-                                     "Identity: " + (name.empty() ? "(no profile)" : name));
+            // Each message is answered on the link it arrived on.
+            // subcon_link's status() is deliberately never shown as the
+            // connection text, only summarized by subcon_link_indicator()
+            // below, so a subcon that isn't running stays quiet.
+            for (OLLI_LINK* l : {&link, &subcon_link}) {
+                json msg;
+                while (l->next_message(msg)) {
+                    std::string type = msg.value("type", "");
+                    if (type == "call") {
+                        tool_status = handle_call(*l, *db, embedder, msg);
+                    } else if (type == "identity" && !explicit_profile) {
+                        std::string name = msg.value("name", "");
+                        // Set unconditionally, even when switch_database()
+                        // below turns out to be a no-op (name matches what's
+                        // already open) - this is "have we heard from olli at
+                        // all about which profile is active", not "did the db
+                        // path just change". See the periodic-sync block below
+                        // for why that distinction matters.
+                        identity_received = true;
+                        switch_database(db, db_path, profile_name, name, tool_status,
+                                         "Identity: " + (name.empty() ? "(no profile)" : name));
+                    }
                 }
             }
 
-            if (link.consume_disconnected() && !explicit_profile) {
+            // Only when NEITHER server is still connected - one dropping
+            // must not close the database the other's link is relying on.
+            if (all_links_dropped(link, subcon_link) && !explicit_profile) {
                 switch_database(db, db_path, profile_name, "", tool_status, "Disconnected");
                 identity_received = false; // a reconnect may be a different olli/profile - wait for its identity again
             }
@@ -548,7 +565,7 @@ int main(int argc, char* argv[])
         // rarely enough that it should stay visible - ttl_seconds 0 (the
         // default) - until the next sync replaces it, not blink away after
         // 30s the way a timer-expiry line does.
-        if (!quit && link.is_connected() && (explicit_profile || identity_received) &&
+        if (!quit && (link.is_connected() || subcon_link.is_connected()) && (explicit_profile || identity_received) &&
             (!last_sync_time.has_value() ||
              std::chrono::steady_clock::now() - *last_sync_time >= AUTO_SYNC_INTERVAL))
         {
@@ -570,7 +587,7 @@ int main(int argc, char* argv[])
         if (!quit) {
             draw_tool_area(display, *db, db_path);
 
-            display.set_connection(connection_status);
+            display.set_connection(connection_status + subcon_link_indicator(subcon_link));
             display.set_profile(profile_name.empty() ? "Profile: (shared default)" : "Profile: " + profile_name);
             display.set_tool_status(tool_status);
 

@@ -424,14 +424,21 @@ Three housekeeping routines run off the main thread (`sidetrack.cpp`):
 
 ### The background "subconscious" (subcon)
 
-A separate thread with its own LLM conversation works through a short list of
-recurring tasks while you're not talking to Olli (weather for Lafayette, past
-conversations, notes, lights left on while you're away, forgotten timers),
-decides whether anything it found is actually worth telling you, and passes the
-worthwhile bits to the chat at a sensible moment - when you're home, Olli is
-idle, and it isn't the middle of the night. Each task has a hard limit on how
-often it may run. See [SUBCON.md](SUBCON.md) for how it works, the files it keeps
-in `<profile>/subcon/`, how to add or change a task, and its known limits.
+Subcon is a standalone remote tool ([`tools/subcon/`](tools/subcon/README.md)),
+run like the other tools. It has its own LLM conversation and works through a
+short list of recurring tasks while you're not talking to Olli (weather for
+Lafayette, past conversations, notes, lights left on while you're away,
+forgotten timers), decides whether anything it found is actually worth telling
+you, and keeps those findings in a queue. Each task has a hard limit on how
+often it may run. Olli **pulls** the findings: ask "anything on your mind?" and
+the model calls `get_subcon_notes`, which hands over everything waiting as one
+digest. Nothing is pushed to you. See [SUBCON.md](SUBCON.md) for the tasks,
+limits and files it keeps in `<profile>/subcon/`, and
+[tools/subcon/README.md](tools/subcon/README.md) for how it runs and connects.
+
+(Subcon used to be a thread inside olli. That code is still in `source/` but
+switched off - `SUBCON_THINK_CYCLE_ENABLED` in `source/subcon_worker.cpp` - and
+is due to be removed. Don't run both against the same profile.)
 
 ---
 

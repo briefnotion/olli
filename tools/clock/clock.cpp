@@ -96,6 +96,14 @@ namespace {
         // instead of narrating the expiry as if it just answered whatever
         // happens to be current when it fires.
         std::string origin_call_id;
+
+        // Which server's link that set_timer call arrived on (olli's or
+        // subcon's - see main()). The expiry event goes out on this link
+        // only: a timer subcon asked for must not narrate itself to olli's
+        // user, and vice versa. nullptr (never set - nothing creates a
+        // timer without a call today) falls back to olli's link in
+        // handle_expired_timers().
+        OLLI_LINK* origin_link = nullptr;
     };
 
     // Case-insensitive so "Test_Timer" and "test_timer" refer to the same
@@ -157,7 +165,11 @@ namespace {
     // it fires on the first tick after reconnecting instead of being lost.
     // Updates `status` too, same as handle_call()'s return value, so the
     // display reflects it immediately.
-    void handle_expired_timers(OLLI_LINK& link, OLLI_DISPLAY& display, std::string& status)
+    //
+    // link: the fallback for a timer with no recorded origin_link (olli's
+    // own link); a timer that has one sends on that link only, and waits
+    // (event_sent stays false) while that particular link is down.
+    void handle_expired_timers(OLLI_LINK& default_link, OLLI_DISPLAY& display, std::string& status)
     {
         auto now = std::chrono::steady_clock::now();
         for (auto& [label, timer] : active_timers) {
@@ -179,6 +191,7 @@ namespace {
                 display.set_activity_line(label, activity_line, 30);
             }
 
+            OLLI_LINK& link = (timer.origin_link != nullptr) ? *timer.origin_link : default_link;
             if (timer.event_sent || !link.is_connected()) continue;
 
             std::stringstream ss;
@@ -433,6 +446,7 @@ namespace {
             timer.on_expire_tool = on_expire_tool;
             timer.on_expire_arguments = on_expire_arguments;
             timer.origin_call_id = call_id;
+            timer.origin_link = &link;
             active_timers[label] = timer;
 
             // Plain `<<` rather than std::to_string(), which always pads to
@@ -645,7 +659,10 @@ int main(int argc, char* argv[])
         return 1;
     }
 
+    // One link per server (olli, and subcon if it's running) - same register
+    // message on both. See ../PROTOCOL.md's "Two servers" section.
     OLLI_LINK link(host, host_addr, make_register_message());
+    OLLI_LINK subcon_link(host, host_addr, make_register_message(), SUBCON_TOOL_PORT);
     OLLI_DISPLAY display(TOOL_AREA_HEIGHT); // owns the terminal from here on - restores it on scope exit
 
     // connection_status/tool_status are the display's two lower fixed
@@ -678,6 +695,10 @@ int main(int argc, char* argv[])
             FD_SET(link.fd(), &read_fds);
             max_fd = link.fd();
         }
+        if (subcon_link.fd() >= 0) {
+            FD_SET(subcon_link.fd(), &read_fds);
+            max_fd = std::max(max_fd, subcon_link.fd());
+        }
 
         int ready = select(max_fd + 1, &read_fds, nullptr, nullptr, &tv);
 
@@ -685,17 +706,28 @@ int main(int argc, char* argv[])
         if (key == 'q' || key == 'Q' || key == 3) quit = true; // 3 = Ctrl+C
 
         bool socket_readable = link.fd() >= 0 && ready > 0 && FD_ISSET(link.fd(), &read_fds);
+        bool subcon_readable = subcon_link.fd() >= 0 && ready > 0 && FD_ISSET(subcon_link.fd(), &read_fds);
 
         if (!quit) {
             link.service(socket_readable);
+            subcon_link.service(subcon_readable);
 
-            if (link.consume_disconnected()) reset_to_default_profile();
+            // Only when NEITHER server is still connected - one dropping
+            // must not wipe the identity the other's link is relying on.
+            if (all_links_dropped(link, subcon_link)) reset_to_default_profile();
 
-            json msg;
-            while (link.next_message(msg)) {
-                std::string type = msg.value("type", "");
-                if (type == "call") tool_status = handle_call(link, display, msg);
-                else if (type == "identity") handle_identity(msg);
+            // Each message is answered on the link it arrived on (handle_call
+            // is handed that link) - subcon_link's status() is deliberately
+            // never shown as the connection text, only summarized by
+            // subcon_link_indicator() below, so a subcon that isn't running
+            // stays quiet.
+            for (OLLI_LINK* l : {&link, &subcon_link}) {
+                json msg;
+                while (l->next_message(msg)) {
+                    std::string type = msg.value("type", "");
+                    if (type == "call") tool_status = handle_call(*l, display, msg);
+                    else if (type == "identity") handle_identity(msg);
+                }
             }
 
             if (!link.status().empty()) connection_status = link.status();
@@ -710,7 +742,7 @@ int main(int argc, char* argv[])
             update_running_timer_lines(display);
             draw_clock_face(display);
 
-            display.set_connection(connection_status);
+            display.set_connection(connection_status + subcon_link_indicator(subcon_link));
             display.set_profile(current_user_name.empty() ? "Profile: (shared default)" : "Profile: " + current_user_name);
             display.set_tool_status(tool_status);
 

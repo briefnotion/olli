@@ -20,9 +20,29 @@
 //     (handle_call() above is where the actual per-name work happens),
 //     its bottom half is the calls into OLLI_LINK that do the actual
 //     talking - you shouldn't need to touch that part.
-//   - main() - user setup, one OLLI_LINK, then a loop that calls
-//     olli_processing() once per tick alongside whatever else your tool
-//     needs to do (a display, background polling, etc).
+//   - main() - user setup, two OLLI_LINKs (one to olli, one to subcon - see
+//     "Two servers" below), then a loop that calls olli_processing() once
+//     per link per tick alongside whatever else your tool needs to do (a
+//     display, background polling, etc).
+//
+// Two servers: this tool is a client of olli (port 47601) AND of the subcon
+// tool (port 47603), which speaks the identical protocol so it can call
+// this tool too (see ../PROTOCOL.md's "Two servers" section for the full
+// rules). main() builds one OLLI_LINK per server from the same register
+// message; olli_processing() is run for each. The rules that matter when you
+// fill in the CUSTOMIZE spots:
+//   - Answer a call on the link it arrived on (handle_call() is handed that
+//     link - never keep a single global link around).
+//   - An event that traces back to a call (a timer expiring) goes out only
+//     on the link that made the call - store which link asked next to the
+//     state (see ../clock/clock.cpp's ActiveTimer::origin_link).
+//   - An ambient event (nothing asked for it) goes out on BOTH links, and
+//     ambient state should be resent on a link right when it (re)connects
+//     (see ../presence/presence.cpp's sync_state_to_new_links()).
+//   - Per-identity state is reset only when BOTH links are down, via
+//     all_links_dropped() (olli_link.hpp) - one server dropping must not
+//     wipe what the other's link still relies on.
+//   - Calls from both links are handled one at a time in this one loop.
 //
 // What OLLI_LINK already gives you, working, for free:
 //   - Connects to olli, retries every few seconds if it's not there yet,
@@ -134,7 +154,10 @@ namespace {
     // Called once per main-loop tick - see the file-level comment above for
     // the shape. socket_readable is whatever this tick's select() found for
     // link.fd(); status is main()'s display status line, updated here.
-    void olli_processing(OLLI_LINK& link, bool socket_readable, std::string& status)
+    // Called once per link (olli's, then subcon's) - show_link_status is
+    // true only for olli's, so a subcon that isn't running never touches the
+    // status line (main() shows its state through subcon_link_indicator()).
+    void olli_processing(OLLI_LINK& link, bool socket_readable, std::string& status, bool show_link_status)
     {
         // =================================================================
         // CUSTOMIZE #2 - route each message type your tool cares about to
@@ -161,7 +184,7 @@ namespace {
         json msg;
         while (link.next_message(msg)) dispatch(msg);
 
-        if (!link.status().empty()) status = link.status();
+        if (show_link_status && !link.status().empty()) status = link.status();
     }
 
     // --- Terminal handling ---
@@ -257,6 +280,7 @@ int main(int argc, char* argv[])
 
     // ---- olli communications declaration ----
     OLLI_LINK link(host, host_addr, make_register_message());
+    OLLI_LINK subcon_link(host, host_addr, make_register_message(), SUBCON_TOOL_PORT);
 
     // ---- user code ----
     RawTerminal raw_terminal; // hides cursor, enables raw stdin - restores both on scope exit
@@ -302,6 +326,10 @@ int main(int argc, char* argv[])
             FD_SET(link.fd(), &read_fds);
             max_fd = std::max(link.fd(), max_fd);
         }
+        if (subcon_link.fd() >= 0) {
+            FD_SET(subcon_link.fd(), &read_fds);
+            max_fd = std::max(subcon_link.fd(), max_fd);
+        }
 
         int ready = select(max_fd + 1, &read_fds, nullptr, nullptr, &tv);
 
@@ -313,12 +341,16 @@ int main(int argc, char* argv[])
         }
 
         bool socket_readable = link.fd() >= 0 && ready > 0 && FD_ISSET(link.fd(), &read_fds);
+        bool subcon_readable = subcon_link.fd() >= 0 && ready > 0 && FD_ISSET(subcon_link.fd(), &read_fds);
 
         // ---- olli communications ----
-        if (!quit) olli_processing(link, socket_readable, status);
+        if (!quit) {
+            olli_processing(link, socket_readable, status, true);
+            olli_processing(subcon_link, subcon_readable, status, false);
+        }
 
         // ---- user code ----
-        if (!quit) redraw_screen(status);
+        if (!quit) redraw_screen(status + subcon_link_indicator(subcon_link));
     }
 
     // ---- closing code ----

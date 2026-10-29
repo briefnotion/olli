@@ -218,6 +218,44 @@ terminal, not just compiling:
   `sync_collection()` both gained a `verbose` parameter (default `true` -
   `rag_admin`'s call site is unchanged); `rag_tool` passes `false`.
 
+## Two servers: olli and subcon
+
+A tool can be reachable by two servers at once: olli's own listener
+(port **47601**, above) and the subcon tool's (`tools/subcon/`, port
+**47603**). Subcon acts as a mini-olli and speaks this protocol identically -
+`register`/`identity`/`call`/`result`/`event`/`ping`/`pong`, same shapes,
+same newline-delimited JSON. Roles do not swap: tools stay clients, dialing
+out to both. In code a tool holds **two `OLLI_LINK`s** (`tools/olli_link/
+olli_link.hpp`), one per server; the second is built from the same register
+message with `SUBCON_TOOL_PORT` as its fourth constructor argument. The class
+itself stays one-link-per-server (own socket, queue, heartbeat, single-
+instance lock - keyed by tool name plus port for non-olli ports).
+
+Rules every tool follows when it holds both links:
+
+1. **Same `register` message on both links** (same tool names).
+2. **One loop, both fds**: `select()` watches both sockets, both links get
+   `service()` every tick, calls from either are handled one at a time on the
+   one thread (no new threads).
+3. **Answer on the link a call arrived on** - `send_result`/`send_error` go
+   out on that link only; nothing may assume a single global link.
+4. **Identity arrives per link** (each server sends its own) and is handled
+   as before. Per-identity state is reset only when **both** links are down
+   (`all_links_dropped()` in `olli_link.hpp`), so one server disconnecting
+   never wipes state the other link still relies on.
+5. **Events that trace back to a call** (a clock timer expiring, `origin_id`)
+   go out only on the link that made that call. **Ambient events** (nothing
+   asked for them - presence arrival/departure and its `user.presence` var)
+   go out on **both** links. On (re)connect of a link, a tool with ambient
+   state resends its current state as an event on **that link only**
+   (presence sends a message-less `user.presence` var event, which olli
+   applies without narrating) so a late-connecting or restarted server learns
+   it immediately.
+6. **A subcon that isn't running is never an error**: its link quietly keeps
+   retrying every few seconds, never touches the olli link, the tool's
+   behavior, or the status line beyond a short `subcon: connected / not
+   connected` indicator (`subcon_link_indicator()`).
+
 ## Scope (for this first pass)
 
 A remote tool registers with olli's **main chat instance only** - not

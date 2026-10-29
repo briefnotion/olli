@@ -13,8 +13,6 @@
 using json = nlohmann::json;
 
 namespace {
-    constexpr int REMOTE_TOOL_PORT = 47601;
-
     // Heartbeat/reconnect timing - see ../PROTOCOL.md. Kept in step with
     // TOOL_REMOTE's own PING_INTERVAL_SECONDS/DEAD_TIMEOUT_SECONDS
     // (source/remote_tools.h) even though nothing enforces the two staying
@@ -67,7 +65,7 @@ namespace {
     // afterward, matching every other fd this program already handles via
     // select() in the main loop. Returns -1 (silently - the caller's status
     // line already says "retrying") on any failure or timeout.
-    int try_connect(const in_addr& host_addr)
+    int try_connect(const in_addr& host_addr, int port)
     {
         int fd = socket(AF_INET, SOCK_STREAM, 0);
         if (fd < 0) return -1;
@@ -77,7 +75,7 @@ namespace {
 
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
-        addr.sin_port = htons(static_cast<uint16_t>(REMOTE_TOOL_PORT));
+        addr.sin_port = htons(static_cast<uint16_t>(port));
         addr.sin_addr = host_addr;
 
         int rc = connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
@@ -121,15 +119,22 @@ namespace {
     // tools (clock vs hue), with no separate identity ever needing to be
     // passed in. "unknown" is a defensive fallback only - every real tool's
     // own make_register_message() always populates at least one entry.
-    std::string lock_key_for(const json& register_message)
+    //
+    // One lock per (tool, server): a link on olli's own port keeps the bare
+    // name it always had, a link on any other port (the subcon tool's) adds
+    // the port - otherwise a tool's second link would find the first link's
+    // lock held by its own process and report itself a duplicate.
+    std::string lock_key_for(const json& register_message, int port)
     {
+        std::string key = "unknown";
         if (register_message.contains("tools") && register_message["tools"].is_array()
             && !register_message["tools"].empty())
         {
             std::string name = register_message["tools"][0].value("name", "");
-            if (!name.empty()) return name;
+            if (!name.empty()) key = name;
         }
-        return "unknown";
+        if (port != OLLI_TOOL_PORT) key += "_" + std::to_string(port);
+        return key;
     }
 
     // Non-blocking exclusive flock() on a fixed /tmp path keyed by
@@ -143,9 +148,9 @@ namespace {
     // treats that case as "proceed as normal" rather than let an unrelated
     // filesystem hiccup stop this tool from ever starting at all; -1 is
     // reserved specifically for "a real twin is already running."
-    int try_acquire_single_instance_lock(const json& register_message)
+    int try_acquire_single_instance_lock(const json& register_message, int port)
     {
-        std::string lock_path = "/tmp/olli_tool_" + lock_key_for(register_message) + ".lock";
+        std::string lock_path = "/tmp/olli_tool_" + lock_key_for(register_message, port) + ".lock";
         int fd = open(lock_path.c_str(), O_CREAT | O_RDWR, 0666);
         if (fd < 0) return LOCK_ACQUIRE_ERROR;
 
@@ -157,10 +162,11 @@ namespace {
     }
 }
 
-OLLI_LINK::OLLI_LINK(std::string host_display, in_addr host_addr_, json register_message_)
+OLLI_LINK::OLLI_LINK(std::string host_display, in_addr host_addr_, json register_message_, int port_)
     : host(std::move(host_display)),
       host_addr(host_addr_),
       register_message(std::move(register_message_)),
+      port(port_),
       last_sent(std::chrono::steady_clock::now()),
       last_received(std::chrono::steady_clock::now())
 {
@@ -179,7 +185,7 @@ OLLI_LINK::OLLI_LINK(std::string host_display, in_addr host_addr_, json register
     // - acquired here, before service() ever gets a chance to call
     // try_connect(), so a duplicate instance never even attempts a
     // connection, let alone registers.
-    int lock_result = try_acquire_single_instance_lock(register_message);
+    int lock_result = try_acquire_single_instance_lock(register_message, port);
     if (lock_result == -1) {
         duplicate_instance = true;
     } else if (lock_result != LOCK_ACQUIRE_ERROR) {
@@ -243,14 +249,14 @@ void OLLI_LINK::service(bool socket_readable)
         if (std::chrono::duration_cast<std::chrono::seconds>(now - last_connect_attempt).count()
                 >= RECONNECT_INTERVAL_SECONDS) {
             last_connect_attempt = now;
-            sock_fd = try_connect(host_addr);
+            sock_fd = try_connect(host_addr, port);
             if (sock_fd >= 0) {
                 send_line(sock_fd, register_message.dump());
-                status_text = "Registered with olli at " + host + ". Waiting for calls...";
+                status_text = std::string("Registered with ") + server_name() + " at " + host + ". Waiting for calls...";
                 last_sent = last_received = now;
                 read_buffer.clear();
             } else {
-                status_text = "Not connected to olli at " + host + " - retrying...";
+                status_text = std::string("Not connected to ") + server_name() + " at " + host + " - retrying...";
             }
         }
     } else if (socket_readable) {
@@ -261,7 +267,7 @@ void OLLI_LINK::service(bool socket_readable)
             // olli closed the connection (or a real error) - drop back to
             // "not connected" and let the caller keep running rather than
             // exiting.
-            handle_disconnect("Disconnected from olli at " + host + " - retrying...");
+            handle_disconnect(std::string("Disconnected from ") + server_name() + " at " + host + " - retrying...");
         } else {
             read_buffer.append(buf, static_cast<size_t>(n));
 
@@ -285,7 +291,7 @@ void OLLI_LINK::service(bool socket_readable)
                         queued_message_this_tick = true;
                     }
                 } catch (const std::exception&) {
-                    status_text = "Bad JSON from olli.";
+                    status_text = std::string("Bad JSON from ") + server_name() + ".";
                 }
             }
         }
@@ -305,7 +311,7 @@ void OLLI_LINK::service(bool socket_readable)
         }
 
         if (std::chrono::duration_cast<std::chrono::seconds>(now - last_received).count() >= DEAD_TIMEOUT_SECONDS) {
-            handle_disconnect("Connection to olli at " + host + " timed out - retrying...");
+            handle_disconnect(std::string("Connection to ") + server_name() + " at " + host + " timed out - retrying...");
         }
     }
 }

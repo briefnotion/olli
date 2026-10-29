@@ -1,5 +1,15 @@
 # Subcon - Olli's background "subconscious"
 
+> **Update 2026-10-29: subcon is now a standalone tool.** It runs as its own
+> program, [`tools/subcon/`](tools/subcon/README.md), and olli *pulls* its
+> findings by calling `get_subcon_notes`. The tasks, run limits and finding
+> gate below describe both versions. Everything about **delivery** (the
+> presence/idle/quiet-hours gate, the model's "deliver now or wait" call,
+> announcements) describes the old in-olli thread, which is switched off and
+> due to be removed; the tool has no delivery gate (a "busy" signal is a later
+> idea). The "Switches and knobs" table is also the old thread's. The tool's
+> own options are in its README.
+
 Subcon is a background thread with its own, separate LLM conversation. While
 you aren't talking to Olli it works through a short list of recurring tasks
 (check the weather, review past conversations, ...), decides whether anything it

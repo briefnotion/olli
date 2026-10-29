@@ -26,7 +26,7 @@ install_file() {
 
 install_file "$BUILD_DIR/olli" olli
 
-for tool in hue clock presence; do
+for tool in hue clock presence subcon; do
     install_file "$TOOLS_DIR/$tool/$tool" "$tool"
 done
 

@@ -1420,12 +1420,25 @@ namespace {
 
             // ---- who gets it
             // A relative change needs each light's own level (and must skip
-            // lights that are off), so "all" is expanded to individual lights.
-            HUE_LIGHT_CLASS::TARGETS targets = hue.resolve_targets(target, except_list, has_change);
+            // lights that are off), and a power command must not go through
+            // group 0 (see below), so "all" is then expanded to individual lights.
+            // A power command (on or off) with no brightness of its own is never
+            // sent as the bridge's group-0 action. Found 2026-10-30 on the real
+            // bridge: a group "off" throws away each light's stored brightness
+            // (it drops to 1, or to some other wrong level), and a group "on"
+            // can bring lights up at odd levels (120 became 12, 60 became 2), so
+            // "turn on all the lights" after "turn off all the lights" came back
+            // at the lowest setting. The same commands sent to each light on its
+            // own leave its level alone and bring it back at exactly that level.
+            // With an explicit brightness the group action is fine (it states the
+            // level), and so is a color or white change that doesn't touch power.
+            bool power_without_level = body.contains("on") && !body.contains("bri");
+            bool per_light = has_change || power_without_level;
+            HUE_LIGHT_CLASS::TARGETS targets = hue.resolve_targets(target, except_list, per_light);
             if (!targets.error.empty()) {
                 // The cache may simply be stale or empty (bridge was down at startup).
                 hue.refresh_lights();
-                targets = hue.resolve_targets(target, except_list, has_change);
+                targets = hue.resolve_targets(target, except_list, per_light);
             }
             if (!targets.error.empty()) {
                 std::string err = "Error controlling light '" + target + "': " + targets.error;

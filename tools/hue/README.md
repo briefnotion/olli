@@ -32,6 +32,17 @@ version always used (nothing that references them, e.g.
     is left out the saved default fade applies, so "turn on all the lights"
     can fade in over 10 seconds. A bare alert/flash is never faded. The reply
     says which fade was used ("Applied: ..., fade 10.0 s (saved default)").
+  - **Power commands go to each light, not to the bridge's group 0** (found
+    2026-10-30, reported by the user: "turn off all the lights", then "turn
+    them on" came back at the lowest setting). On the real bridge a group-0
+    "off" throws away every light's stored brightness (it drops to 1), and a
+    group-0 "on" with no brightness can bring lights up at odd levels (120
+    became 12). The same commands sent to each light on its own leave the
+    level alone and bring it back exactly. So an on/off without its own
+    brightness - "all", "all except", a list, a single light - is sent light
+    by light; only a command that states a brightness ("all to 50%") uses
+    the one group request. A light that is off also keeps its brightness
+    through a fade-out.
 - `set_hue_default_fade` - `seconds` (0 = instant) or `reset: true` (back to
   the bridge's own quick ~0.4 s). Saved as `default_transition_ms` in
   `hue_settings.json` (`-1` = not set; hand-editable too) and also used when a

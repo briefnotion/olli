@@ -4360,3 +4360,24 @@ it can actually act under its persona's judgment, not just talk about it.
   and re-establishes its link to olli and that call's answer can be lost. A refused or
   unreachable bridge fails in a few seconds and is fine. Fix, if it ever matters: do
   the bridge requests on a worker thread.
+
+### Hue: "all off then all on" came back at the lowest setting (2026-10-30, reported by the user after install; fixed + tested, NOT committed)
+
+- Cause (reproduced on the real bridge with raw commands): the bridge's group-0 action
+  mishandles brightness for power commands. A group "off" throws away each light's stored
+  brightness (to 1, or another wrong level - even with no fade, and even instant), and a
+  group "on" with no brightness can bring lights up at odd levels (120 -> 12, 60 -> 2).
+  The 10-second default fade made the first one total, which is how it showed. Sent to
+  each light on its own, off/on keeps the level exactly, whatever the fade. My earlier
+  real-bridge tests had only turned single lights off and on, so they missed it.
+- Fix: in `set_hue_light`, an on/off with no brightness of its own is always sent light by
+  light (`power_without_level`); only a command that states a brightness uses group 0.
+  Colors/whites for "all" therefore also go light by light (power is implied).
+- Tests: the fake bridge now models both quirks and has a regression test (distinct levels,
+  10 s default fade, all off then all on, every light must come back at its own level);
+  real bridge: 200/120/60 restored after fade off/on, instant off/on x3, "all except
+  Computer" off then all on, and "all to 50%" still exact via the group path; the earlier
+  full real-bridge suite still passes.
+- Test-rig note: tools also connect to subcon (47603) and take the profile name it
+  announces, so a scratch test hue tool running while the user's subcon is up switches to
+  profile "ron". The rig now names its scratch profile "ron" for that reason.

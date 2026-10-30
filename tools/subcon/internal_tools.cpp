@@ -2,8 +2,14 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
+#include <cstring>
 #include <ctime>
 #include <utility>
+
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 
 #include <curl/curl.h>
 
@@ -39,6 +45,65 @@ namespace {
         return static_cast<const std::atomic<bool>*>(clientp)->load() ? 1 : 0;
     }
 
+    // fetch_website_content lets the model pick the URL, and text on a page it
+    // read can try to steer it ("fetch http://192.168.1.1/..."). So the fetch
+    // refuses to connect to anything that isn't a public internet address:
+    // loopback (Ollama, olli's web interface, the other tools), private LAN
+    // ranges (the router, the Hue bridge), link-local, CGNAT, multicast and
+    // reserved space. Checked on the address curl is actually about to connect
+    // to, not on the URL text, so IP literals, hostnames that resolve to a
+    // private address, and redirects to either are all covered the same way.
+    // (Added in this copy; the original in source/tools.cpp has no such limit.)
+    // Not covered: an http(s)_proxy environment variable, since the connection
+    // then goes to the proxy - this machine uses none.
+    bool is_public_ipv4(uint32_t a)   // host byte order
+    {
+        const uint32_t b1 = a >> 24, b2 = (a >> 16) & 0xff;
+        if (b1 == 0 || b1 == 10 || b1 == 127) return false;     // "this" network, private, loopback
+        if (b1 == 100 && b2 >= 64 && b2 <= 127) return false;   // CGNAT (also Tailscale)
+        if (b1 == 169 && b2 == 254) return false;               // link-local
+        if (b1 == 172 && b2 >= 16 && b2 <= 31) return false;   // private
+        if (b1 == 192 && b2 == 168) return false;               // private
+        if (b1 >= 224) return false;                            // multicast, reserved, broadcast
+        return true;
+    }
+
+    bool is_public_address(const sockaddr* sa)
+    {
+        if (sa->sa_family == AF_INET) {
+            return is_public_ipv4(ntohl(reinterpret_cast<const sockaddr_in*>(sa)->sin_addr.s_addr));
+        }
+        if (sa->sa_family == AF_INET6) {
+            const unsigned char* p = reinterpret_cast<const sockaddr_in6*>(sa)->sin6_addr.s6_addr;
+            // IPv4 hidden inside an IPv6 address (::ffff:a.b.c.d mapped, 64:ff9b::a.b.c.d NAT64):
+            // judge the IPv4 part by the IPv4 rules.
+            static const unsigned char mapped[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff};
+            static const unsigned char nat64[12] = {0, 0x64, 0xff, 0x9b, 0, 0, 0, 0, 0, 0, 0, 0};
+            if (std::memcmp(p, mapped, 12) == 0 || std::memcmp(p, nat64, 12) == 0)
+                return is_public_ipv4((uint32_t(p[12]) << 24) | (uint32_t(p[13]) << 16) | (uint32_t(p[14]) << 8) | p[15]);
+            static const unsigned char zero[16] = {0};
+            if (std::memcmp(p, zero, 16) == 0) return false;        // ::
+            static const unsigned char loop[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+            if (std::memcmp(p, loop, 16) == 0) return false;        // ::1
+            if ((p[0] & 0xfe) == 0xfc) return false;                // fc00::/7 unique local
+            if (p[0] == 0xfe && (p[1] & 0xc0) == 0x80) return false; // fe80::/10 link-local
+            if (p[0] == 0xff) return false;                         // multicast
+            return true;
+        }
+        return false; // anything else (e.g. a unix socket) is never a website
+    }
+
+    struct CONNECT_GUARD { bool refused = false; };
+
+    curl_socket_t open_public_socket_only(void* clientp, curlsocktype purpose, struct curl_sockaddr* address)
+    {
+        if (purpose == CURLSOCKTYPE_IPCXN && !is_public_address(reinterpret_cast<const sockaddr*>(&address->addr))) {
+            static_cast<CONNECT_GUARD*>(clientp)->refused = true;
+            return CURL_SOCKET_BAD;
+        }
+        return socket(address->family, address->socktype, address->protocol);
+    }
+
     // Same shape as TOOL_WEB_SEARCH::curl_get(): only a timeout gets a second
     // attempt - a slow DNS/TLS/server hiccup can resolve itself, but a bad
     // URL / refused connection / unknown host fails identically again, so
@@ -46,13 +111,14 @@ namespace {
     // be passed on to the model as-is (it explains failures in its own
     // words rather than narrating raw curl output as data).
     std::pair<bool, std::string> curl_get(const std::string& url, long timeout_seconds, const std::string& user_agent,
-                                          bool fail_on_http_error, const std::atomic<bool>& abort)
+                                          bool fail_on_http_error, bool public_addresses_only, const std::atomic<bool>& abort)
     {
         for (int attempt = 0; attempt < 2; ++attempt) {
             CURL* curl = curl_easy_init();
             if (!curl) return {false, "Error: Could not initialize libcurl."};
 
             DOWNLOAD download;
+            CONNECT_GUARD guard;
             char errbuf[CURL_ERROR_SIZE];
             errbuf[0] = '\0';
 
@@ -75,6 +141,10 @@ namespace {
             // such limit.)
             curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "http,https");
             curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "http,https");
+            if (public_addresses_only) {
+                curl_easy_setopt(curl, CURLOPT_OPENSOCKETFUNCTION, open_public_socket_only);
+                curl_easy_setopt(curl, CURLOPT_OPENSOCKETDATA, &guard);
+            }
             curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, errbuf);
             curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L); // non-main thread
             curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
@@ -89,6 +159,8 @@ namespace {
 
             if (res == CURLE_OK) return {true, std::move(download.body)};
             if (res == CURLE_ABORTED_BY_CALLBACK) return {false, "Error: cancelled."};
+            if (guard.refused)
+                return {false, "Error: that address is on a private or local network. This tool only reads public websites."};
             if (res == CURLE_OPERATION_TIMEDOUT && attempt == 0) continue;
 
             std::string detail = errbuf[0] != '\0' ? std::string(": ") + errbuf : "";
@@ -150,7 +222,7 @@ namespace {
         curl_easy_cleanup(escape_handle);
 
         std::string url = "https://serpapi.com/search.json?q=" + encoded + "&api_key=" + api_key;
-        auto [ok, body] = curl_get(url, SEARCH_TIMEOUT_SECONDS, "", false, abort);
+        auto [ok, body] = curl_get(url, SEARCH_TIMEOUT_SECONDS, "", false, false, abort);
         if (!ok) return {false, body};
 
         try {
@@ -180,7 +252,7 @@ namespace {
 
     INTERNAL_TOOL_RESULT fetch_website(const std::string& url, const std::atomic<bool>& abort)
     {
-        auto [ok, body] = curl_get(url, FETCH_TIMEOUT_SECONDS, "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", true, abort);
+        auto [ok, body] = curl_get(url, FETCH_TIMEOUT_SECONDS, "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", true, true, abort);
         if (!ok) return {false, body};
         return {true, "Cleaned Page Content from " + url + ":\n" + truncate_utf8(strip_html_tags(body), FETCH_RESULT_MAX_BYTES)};
     }

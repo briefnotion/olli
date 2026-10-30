@@ -111,12 +111,24 @@ std::optional<REMOTE_TOOL_REGISTRATION> REMOTE_TOOL_LISTENER::poll()
 
     if (client_fd < 0) return std::nullopt;
 
-    char buf[4096];
-    ssize_t n = read(client_fd, buf, sizeof(buf));
+    // One byte at a time, up to and including the register line's newline
+    // and no further: the fd is handed to TOOL_REMOTE below, which reads
+    // from the socket itself, so anything this read took past the first
+    // line (a tool sending identity-dependent traffic right behind its
+    // register message) would be silently lost. Bytes left in the kernel
+    // buffer are the new owner's to read. The register line is one small
+    // message sent once per connection, so the extra read() calls cost
+    // nothing; the cap per tick matches the old single 4096-byte read.
+    ssize_t n = 0;
+    for (int i = 0; i < 4096; ++i) {
+        char c;
+        n = read(client_fd, &c, 1);
+        if (n <= 0) break;
+        read_buffer.push_back(c);
+        if (c == '\n') break;
+    }
 
     if (n > 0) {
-        read_buffer.append(buf, static_cast<size_t>(n));
-
         std::string line;
         if (!extract_line(read_buffer, line)) {
             // A partial line - wait for more on a later tick.

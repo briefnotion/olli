@@ -1,6 +1,12 @@
 #ifndef SUBCON_WORKER_H
 #define SUBCON_WORKER_H
 
+// RETIRED 2026-10-30: subcon now runs as the standalone tool tools/subcon (see SUBCON.md,
+// TODO.md "Subcon moved out of olli"). Kept under #if 0, not deleted, so reverting is
+// removing the #if 0 / #endif pairs here and in main.cpp / main.h and re-enabling
+// SUBCON_THINK_CYCLE_ENABLED.
+#if 0
+
 #include "olla.h" // OLLAMA_SYSTEM_PROPERTIES
 #include "comms.h" // COMMS
 #include "threading.h"
@@ -149,5 +155,7 @@ class SUBCON_WORKER_CLASS
         void thread_start();
         void thread_stop();
 };
+
+#endif // 0 (retired)
 
 #endif

@@ -1,3 +1,9 @@
+// RETIRED 2026-10-30: subcon now runs as the standalone tool tools/subcon (see SUBCON.md,
+// TODO.md "Subcon moved out of olli"). Kept under #if 0, not deleted, so reverting is
+// removing the #if 0 / #endif pairs here and in main.cpp / main.h and re-enabling
+// SUBCON_THINK_CYCLE_ENABLED.
+#if 0
+
 #include "subcon_worker.h"
 
 #include "olla.h" // ollama_system
@@ -1296,3 +1302,5 @@ void SUBCON_WORKER_CLASS::thread_main()
     // isn't otherwise used for anything (this class has its own RUN).
     subcon_llm.request_exit();
 }
+
+#endif // 0 (retired)

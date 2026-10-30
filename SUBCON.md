@@ -5,8 +5,9 @@
 > findings by calling `get_subcon_notes`. The tasks, run limits and finding
 > gate below describe both versions. Everything about **delivery** (the
 > presence/idle/quiet-hours gate, the model's "deliver now or wait" call,
-> announcements) describes the old in-olli thread, which is switched off and
-> due to be removed; the tool has no delivery gate (a "busy" signal is a later
+> announcements) describes the old in-olli thread, which was retired on
+> 2026-10-30 (kept under `#if 0` in `source/subcon_worker.*` and `main.cpp`, not
+> compiled); the tool has no delivery gate (a "busy" signal is a later
 > idea). The "Switches and knobs" table is also the old thread's. The tool's
 > own options are in its README.
 

@@ -277,7 +277,9 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         SIDETRACK_CLASS sidetrack;
         IO_WORKER_CLASS io_worker; // keyboard input + screen display - see io_worker.h
         TOOL_WORKER_CLASS tool_worker; // remote-tool communications - see tool_worker.h
+#if 0 // retired 2026-10-30: subcon is the standalone tools/subcon now (see subcon_worker.h)
         SUBCON_WORKER_CLASS subcon_worker; // background/idle reasoning - skeleton only for now, see subcon_worker.h
+#endif
 
         // The main chat's real tools_list - the 4 built-ins. Declared here,
         // not owned by 'chat' itself - see process()'s comment in olla.h for
@@ -387,6 +389,7 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
 
         tool_worker.thread_start();
 
+#if 0 // retired 2026-10-30, see subcon_worker.h
         // One-way copy of chat's own PROPS (subcon_worker.h's own comment) -
         // same model/host/port, so the subconscious always talks to the
         // same LLM the real conversation does. Just a stepping stone, not
@@ -408,6 +411,7 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         subcon_worker.tool_worker = &tool_worker;
 
         subcon_worker.thread_start();
+#endif
 
         // No separate priming call needed here (there used to be one - a
         // one-off get_response()+display() to flush chat.open()'s startup
@@ -444,6 +448,7 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
             // chat.comms.
             io_worker.exchange(comms, &tool_worker);
 
+#if 0 // retired 2026-10-30, see subcon_worker.h
             // No longer strictly one-way (2026-09-27) - still gives
             // subcon_worker's own thread something current to read (e.g.
             // COMMS::busy_count()), but now also carries back whatever
@@ -456,6 +461,7 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
             std::string subcon_announcement = subcon_worker.exchange(comms);
             if (!subcon_announcement.empty())
                 chat.integrate_tool_result(&tool_worker, comms, "", subcon_announcement);
+#endif
 
             // Ctrl+C - see COMMS::EXIT_REQUESTED's comment (comms.h) for
             // why this needs its own handling instead of a real SIGINT.
@@ -557,7 +563,9 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         // See IO_WORKER_CLASS's class comment (io_worker.h).
         io_worker.thread_stop();
         tool_worker.thread_stop();
+#if 0 // retired 2026-10-30, see subcon_worker.h
         subcon_worker.thread_stop();
+#endif
 
         // Hand the real terminal screen back before printing any of the
         // shutdown messages below - otherwise they'd print while ncurses'

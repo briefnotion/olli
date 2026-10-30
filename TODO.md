@@ -4224,3 +4224,58 @@ it can actually act under its persona's judgment, not just talk about it.
   marked expired (backup: `~/olli_files_ron/subcon/queue.json.bak-20261029-before-drain`),
   so the old thread has nothing left to deliver or save. Full removal of the
   old subcon code (under `#if 0`) is still to do once the tool has run well.
+
+### Two follow-ups after the subcon move (2026-10-30, built + tested, NOT committed, NOT installed)
+
+- **Olli listener no longer drops bytes behind the register line** -
+  `REMOTE_TOOL_LISTENER::poll()`, `source/remote_tools.cpp`. It used to do one
+  4096-byte `read()` and keep only the first line, so anything a tool sent right
+  behind `register` was lost silently before the fd was handed to `TOOL_REMOTE`.
+  Now it reads the register line one byte at a time and stops at the newline, so
+  the rest stays in the socket for the connection's real owner. Only `poll()`
+  changed. Tested by running the real `poll()` from a scratch copy on a spare port
+  against a fake client: 8/8 scenarios pass (extra line in the same write,
+  several lines plus a partial one, register split across writes, CRLF, garbage
+  and non-register first lines still rejected, client closing mid-line); the same
+  harness on the original code fails 4 of those 8. The tool-side workaround
+  (presence syncs after identity) is harmless and was left alone.
+- **Subcon no longer queues "the problem is gone" as news** -
+  `build_finding_prompt()` in `tools/subcon/reasoner.cpp`. Live (2026-10-29
+  10:05), an empty timer list was queued as "worth telling": an earlier check had
+  reported an unacknowledged timer, and the model took its disappearance for a
+  change. Measured on qwen3:8b with the real comparison / "already told" text
+  (84 calls): the old prompt queued 3 of 20 should-not-queue cases (all of the
+  "now clear" kind) and caught 8/8 real findings; the new wording queued 0 of 20
+  and also caught 8/8. A schema-based variant (model classifies the result first)
+  was worse (2 of 20) and was not used. Probe scripts are not in the repo; sample
+  size is small, so watch the next few days of notes.
+
+### Subcon fetch limited to public addresses; old in-olli subcon retired (2026-10-30, built + tested, NOT committed, NOT installed)
+
+- **`fetch_website_content` in `tools/subcon/internal_tools.cpp` refuses private
+  destinations.** The model chooses the URL, and page text can try to steer it at
+  `127.0.0.1` (Ollama, olli's web interface, the other tools), the LAN (router,
+  Hue bridge), link-local, CGNAT (Tailscale), multicast or reserved space. The
+  check runs in a libcurl `OPENSOCKETFUNCTION` on the address actually being
+  connected to, so IP literals, hostnames that resolve to private addresses, and
+  redirects are all covered. IPv6 and IPv4-in-IPv6 (`::ffff:`, NAT64) are judged by
+  the IPv4 rules. `web_search` (a fixed API URL) is unaffected. Tested against the
+  real code: 33 address-matrix cases, loopback / `localhost` / `[::1]` / the
+  machine's own LAN address / `0.0.0.0` all refused with local servers confirming
+  they never received a request, a redirect from an allowed hop to the LAN address
+  refused (server saw only the first hop), a public page still fetched, and a
+  control run with the guard off reaching the local server. Not covered: an
+  `http(s)_proxy` environment variable (none here). **Olli's own
+  `fetch_website_content` in `source/tools.cpp` still has no such limit** - not
+  touched, awaiting a decision.
+- **Old in-olli subcon retired, kept under `#if 0`** (the user's call, after a day
+  of the tool running well on ron): `source/subcon_worker.h` and `.cpp` are wrapped
+  whole; `main.cpp` has four `#if 0` spots (the `SUBCON_WORKER_CLASS` member, the
+  PROPS / tool_worker / `thread_start()` block, the `exchange()` announcement
+  hand-off, `thread_stop()`) and `main.h` the include. `source/subcon_tasks.h` is
+  untouched (no longer included by anything compiled). To revert: remove those
+  `#if 0` / `#endif` pairs and set `SUBCON_THINK_CYCLE_ENABLED` back to `true`. The
+  `drains_events` flag in `olla.h` and `COMMS::busy` stay (generic). Smoke-tested
+  the new olli build on a scratch copy of the claude profile with audio muted: chat
+  round trip fine, no subcon activity in its log, clean `bye` (exit 0), crash log
+  unchanged; ron's running session was not touched.

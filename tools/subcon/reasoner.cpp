@@ -403,7 +403,20 @@ std::string SUBCON_REASONER::build_finding_prompt(const SUBCON_TODO_ITEM& item, 
         "noteworthy to false and say so in summary. Set urgency to \"urgent\" only for "
         "something that can't wait (such as a severe weather alert), otherwise \"normal\" "
         "or \"low\". Write summary as one to three plain sentences stating the facts, ready "
-        "to be read aloud - no JSON, no lists, no markdown.";
+        "to be read aloud - no JSON, no lists, no markdown."
+        // Added 2026-10-30. Live, an empty timer list was queued as "worth
+        // telling" because an earlier check had reported an unacknowledged timer
+        // (the problem was gone, which the model took for news). Measured on
+        // qwen3:8b with earlier-finding context: this wording queued 0/20
+        // all-clear / resolved / unchanged cases and 8/8 real findings; the
+        // wording above alone queued 3/20 wrongly.
+        " Remember that doing the check is not itself news. Results like \"no timers set\", \"no alerts\", "
+        "\"nothing unresolved\", \"everything is fine\", \"the user is home\" or \"nothing has changed\" mean "
+        "there is NOTHING to tell: set noteworthy to false for them, even though the check worked. Only set "
+        "noteworthy to true when your results show a specific thing the user needs to know or act on, such as "
+        "an alert, an unacknowledged timer, lights left on, or an upcoming appointment. A problem from an "
+        "earlier check that is now gone or resolved is also NOT news - do not report that something got "
+        "better. And a problem you were already told about that is still there is not news either.";
 
     // What this task found last time, if recently - for judging "new or
     // changed" against the fresh results above, not for the model to repeat.

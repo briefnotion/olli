@@ -185,6 +185,7 @@ names; nothing needed adding.
 | `outstanding_tool_call_ids`, "wait for a second call arriving inside narration" | structural: the next request is never sent until every call of the previous reply has an answer |
 | 4000-byte fetch truncation could split a UTF-8 character | fixed in this copy (`truncate_utf8()`) |
 | `SUBCON_THINK_CYCLE_ENABLED`, `SUBCON_FORCE_RUN_FOR_TESTING` constants | `--no-think-cycle`, `--force-run` |
+| `fetch_website_content` could fetch any address | refuses loopback, private-LAN, link-local, CGNAT, multicast and reserved addresses, checked on the address curl actually connects to, so hostnames and redirects are covered too (added 2026-10-30). Not covered: an `http(s)_proxy` environment variable |
 
 The task list, caps, minimum gaps, 24-hour-or-since-arrival window, finding
 gate and prompts are ported unchanged (`subcon_tasks.h` is a copy of

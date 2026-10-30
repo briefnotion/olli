@@ -430,7 +430,7 @@ short list of recurring tasks while you're not talking to Olli (weather for
 Lafayette, past conversations, notes, lights left on while you're away,
 forgotten timers), decides whether anything it found is actually worth telling
 you, and keeps those findings in a queue. Each task has a hard limit on how
-often it may run. Olli **pulls** the findings: ask "anything on your mind?" and
+often it may run. Olli **pulls** the findings: ask "any updates?" (or "give me an update", "catch me up") and
 the model calls `get_subcon_notes`, which hands over everything waiting as one
 digest. Nothing is pushed to you. See [SUBCON.md](SUBCON.md) for the tasks,
 limits and files it keeps in `<profile>/subcon/`, and

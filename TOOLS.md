@@ -46,7 +46,7 @@ olli listens for these on **port 47601**, loopback-only for now (see
 | Hue lights | On/off, brightness, colour, alerts/flashes, saved local scenes. | [tools/hue/README.md](tools/hue/README.md) |
 | Presence | Bluetooth-based home/away detection for one or more phones. | [tools/presence/README.md](tools/presence/README.md) |
 | RAG / knowledge base | Search notes, imported documentation, or past conversations mid-chat. | [tools/rag/README.md](tools/rag/README.md) |
-| Subcon | Olli's background "subconscious": works through recurring checks (weather, past conversations, notes, lights, timers) with its own LLM and keeps worthwhile findings. Ask olli "anything on your mind?" to hear them. Unlike the others it also acts as a small server, so the other tools hold a second connection to it. | [tools/subcon/README.md](tools/subcon/README.md) |
+| Subcon | Olli's background "subconscious": works through recurring checks (weather, past conversations, notes, lights, timers) with its own LLM and keeps worthwhile findings. Ask olli "any updates?" to hear them. Unlike the others it also acts as a small server, so the other tools hold a second connection to it. | [tools/subcon/README.md](tools/subcon/README.md) |
 
 ### Try the example
 

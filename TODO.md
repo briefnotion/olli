@@ -4279,3 +4279,84 @@ it can actually act under its persona's judgment, not just talk about it.
   the new olli build on a scratch copy of the claude profile with audio muted: chat
   round trip fine, no subcon activity in its log, clean `bye` (exit 0), crash log
   unchanged; ron's running session was not touched.
+
+### Subcon trigger wording: "updates" instead of "on your mind" (2026-10-30, built + tested, NOT committed, NOT installed)
+
+- The `get_subcon_notes` description in `tools/subcon/subcon.cpp`
+  (`make_register_message()`) now teaches the model to call it for "any updates?",
+  "give me an update", "update me", "what's new?", "catch me up", "anything I
+  should know?", "any news?", "anything else?" and a general "status update"; it
+  no longer leans on "what's on your mind?" (which still works). It tells the model
+  NOT to use it for the status of one specific thing (lights, timer, time, who is
+  home), because a bare "tell me the status" otherwise went to `get_clock_time` /
+  `list_timers`. Chosen by the user: "update" as the safe trigger if "status"
+  conflicts. Measured directly against qwen3:8b with the 21-tool list built from
+  the sources (n=3 per phrase, 222 calls): old wording caught 23/36 general asks and
+  9/12 follow-ups ("any news?" 0/3, "tell me the status" 0/3); the new wording 42/42
+  and 12/12, and never took an ask that belongs to another tool (24/24). The real
+  binary's registered text was checked identical to the tested one. Not yet seen in
+  olli itself: needs a subcon restart on ron (olli re-reads the description when the
+  tool re-registers - no olli restart needed).
+- **Idea, parked (the user's, 2026-10-30):** offer the notes without being asked, at
+  a natural moment - e.g. after finishing a request: "all lights are on, btw, there's
+  a status update, should I read it?". Needs real work: subcon would have to tell
+  olli that something unread is waiting (it is pull-only now, so this is the "busy
+  signal"-style event channel the user already floated), and olli's reply path would
+  need a hook that mentions it once after a tool result. Not started.
+
+### Hue tool expansion (2026-10-30, built + tested on a fake bridge AND the real one, NOT committed, NOT installed)
+
+- `tools/hue/hue.cpp` (README updated): `set_hue_light` takes several lights
+  (`"Computer, Sink"`, `"A and B"`, a list), `"all"` + `except`, `brightness_change`
+  (per light, skips lights that are off, never turns one on), `white`/`kelvin`
+  (candle..daylight), and falls back to a saved **default fade**; new
+  `set_hue_default_fade` (seconds / reset, saved in `hue_settings.json` as
+  `default_transition_ms`, also used for scene loads). `list_hue_lights` now reports
+  color or warm/cool white, effect, light type, **which saved scene the lights match
+  now and which olli last loaded** (`hue_state.json`), the default fade and the saved
+  scenes; `detail: "full"` adds models/firmware, bridge info, rooms/groups and the
+  Hue app's scene names. This is the "better picture of the lights" for other parts
+  of olli (pull only, by the user's choice; pushed live updates can be added later).
+- Two fixes found while testing: a model sending `light_id` as a list crashed the
+  whole tool (nlohmann `value()` throws on a wrong type; the original code had the
+  same hazard for any wrongly typed argument) - lists are now accepted and the call
+  handler is guarded so a bad call gets an error answer; and loading a scene that
+  wants a light off sent its brightness/color too, which the bridge rejects when the
+  light is already off (so an all-off scene "partially failed") - off lights now get
+  only `on:false`.
+- Tested end to end: the real `hue` binary in tmux with a fake olli, first against a
+  fake Hue bridge that mimics CLIP v1's error cases (60+ checks), then against the
+  **real bridge** (scratch HOME with copies of the claude profile's hue files; lights
+  snapshotted and restored afterwards; ~45 checks, all pass): relative brightness,
+  exact brightness, warm/cool white and kelvin on the color lamp, the friendly error
+  for white/color on the two white-only lamps, several lights / `all` + `except` /
+  list arguments, relative change skipping an off light, the 4 s default fade (accepted
+  by the bridge as transitiontime 40; note the bridge only reports the final state
+  after a fade, so the fade itself shows on the lamps, not in the API), instant
+  override, loading away/home/slumber with correct "matches" status, and re-loading
+  the current scene cleanly. Findings from the real bridge: it lists rejected fields
+  first, and keeps reporting `alert: select` long after a flash (so only a running
+  `lselect` is shown now); after a fade-out the light comes back at its old brightness.
+  Real setup: Computer is the only color lamp; Sink and Sofa are white-only dimmable.
+- Rejected fields are now caught wherever they sit in the bridge's answer (a color sent
+  to a white-only lamp no longer hides behind an accepted "on") and are worded for the
+  model: "this light does not support color temperature (it can only be turned on/off
+  and dimmed)" instead of raw bridge JSON.
+- Behaviors to know: a saved default fade also applies to presence's home/away light
+  actions. A light whose name contains " and " plus other names in one list (e.g.
+  "Lamp and Shade and Sink") is ambiguous and may not parse. Room/group control and
+  recalling the Hue app's own scenes were deliberately left out.
+- **Hue age check (2026-10-30, the user asked):** the bridge speaks Hue's CLIP v1 API
+  over plain HTTP with the key in the URL. Signify's developer docs say v1 and v2 run
+  side by side, v1 is "expected to be removed eventually", no date given; the user's
+  bridge reports API 1.78 and everything works. Moving to v2 (HTTPS, a different data
+  model, an event stream) would be a rewrite and isn't needed now - worth revisiting if
+  Signify announces a v1 cutoff. A read of the older code found no throw/leak hazards
+  beyond the two already fixed. One change: a multi-light command now stops after the
+  first connection failure instead of trying every light (up to 16 s each). **Known,
+  older limitation, not changed:** bridge requests run on the tool's main loop, so one
+  request to a bridge that is connected but not answering can take up to 16 s (8 s
+  timeout, retried once), longer than the 15 s heartbeat window - the tool then drops
+  and re-establishes its link to olli and that call's answer can be lost. A refused or
+  unreachable bridge fails in a few seconds and is fine. Fix, if it ever matters: do
+  the bridge requests on a worker thread.

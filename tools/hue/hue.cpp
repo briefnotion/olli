@@ -3,11 +3,17 @@
 // source/tools_helper.h/.cpp) onto the tools/template/ plumbing. See
 // ../PROTOCOL.md for the wire protocol.
 //
-// Registers set_hue_light/list_hue_lights/manage_hue_scenes with the exact
-// same names, descriptions, and argument shapes as the original TOOL_HUE -
-// tools/presence/presence.cpp's on_home_action/on_away_action (and its own
-// doc comments) already reference these by name, so nothing there needed
-// to change for this port.
+// Registers set_hue_light/list_hue_lights/manage_hue_scenes with the same
+// names as the original TOOL_HUE (tools/presence/presence.cpp's
+// on_home_action/on_away_action reference these by name, so nothing there
+// needed to change for this port). 2026-10-30 added to them, without
+// changing anything that already worked: set_hue_light takes several lights
+// ("Computer, Sink"), "all" with an "except", brightness_change, warm/cool
+// white (white / kelvin), and falls back to a saved default fade;
+// list_hue_lights reports color/white, effect, light type, which saved scene
+// the lights match and the default fade (detail "full" adds the bridge, its
+// rooms and the Hue app's scenes); and a fourth tool, set_hue_default_fade,
+// sets that default. Scene loads use the default fade too.
 //
 // Talks to the Hue bridge's CLIP v1 REST API directly over libcurl
 // (HUE_LIGHT_CLASS below) - same endpoints, same request shapes, same
@@ -56,6 +62,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -113,6 +120,24 @@ namespace {
         int brightness = 0;
         std::vector<double> xy;
         bool reachable = false;
+        // Added 2026-10-30 so other parts of olli (the main chat, subcon) get
+        // the fuller picture list_hue_lights reports, not just on/off and
+        // brightness. All straight from the bridge's /lights payload.
+        std::string colormode;     // "xy", "ct", "hs", or "" for a light with no color support
+        int ct = 0;                // color temperature in mireds (153 = cool/6500K .. 500 = warm/2000K); 0 = not reported
+        int hue = -1, sat = -1;    // Hue's hue/saturation form of the color; -1 = not reported
+        std::string effect;        // "none" or "colorloop"
+        std::string alert;         // "none", "select", "lselect"
+        std::string mode;          // bridge's "mode" (e.g. "homeautomation")
+        std::string type;          // e.g. "Extended color light", "Color temperature light", "Dimmable light"
+        std::string modelid, productname, manufacturername, swversion;
+    };
+
+    // The scene the lights are in, and what was last loaded: see
+    // HUE_LIGHT_CLASS::scene_status() below.
+    struct LastScene {
+        std::string name;
+        long long at_unix = 0;
     };
 
     // Model-facing brightness is a 0-100 percentage; Hue's own "bri" field
@@ -132,6 +157,65 @@ namespace {
         if (bri > 254) bri = 254;
         return static_cast<int>(std::lround(bri / 254.0 * 100.0));
     }
+
+    std::string format_seconds(double seconds)
+    {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%.1f", seconds);
+        return buf;
+    }
+
+    // Color temperature. Hue's "ct" is in mireds (1,000,000 / kelvin); the
+    // range a bridge accepts is 153 (6500K, cool) to 500 (2000K, warm).
+    constexpr int CT_MIN_MIRED = 153;
+    constexpr int CT_MAX_MIRED = 500;
+
+    int kelvin_to_mired(int kelvin)
+    {
+        if (kelvin < 1) kelvin = 1;
+        int mired = static_cast<int>(std::lround(1000000.0 / kelvin));
+        return std::clamp(mired, CT_MIN_MIRED, CT_MAX_MIRED);
+    }
+
+    int mired_to_kelvin(int mired)
+    {
+        if (mired < 1) mired = 1;
+        return static_cast<int>(std::lround(1000000.0 / mired));
+    }
+
+    // Named whites the model can ask for -> kelvin.
+    const std::map<std::string, int>& white_presets()
+    {
+        static const std::map<std::string, int> presets = {
+            {"candle", 2000}, {"warm", 2700}, {"neutral", 3500}, {"cool", 4500}, {"daylight", 6500}
+        };
+        return presets;
+    }
+
+    std::string describe_kelvin(int kelvin)
+    {
+        const char* word = kelvin < 2400 ? "candle" : kelvin < 3200 ? "warm white" : kelvin < 4200 ? "neutral white"
+                         : kelvin < 5500 ? "cool white" : "daylight";
+        return std::to_string(kelvin) + "K " + word;
+    }
+
+    // Named colors for set_hue_light's "preset" and for naming what a light
+    // is showing in list_hue_lights (nearest one) - one table so the two
+    // can't drift apart.
+    const std::map<std::string, std::vector<double>>& color_palette()
+    {
+        static const std::map<std::string, std::vector<double>> palette = {
+            {"red", {0.675, 0.322}}, {"green", {0.409, 0.518}}, {"blue", {0.167, 0.04}},
+            {"yellow", {0.432, 0.500}}, {"cyan", {0.157, 0.357}}, {"magenta", {0.41, 0.17}},
+            {"orange", {0.55, 0.41}}, {"purple", {0.27, 0.13}}, {"pink", {0.41, 0.21}},
+            {"white", {0.31, 0.32}}
+        };
+        return palette;
+    }
+
+    // Defined further down next to the other color code; list_hue_lights
+    // (handle_call) needs it first.
+    std::string describe_light_color(const LightState& s);
 
     // A Hue bridge response is either an error - a JSON object with an
     // "error" key (make_request()'s own fabricated
@@ -169,14 +253,45 @@ namespace {
                 detail = data["error"].is_string() ? data["error"].get<std::string>() : data["error"].dump();
                 return true;
             }
-            if (data.is_array() && !data.empty() && data[0].contains("error")) {
-                detail = data[0]["error"].dump();
-                return true;
+            if (data.is_array()) {
+                // Any entry, not just the first: a request with several fields
+                // gets one answer per field, and a rejected field (a color sent
+                // to a white-only lamp) must not hide behind an accepted "on".
+                for (auto const& entry : data) {
+                    if (entry.is_object() && entry.contains("error")) {
+                        detail = entry["error"].dump();
+                        return true;
+                    }
+                }
             }
             return false;
         } catch (...) {
             detail = "unreadable response from bridge";
             return true;
+        }
+    }
+
+    // The bridge's own error object, in words a model will relay properly:
+    // type 6 = the light does not have that feature (color on a white lamp),
+    // 201 = the light is off. Anything else is passed through as it came.
+    std::string friendly_bridge_error(const std::string& detail)
+    {
+        try {
+            json e = json::parse(detail);
+            if (!e.is_object()) return detail;
+            int type = e.value("type", 0);
+            std::string address = e.value("address", "");
+            std::string param = address.substr(address.find_last_of('/') == std::string::npos ? 0 : address.find_last_of('/') + 1);
+            if (type == 6) {
+                std::string what = param == "xy" || param == "hue" || param == "sat" ? "color"
+                                 : param == "ct" ? "color temperature (warm/cool white)"
+                                 : param == "effect" ? "effects" : param;
+                return "this light does not support " + what + " (it can only be turned on/off and dimmed)";
+            }
+            if (type == 201) return "the light is off, so that setting can't be changed";
+            return detail;
+        } catch (...) {
+            return detail;
         }
     }
 
@@ -269,13 +384,26 @@ namespace {
                         state.name = name;
 
                         if (info.contains("state")) {
-                            state.on = info["state"].value("on", false);
-                            state.brightness = info["state"].value("bri", 0);
-                            state.reachable = info["state"].value("reachable", false);
-                            if (info["state"].contains("xy")) {
-                                state.xy = info["state"]["xy"].get<std::vector<double>>();
+                            const json& st = info["state"];
+                            state.on = st.value("on", false);
+                            state.brightness = st.value("bri", 0);
+                            state.reachable = st.value("reachable", false);
+                            if (st.contains("xy")) {
+                                state.xy = st["xy"].get<std::vector<double>>();
                             }
+                            state.colormode = st.value("colormode", "");
+                            state.ct = st.value("ct", 0);
+                            state.hue = st.value("hue", -1);
+                            state.sat = st.value("sat", -1);
+                            state.effect = st.value("effect", "");
+                            state.alert = st.value("alert", "");
+                            state.mode = st.value("mode", "");
                         }
+                        state.type = info.value("type", "");
+                        state.modelid = info.value("modelid", "");
+                        state.productname = info.value("productname", "");
+                        state.manufacturername = info.value("manufacturername", "");
+                        state.swversion = info.value("swversion", "");
 
                         new_cache[id] = state;
                         new_name_to_id[to_lower(name)] = id;
@@ -358,21 +486,40 @@ namespace {
             {
                 std::string lower_name = to_lower(name);
                 std::map<std::string, json> states;
+                std::string stored_name;
+                int fade_ms = -1;
                 {
                     std::lock_guard<std::mutex> lock(state_mutex);
                     auto it = local_scenes.find(lower_name);
                     if (it == local_scenes.end()) return {true, "Scene '" + name + "' not found."};
                     states = it->second.light_states;
+                    stored_name = it->second.name;
+                    fade_ms = default_transition_ms;
                 }
 
                 int failed = 0;
                 std::string last_detail;
                 for (auto const& [id, state_json] : states) {
-                    std::string res = make_request("PUT", "/lights/" + id + "/state", state_json.dump());
+                    json body = state_json;
+                    // A light the scene wants OFF gets just that. Sending its
+                    // saved brightness/color along with on:false is rejected by
+                    // the bridge ("device is set to off") whenever the light is
+                    // already off, which made loading an all-off scene report a
+                    // partial failure.
+                    if (!body.value("on", true)) body = json{{"on", false}};
+                    // The saved default fade applies to scene loads too, so
+                    // "load the evening scene" fades the same way "turn on
+                    // all the lights" does. Unset (-1) leaves the bridge's
+                    // own default.
+                    if (fade_ms >= 0) body["transitiontime"] = std::clamp(fade_ms / 100, 0, 65535);
+                    std::string res = make_request("PUT", "/lights/" + id + "/state", body.dump());
                     if (response_is_error(res, last_detail)) ++failed;
                 }
 
-                if (failed == 0) return {true, "Scene '" + name + "' activated."};
+                if (failed == 0) {
+                    note_scene_loaded(stored_name.empty() ? name : stored_name);
+                    return {true, "Scene '" + name + "' activated."};
+                }
                 if (static_cast<size_t>(failed) == states.size()) {
                     return {false, "Error: Scene '" + name + "' could not be activated - bridge unreachable or rejected every light (" + last_detail + ")."};
                 }
@@ -401,6 +548,178 @@ namespace {
             {
                 std::lock_guard<std::mutex> lock(state_mutex);
                 return lights_cache;
+            }
+
+            // --- Global fade (2026-10-30) ---------------------------------
+            // -1 = not set: the bridge's own default applies (about 0.4 s).
+            // 0 = instant. Otherwise milliseconds. Persisted by the caller
+            // (hue_settings.json); this class only holds the live value.
+            void set_default_transition_ms(int ms)
+            {
+                std::lock_guard<std::mutex> lock(state_mutex);
+                default_transition_ms = ms;
+            }
+
+            int get_default_transition_ms()
+            {
+                std::lock_guard<std::mutex> lock(state_mutex);
+                return default_transition_ms;
+            }
+
+            // --- Which scene the lights are in (2026-10-30) ----------------
+            // Two separate facts, reported together: which saved scene the
+            // lights match RIGHT NOW (works however they got that way - a
+            // scene load, the Hue app, the wall switch), and which scene
+            // olli last loaded (remembered across restarts in
+            // hue_state.json). Only local scenes (manage_hue_scenes) are
+            // known here: the v1 bridge API doesn't say which of the Hue
+            // app's own scenes is active.
+            void set_state_file(const std::string& path)
+            {
+                std::lock_guard<std::mutex> lock(state_mutex);
+                state_filepath = path;
+                last_scene = LastScene{};
+                if (state_filepath.empty()) return;
+                try {
+                    std::ifstream file(state_filepath);
+                    if (file.is_open()) {
+                        json j;
+                        file >> j;
+                        if (j.contains("last_scene") && j["last_scene"].is_object()) {
+                            last_scene.name = j["last_scene"].value("name", "");
+                            last_scene.at_unix = j["last_scene"].value("at_unix", 0LL);
+                        }
+                    }
+                } catch (...) {
+                    // Missing or unreadable: no remembered scene, which is fine.
+                }
+            }
+
+            void note_scene_loaded(const std::string& name)
+            {
+                std::lock_guard<std::mutex> lock(state_mutex);
+                last_scene.name = name;
+                last_scene.at_unix = static_cast<long long>(std::time(nullptr));
+                if (state_filepath.empty()) return;
+                try {
+                    std::ofstream file(state_filepath);
+                    if (file.is_open()) {
+                        file << json{{"last_scene", {{"name", last_scene.name}, {"at_unix", last_scene.at_unix}}}}.dump(4);
+                    }
+                } catch (...) {
+                    // Same as save_scenes_to_disk(): remembering is best-effort.
+                }
+            }
+
+            // One short paragraph for list_hue_lights. Uses the cache as it
+            // stands (the caller has just refreshed it).
+            std::string scene_status()
+            {
+                std::lock_guard<std::mutex> lock(state_mutex);
+                if (local_scenes.empty()) return "Scenes: none saved.";
+
+                std::vector<std::string> matching;
+                for (auto const& [key, scene] : local_scenes)
+                    if (scene_matches_lights(scene)) matching.push_back(scene.name);
+
+                std::string out;
+                if (!matching.empty()) {
+                    out = "Scene: the lights currently match the saved scene ";
+                    for (size_t i = 0; i < matching.size(); ++i) out += (i ? ", " : "") + std::string("'") + matching[i] + "'";
+                    out += ".";
+                    if (!last_scene.name.empty() && std::find(matching.begin(), matching.end(), last_scene.name) == matching.end())
+                        out += " (Last loaded by olli: '" + last_scene.name + "', " + age_text(last_scene.at_unix) + ".)";
+                } else if (!last_scene.name.empty()) {
+                    out = "Scene: no saved scene matches the lights now. Last loaded by olli: '" + last_scene.name + "', "
+                        + age_text(last_scene.at_unix) + "; the lights have been changed since.";
+                } else {
+                    out = "Scene: no saved scene matches the lights now, and none has been loaded by olli.";
+                }
+                return out;
+            }
+
+            // Everything below is for set_hue_light's multi-light targeting.
+
+            struct TARGETS {
+                std::vector<std::string> ids;   // resolved bridge light IDs
+                bool whole_group = false;       // plain "all": send to group 0 in one request
+                std::string error;              // non-empty = could not resolve; nothing should be sent
+            };
+
+            // "Computer, Sink", "Computer and Sink", "2,3", "all", or "all" with
+            // 'except' naming lights to leave alone. Unknown names are an error
+            // (listing the real ones) rather than being silently skipped.
+            TARGETS resolve_targets(const std::string& target, const std::string& except_list, bool force_individual = false)
+            {
+                TARGETS out;
+                std::vector<std::string> wanted, excluded;
+                {
+                    std::lock_guard<std::mutex> lock(state_mutex);
+                    wanted = split_light_list(target, name_to_id);
+                    excluded = split_light_list(except_list, name_to_id);
+                }
+                if (wanted.empty()) { out.error = "No light given."; return out; }
+
+                bool has_all = false;
+                for (auto const& w : wanted) if (to_lower(w) == "all") has_all = true;
+
+                if (has_all && excluded.empty() && !force_individual) {
+                    out.whole_group = (wanted.size() == 1);
+                    if (out.whole_group) return out;
+                }
+
+                std::lock_guard<std::mutex> lock(state_mutex);
+                auto lookup = [&](const std::string& word, std::string& id) {
+                    if (std::all_of(word.begin(), word.end(), [](unsigned char c) { return std::isdigit(c) != 0; })) { id = word; return lights_cache.count(id) > 0; }
+                    auto it = name_to_id.find(to_lower(word));
+                    if (it == name_to_id.end()) return false;
+                    id = it->second;
+                    return true;
+                };
+
+                std::vector<std::string> unknown;
+                std::vector<std::string> ids;
+                for (auto const& w : wanted) {
+                    if (to_lower(w) == "all") { for (auto const& [id, st] : lights_cache) ids.push_back(id); continue; }
+                    std::string id;
+                    if (lookup(w, id)) ids.push_back(id); else unknown.push_back(w);
+                }
+                std::vector<std::string> skip;
+                for (auto const& w : excluded) {
+                    std::string id;
+                    if (lookup(w, id)) skip.push_back(id); else unknown.push_back(w);
+                }
+
+                if (!unknown.empty()) {
+                    out.error = "Light(s) not found:";
+                    for (auto const& u : unknown) out.error += " '" + u + "'";
+                    out.error += ". Known lights:";
+                    for (auto const& [id, st] : lights_cache) out.error += " [" + id + "] " + st.name + ";";
+                    return out;
+                }
+
+                for (auto const& id : ids) {
+                    if (std::find(skip.begin(), skip.end(), id) != skip.end()) continue;
+                    if (std::find(out.ids.begin(), out.ids.end(), id) != out.ids.end()) continue;
+                    out.ids.push_back(id);
+                }
+                if (out.ids.empty()) out.error = "No lights left to change after the exclusions.";
+                return out;
+            }
+
+            // The light's cached name, for messages ("" if unknown).
+            std::string light_name(const std::string& id)
+            {
+                std::lock_guard<std::mutex> lock(state_mutex);
+                auto it = lights_cache.find(id);
+                return it == lights_cache.end() ? "" : it->second.name;
+            }
+
+            bool light_is_on(const std::string& id)
+            {
+                std::lock_guard<std::mutex> lock(state_mutex);
+                auto it = lights_cache.find(id);
+                return it != lights_cache.end() && it->second.on;
             }
 
             size_t cached_light_count()
@@ -440,6 +759,79 @@ namespace {
                 return s;
             }
 
+            // "A, B", "A and B", "A & B", "A; B" -> {"A","B"}; trims, drops empties.
+            // Commas, semicolons and & always separate. A piece that is exactly
+            // a known light's name (or an ID, or "all") is kept whole, so a
+            // light called "Lamp and Shade" is still addressable; only a piece
+            // that is not one gets split further on " and ".
+            static std::vector<std::string> split_light_list(const std::string& input, const std::map<std::string, std::string>& known_names)
+            {
+                auto trim = [](const std::string& t) {
+                    size_t b = t.find_first_not_of(" \t");
+                    size_t e = t.find_last_not_of(" \t");
+                    return b == std::string::npos ? std::string() : t.substr(b, e - b + 1);
+                };
+                std::vector<std::string> pieces;
+                std::string cur;
+                for (char c : input) {
+                    if (c == ',' || c == ';' || c == '&') { pieces.push_back(trim(cur)); cur.clear(); } else cur += c;
+                }
+                pieces.push_back(trim(cur));
+
+                std::vector<std::string> out;
+                for (auto const& piece : pieces) {
+                    if (piece.empty()) continue;
+                    bool is_id = std::all_of(piece.begin(), piece.end(), [](unsigned char c) { return std::isdigit(c) != 0; });
+                    if (is_id || to_lower(piece) == "all" || known_names.count(to_lower(piece))) { out.push_back(piece); continue; }
+                    std::string rest = piece;
+                    for (;;) {
+                        size_t at = std::string::npos;
+                        for (size_t pos = 0; pos + 5 <= rest.size(); ++pos)
+                            if (to_lower(rest.substr(pos, 5)) == " and ") { at = pos; break; }
+                        if (at == std::string::npos) break;
+                        std::string head = trim(rest.substr(0, at));
+                        if (!head.empty()) out.push_back(head);
+                        rest = rest.substr(at + 5);
+                    }
+                    rest = trim(rest);
+                    if (!rest.empty()) out.push_back(rest);
+                }
+                return out;
+            }
+
+            static std::string age_text(long long at_unix)
+            {
+                if (at_unix <= 0) return "some time ago";
+                long long secs = static_cast<long long>(std::time(nullptr)) - at_unix;
+                if (secs < 90) return "just now";
+                if (secs < 90 * 60) return std::to_string((secs + 30) / 60) + " minutes ago";
+                if (secs < 36 * 3600) return std::to_string((secs + 1800) / 3600) + " hours ago";
+                return std::to_string((secs + 43200) / 86400) + " days ago";
+            }
+
+            // Does every light in the scene look like it did when the scene
+            // was saved? Brightness and color get a little slack: the bridge
+            // rounds both, and a fade may not have fully finished. Only
+            // lights named in the scene count. Assumes state_mutex is held.
+            bool scene_matches_lights(const HUE_SCENE& scene) const
+            {
+                if (scene.light_states.empty()) return false;
+                for (auto const& [id, saved] : scene.light_states) {
+                    auto it = lights_cache.find(id);
+                    if (it == lights_cache.end() || !it->second.reachable) return false;
+                    const LightState& live = it->second;
+                    bool saved_on = saved.value("on", false);
+                    if (live.on != saved_on) return false;
+                    if (!saved_on) continue;
+                    if (saved.contains("bri") && std::abs(live.brightness - saved.value("bri", 0)) > 10) return false;
+                    if (saved.contains("xy") && saved["xy"].is_array() && saved["xy"].size() == 2 && live.xy.size() == 2) {
+                        if (std::abs(live.xy[0] - saved["xy"][0].get<double>()) > 0.03) return false;
+                        if (std::abs(live.xy[1] - saved["xy"][1].get<double>()) > 0.03) return false;
+                    }
+                }
+                return true;
+            }
+
             // Both assume the caller already holds state_mutex.
             void save_scenes_to_disk()
             {
@@ -477,6 +869,9 @@ namespace {
             std::map<std::string, LightState> lights_cache;
             std::map<std::string, std::string> name_to_id;
             std::map<std::string, HUE_SCENE> local_scenes;
+            int default_transition_ms = -1;   // see set_default_transition_ms()
+            std::string state_filepath;       // hue_state.json; empty = don't remember
+            LastScene last_scene;
     };
 
     // =====================================================================
@@ -489,6 +884,10 @@ namespace {
     struct HueSettings {
         std::string bridge_ip = "127.0.0.1";
         std::string api_key = "Enter_Hue_Bridge_API_Key";
+        // Global fade for every light change that doesn't say otherwise
+        // (2026-10-30). -1 = not set (the bridge's own ~0.4 s), 0 = instant.
+        // Set by asking olli (set_hue_default_fade) or by editing this file.
+        int default_transition_ms = -1;
     };
 
     fs::path get_home_dir()
@@ -513,11 +912,20 @@ namespace {
         return profile_dir_for(profile_name) / "scenes.json";
     }
 
+    // Which scene olli last loaded - runtime state, kept apart from the
+    // hand-edited hue_settings.json and from scenes.json (whose format stays
+    // exactly as it always was).
+    fs::path state_path_for(const std::string& profile_name)
+    {
+        return profile_dir_for(profile_name) / "hue_state.json";
+    }
+
     void save_hue_settings(const fs::path& path, const HueSettings& s)
     {
         json j;
         j["bridge_ip"] = s.bridge_ip;
         j["api_key"] = s.api_key;
+        j["default_transition_ms"] = s.default_transition_ms;
         std::ofstream file(path);
         if (file.is_open()) file << j.dump(4);
     }
@@ -564,6 +972,9 @@ namespace {
                 file >> j;
                 s.bridge_ip = j.value("bridge_ip", s.bridge_ip);
                 s.api_key = j.value("api_key", s.api_key);
+                s.default_transition_ms = j.value("default_transition_ms", s.default_transition_ms);
+                if (s.default_transition_ms < -1) s.default_transition_ms = -1;
+                if (s.default_transition_ms > 600000) s.default_transition_ms = 600000;
             } catch (...) {
                 // Malformed - fall back to placeholders.
             }
@@ -608,6 +1019,8 @@ namespace {
         current_profile_name = profile_name;
         hue_settings = load_hue_settings(profile_name);
         hue.set_credentials(hue_settings.bridge_ip, hue_settings.api_key, scenes_path_for(profile_name).string());
+        hue.set_default_transition_ms(hue_settings.default_transition_ms);
+        hue.set_state_file(state_path_for(profile_name).string());
         hue.refresh_lights();
     }
 
@@ -632,16 +1045,20 @@ namespace {
         json set_params = {
             {"type", "object"},
             {"properties", {
-                {"light_id", {{"type", "string"}, {"description", "ID or Name (e.g., '2' or 'Computer'). Use 'all' to target every light."}}},
+                {"light_id", {{"type", "string"}, {"description", "One light by ID or name (e.g. '2' or 'Computer'), several separated by commas or 'and' (e.g. 'Computer, Sink'), or 'all' for every light."}}},
+                {"except", {{"type", "string"}, {"description", "Only with light_id 'all': lights to leave alone, by name or ID (e.g. 'Sofa' for 'all the lights except the sofa')."}}},
                 {"on", {{"type", "boolean"}}},
                 // 0-100 percentage - converted to Hue's native 0-254 "bri"
                 // scale in handle_call() (brightness_percent_to_bri()).
-                {"brightness", {{"type", "integer"}, {"description", "Brightness as a percentage, 0 (dimmest) to 100 (maximum)."}}},
+                {"brightness", {{"type", "integer"}, {"description", "Set brightness to this exact percentage, 0 (dimmest) to 100 (maximum)."}}},
+                {"brightness_change", {{"type", "integer"}, {"description", "Make the light this many percentage points brighter (positive) or dimmer (negative), -100 to 100, e.g. -20 for 'a bit dimmer', 25 for 'brighter'. Only changes lights that are already on. Do not combine with brightness."}}},
                 {"preset", {{"type", "string"}, {"enum", {"red", "green", "blue", "yellow", "magenta", "cyan", "orange", "purple", "pink", "white"}}}},
                 {"hex", {{"type", "string"}}},
+                {"white", {{"type", "string"}, {"enum", {"candle", "warm", "neutral", "cool", "daylight"}}, {"description", "A true white by warmth: candle (2000K), warm (2700K), neutral (3500K), cool (4500K), daylight (6500K). Use this, not a color preset, for warm or cool white light. Ignored if a color is also given."}}},
+                {"kelvin", {{"type", "integer"}, {"description", "A true white at an exact color temperature, 2000 (warm) to 6500 (cool). Ignored if a color or white is also given."}}},
                 {"alert", {{"type", "string"}, {"enum", {"none", "select", "lselect"}}}},
                 {"flash_count", {{"type", "integer"}}},
-                {"transition_ms", {{"type", "integer"}}}
+                {"transition_ms", {{"type", "integer"}, {"description", "How long the change takes to fade in, in milliseconds (10000 = 10 seconds). 0 means instant - use it when the user says 'right now' or 'immediately'. Leave it out to use the saved default fade."}}}
             }},
             {"required", json::array({"light_id"})}
         };
@@ -655,26 +1072,68 @@ namespace {
             {"required", json::array({"action"})}
         };
 
+        json list_params = {
+            {"type", "object"},
+            {"properties", {
+                {"detail", {{"type", "string"}, {"enum", {"summary", "full"}}, {"description", "'summary' (default) is enough for almost every question. 'full' also lists light models and firmware, the bridge's rooms/groups, the Hue app's own scenes, and bridge info."}}}
+            }}
+        };
+
+        json fade_params = {
+            {"type", "object"},
+            {"properties", {
+                {"seconds", {{"type", "number"}, {"description", "Default fade time in seconds, 0 for instant (e.g. 10 for 'make fades 10 seconds')."}}},
+                {"reset", {{"type", "boolean"}, {"description", "True to go back to the bridge's own quick default instead of a set time."}}}
+            }}
+        };
+
         return {
             {"type", "register"},
             {"tools", json::array({
                 {
                     {"name", "set_hue_light"},
-                    {"description", "Controls Hue lights by ID or Name. Use this for general commands like 'turn off all lights' by setting light_id to 'all'. Always execute this tool call for every request, even if you believe the state is already set."},
+                    {"description", "Controls Hue lights by ID or Name: one light, several (comma-separated), or all. Use this for general commands like 'turn off all lights' by setting light_id to 'all'. Also does dimming or brightening by an amount, warm or cool white, colors, and fade times. Always execute this tool call for every request, even if you believe the state is already set."},
                     {"parameters", set_params}
                 },
                 {
                     {"name", "list_hue_lights"},
-                    {"description", "Returns status of all connected lights. Always execute this tool call for every request, even if you believe you already know the state - never answer a status question (on/off, brightness, color) from a value stated earlier in the conversation."},
-                    {"parameters", {{"type", "object"}}}
+                    {"description", "Returns status of all connected lights: on/off, brightness, color or warm/cool white, any effect, which saved scene (if any) the lights currently match, and the saved default fade. Always execute this tool call for every request, even if you believe you already know the state - never answer a status question (on/off, brightness, color, scene) from a value stated earlier in the conversation."},
+                    {"parameters", list_params}
                 },
                 {
                     {"name", "manage_hue_scenes"},
                     {"description", "Saves, loads, or removes local light scenes. Only use for specific named snapshots (e.g., 'home', 'away')."},
                     {"parameters", scene_params}
+                },
+                {
+                    {"name", "set_hue_default_fade"},
+                    {"description", "Sets the default fade time for light changes (turning lights on or off, brightness, color, loading a scene) that don't say how long to take - e.g. 'make fades 10 seconds' is seconds 10, and 0 is instant. It is saved and stays until changed. A single request can still override it ('right now' means instant for that request only)."},
+                    {"parameters", fade_params}
                 }
             })}
         };
+    }
+
+    // A light name argument as the model may actually send it: a string
+    // ("Computer, Sink"), or a list (["Computer", "Sink"], [2, 3]) which is
+    // joined with commas. Anything else reads as empty. nlohmann's value()
+    // throws on a wrongly typed field, which took the whole tool down.
+    std::string light_list_arg(const json& args, const char* key)
+    {
+        if (!args.is_object() || !args.contains(key)) return "";
+        const json& v = args[key];
+        if (v.is_string()) return v.get<std::string>();
+        if (v.is_number_integer()) return std::to_string(v.get<long long>());
+        if (v.is_array()) {
+            std::string out;
+            for (auto const& item : v) {
+                std::string one = item.is_string() ? item.get<std::string>() : item.is_number_integer() ? std::to_string(item.get<long long>()) : "";
+                if (one.empty()) continue;
+                out += (out.empty() ? "" : ",") + one;
+            }
+            return out;
+        }
+        return "";
     }
 
     std::string handle_call(OLLI_LINK& link, const json& msg)
@@ -689,14 +1148,87 @@ namespace {
                 link.send_result(call_id, err, failure_instruction);
                 return err;
             }
+            bool full = args.is_object() && args.contains("detail") && args["detail"].is_string() && args["detail"].get<std::string>() == "full";
             auto lights = hue.get_cached_lights();
             std::stringstream ss;
-            ss << "Current Lights: ";
+            ss << "Current Lights (" << lights.size() << "):\n";
             for (auto const& [id, state] : lights) {
-                ss << "[" << id << "] " << state.name << " (Power: " << (state.on ? "ON" : "OFF")
-                   << ", Bri: " << bri_to_brightness_percent(state.brightness) << "%"
-                   << (state.reachable ? "" : " *UNREACHABLE*") << "), ";
+                ss << "[" << id << "] " << state.name << ": ";
+                if (!state.reachable) ss << "*UNREACHABLE* (last known: ";
+                if (state.on) ss << "ON " << bri_to_brightness_percent(state.brightness) << "%, " << describe_light_color(state);
+                else ss << "OFF";
+                if (!state.effect.empty() && state.effect != "none") ss << ", effect: " << state.effect;
+                // "select" is a one-off flash the bridge keeps reporting long after it ended; only the
+                // 15-second "lselect" is worth mentioning, and only while it may still be running.
+                if (state.alert == "lselect") ss << ", alert: flashing";
+                if (!state.reachable) ss << ")";
+                if (!state.type.empty()) ss << " [" << state.type << "]";
+                ss << "\n";
+                if (full) {
+                    ss << "    " << (state.manufacturername.empty() ? "" : state.manufacturername + " ")
+                       << (state.productname.empty() ? state.modelid : state.productname)
+                       << (state.modelid.empty() ? "" : " (model " + state.modelid + ")")
+                       << (state.swversion.empty() ? "" : ", firmware " + state.swversion)
+                       << (state.mode.empty() ? "" : ", mode " + state.mode);
+                    if (!state.colormode.empty()) ss << ", colormode " << state.colormode;
+                    if (state.hue >= 0 && state.sat >= 0) ss << ", hue " << state.hue << "/sat " << state.sat;
+                    ss << "\n";
+                }
             }
+            ss << hue.scene_status() << "\n";
+            int fade_ms = hue.get_default_transition_ms();
+            if (fade_ms < 0) ss << "Default fade: not set (the bridge's own quick default, about 0.4 seconds).\n";
+            else if (fade_ms == 0) ss << "Default fade: instant.\n";
+            else ss << "Default fade: " << format_seconds(fade_ms / 1000.0) << " seconds.\n";
+            auto scenes = hue.get_scenes();
+            if (!scenes.empty()) {
+                ss << "Saved scenes:";
+                for (auto const& [key, scene] : scenes) ss << " " << scene.name << ";";
+                ss << "\n";
+            }
+
+            if (full) {
+                // Bridge-level facts. Three extra requests, only when asked.
+                try {
+                    json cfg = json::parse(hue.make_request("GET", "/config"));
+                    if (cfg.is_object() && cfg.contains("name")) {
+                        ss << "Bridge: " << cfg.value("name", "") << ", API " << cfg.value("apiversion", "?")
+                           << ", software " << cfg.value("swversion", "?") << ", zigbee channel " << cfg.value("zigbeechannel", 0)
+                           << ", model " << cfg.value("modelid", "?") << "\n";
+                    }
+                } catch (...) { ss << "Bridge: (could not read its settings)\n"; }
+                try {
+                    json groups = json::parse(hue.make_request("GET", "/groups"));
+                    if (groups.is_object() && !groups.empty() && !groups.contains("error")) {
+                        ss << "Rooms and groups:";
+                        for (auto& [gid, g] : groups.items()) {
+                            if (!g.is_object()) continue;
+                            ss << " " << g.value("name", "?") << " (" << g.value("type", "?") << ", ";
+                            bool first = true;
+                            if (g.contains("lights") && g["lights"].is_array())
+                                for (auto& l : g["lights"]) { ss << (first ? "lights " : ",") << (l.is_string() ? l.get<std::string>() : l.dump()); first = false; }
+                            if (first) ss << "no lights";
+                            bool any_on = g.contains("state") && g["state"].is_object() && g["state"].value("any_on", false);
+                            ss << ", " << (any_on ? "some on" : "all off") << ");";
+                        }
+                        ss << "\n";
+                    }
+                } catch (...) { ss << "Rooms and groups: (could not read them)\n"; }
+                try {
+                    json hs = json::parse(hue.make_request("GET", "/scenes"));
+                    if (hs.is_object() && !hs.empty() && !hs.contains("error")) {
+                        ss << "Hue app scenes (names only; which one is active isn't available):";
+                        int shown = 0;
+                        for (auto& [sid, sc] : hs.items()) {
+                            if (!sc.is_object()) continue;
+                            if (++shown > 30) { ss << " ...and more;"; break; }
+                            ss << " " << sc.value("name", "?") << ";";
+                        }
+                        ss << "\n";
+                    }
+                } catch (...) { ss << "Hue app scenes: (could not read them)\n"; }
+            }
+
             link.send_result(call_id, ss.str());
             return "Call answered: list_hue_lights (" + std::to_string(lights.size()) + " light(s))";
         }
@@ -762,58 +1294,183 @@ namespace {
             return "Scene " + action + ": " + scene_name;
         }
 
-        if (name == "set_hue_light") {
-            std::string target = args.value("light_id", "");
-            json body;
+        if (name == "set_hue_default_fade") {
+            int new_ms = -1;
+            bool reset = args.is_object() && args.contains("reset") && args["reset"].is_boolean() && args["reset"].get<bool>();
+            if (!reset) {
+                if (!args.is_object() || !args.contains("seconds") || !args["seconds"].is_number()) {
+                    std::string err = "Error: give 'seconds' (0 for instant) or set 'reset' to true.";
+                    link.send_result(call_id, err);
+                    return err;
+                }
+                double seconds = args["seconds"].get<double>();
+                new_ms = static_cast<int>(std::lround(std::clamp(seconds, 0.0, 600.0) * 1000.0));
+            }
+            hue_settings.default_transition_ms = new_ms;
+            hue.set_default_transition_ms(new_ms);
+            save_hue_settings(hue_settings_path_for(current_profile_name), hue_settings);
+            std::string text = new_ms < 0 ? "Default fade cleared: lights now use the bridge's own quick default (about 0.4 seconds)."
+                             : new_ms == 0 ? "Default fade set to instant. It is saved."
+                             : "Default fade set to " + format_seconds(new_ms / 1000.0) + " seconds. It is saved and applies to every light change and scene load that doesn't give its own fade time.";
+            link.send_result(call_id, text);
+            return "Call answered: set_hue_default_fade";
+        }
 
-            if (args.contains("on")) body["on"] = args.at("on").get<bool>();
-            else if (!args.contains("alert") && !args.contains("flash_count")) body["on"] = true;
+        if (name == "set_hue_light") {
+            std::string target = light_list_arg(args, "light_id");
+            std::string except_list = light_list_arg(args, "except");
+            json body;
+            std::vector<std::string> applied;   // echoed back so the model reports what really happened
+
+            // Numbers from the model are not always the type the schema asked
+            // for (a 20.0 where an integer was wanted, a string). Read them
+            // without throwing.
+            auto read_number = [&](const char* key, double& out) {
+                if (!args.is_object() || !args.contains(key) || !args[key].is_number()) return false;
+                out = args[key].get<double>();
+                return true;
+            };
+
+            double brightness_in = 0, change_in = 0, kelvin_in = 0, transition_in = 0, flash_in = 0;
+            bool has_brightness = read_number("brightness", brightness_in);
+            bool has_change = !has_brightness && read_number("brightness_change", change_in);
+            bool has_kelvin = read_number("kelvin", kelvin_in);
+            bool has_transition = read_number("transition_ms", transition_in);
+            bool has_flash = read_number("flash_count", flash_in);
+            bool has_hex = args.contains("hex") && args["hex"].is_string() && !args["hex"].get<std::string>().empty();
+            bool has_preset = args.contains("preset") && args["preset"].is_string();
+            std::string white_name = args.contains("white") && args["white"].is_string() ? args["white"].get<std::string>() : "";
+            bool has_alert_arg = args.contains("alert") && args["alert"].is_string() && args["alert"].get<std::string>() != "none";
+
+            bool explicit_on = args.contains("on") && args["on"].is_boolean();
+            if (explicit_on) {
+                body["on"] = args["on"].get<bool>();
+                applied.push_back(args["on"].get<bool>() ? "on" : "off");
+            } else if (!has_alert_arg && !has_flash) {
+                // A bare relative change ("a bit dimmer") must not switch an
+                // off light on; anything else that sets a look turns it on, as before.
+                bool bare_relative = has_change && !has_hex && !has_preset && white_name.empty() && !has_kelvin;
+                if (!bare_relative) { body["on"] = true; applied.push_back("on"); }
+            }
 
             // Model sends 0-100 - see make_register_message()'s "brightness"
             // description and brightness_percent_to_bri()'s own comment.
-            if (args.contains("brightness")) body["bri"] = brightness_percent_to_bri(args.at("brightness").get<int>());
+            if (has_brightness) {
+                int pct = static_cast<int>(std::lround(brightness_in));
+                body["bri"] = brightness_percent_to_bri(pct);
+                applied.push_back("brightness " + std::to_string(std::clamp(pct, 0, 100)) + "%");
+            } else if (has_change) {
+                int pts = std::clamp(static_cast<int>(std::lround(change_in)), -100, 100);
+                body["bri_inc"] = std::clamp(static_cast<int>(std::lround(pts / 100.0 * 254.0)), -254, 254);
+                applied.push_back(std::string("brightness ") + (pts >= 0 ? "+" : "") + std::to_string(pts) + " points");
+            }
 
-            std::string alert_mode = args.value("alert", "none");
-            bool has_flash = args.contains("flash_count");
+            std::string alert_mode = args.contains("alert") && args["alert"].is_string() ? args["alert"].get<std::string>() : "none";
             int flash_count = 0;
             if (has_flash) {
-                flash_count = args.at("flash_count").get<int>();
+                flash_count = static_cast<int>(std::lround(flash_in));
                 alert_mode = (flash_count > 1) ? "lselect" : "select";
             }
-            if (alert_mode != "none") body["alert"] = alert_mode;
+            if (alert_mode != "none") { body["alert"] = alert_mode; applied.push_back("alert " + alert_mode); }
 
-            if (args.contains("transition_ms")) body["transitiontime"] = args.at("transition_ms").get<int>() / 100;
-
+            // Color: hex wins over a named preset, which wins over a white.
             bool color_set = false;
-            if (args.contains("hex")) {
-                std::string hex = args.value("hex", "");
-                if (!hex.empty()) {
-                    if (hex[0] == '#') hex.erase(0, 1);
-                    unsigned int r, g, b;
-                    if (std::sscanf(hex.c_str(), "%02x%02x%02x", &r, &g, &b) == 3) {
-                        auto [x, y] = HUE_LIGHT_CLASS::rgb_to_xy(static_cast<int>(r), static_cast<int>(g), static_cast<int>(b));
-                        body["xy"] = {x, y};
-                        color_set = true;
+            if (has_hex) {
+                std::string hex = args["hex"].get<std::string>();
+                if (hex[0] == '#') hex.erase(0, 1);
+                unsigned int r, g, b;
+                if (std::sscanf(hex.c_str(), "%02x%02x%02x", &r, &g, &b) == 3) {
+                    auto [x, y] = HUE_LIGHT_CLASS::rgb_to_xy(static_cast<int>(r), static_cast<int>(g), static_cast<int>(b));
+                    body["xy"] = {x, y};
+                    color_set = true;
+                    applied.push_back("color #" + hex);
+                }
+            }
+            if (!color_set && has_preset) {
+                auto it = color_palette().find(args["preset"].get<std::string>());
+                if (it != color_palette().end()) { body["xy"] = it->second; color_set = true; applied.push_back("color " + it->first); }
+            }
+            if (!color_set && (!white_name.empty() || has_kelvin)) {
+                int kelvin = 0;
+                auto wp = white_presets().find(white_name);
+                if (wp != white_presets().end()) kelvin = wp->second;
+                else if (has_kelvin) kelvin = static_cast<int>(std::lround(kelvin_in));
+                if (kelvin > 0) {
+                    body["ct"] = kelvin_to_mired(kelvin);
+                    applied.push_back("white " + describe_kelvin(mired_to_kelvin(body["ct"].get<int>())));
+                }
+            }
+
+            // Fade: this request's own time if it gave one (0 = instant),
+            // otherwise the saved default - but only for changes that have a
+            // look to fade to, not a bare alert/flash.
+            bool changes_look = body.contains("on") || body.contains("bri") || body.contains("bri_inc") || body.contains("xy") || body.contains("ct");
+            if (has_transition) {
+                int tt = std::clamp(static_cast<int>(std::lround(transition_in / 100.0)), 0, 65535);
+                body["transitiontime"] = tt;
+                applied.push_back(tt == 0 ? "instant" : "fade " + format_seconds(tt / 10.0) + " s");
+            } else if (changes_look) {
+                int default_ms = hue.get_default_transition_ms();
+                if (default_ms >= 0) {
+                    int tt = std::clamp(default_ms / 100, 0, 65535);
+                    body["transitiontime"] = tt;
+                    applied.push_back(tt == 0 ? "instant (saved default)" : "fade " + format_seconds(tt / 10.0) + " s (saved default)");
+                }
+            }
+
+            // ---- who gets it
+            // A relative change needs each light's own level (and must skip
+            // lights that are off), so "all" is expanded to individual lights.
+            HUE_LIGHT_CLASS::TARGETS targets = hue.resolve_targets(target, except_list, has_change);
+            if (!targets.error.empty()) {
+                // The cache may simply be stale or empty (bridge was down at startup).
+                hue.refresh_lights();
+                targets = hue.resolve_targets(target, except_list, has_change);
+            }
+            if (!targets.error.empty()) {
+                std::string err = "Error controlling light '" + target + "': " + targets.error;
+                link.send_result(call_id, err);
+                return "Error: set_hue_light (" + target + ")";
+            }
+
+            if (has_change) hue.refresh_lights();  // current on/off before skipping lights that are off
+
+            std::string res;                         // single / whole-group: the bridge's own answer
+            std::vector<std::string> ok_names, skipped_off, failed;
+            std::string last_detail;
+            if (targets.whole_group) {
+                res = hue.set_light("all", body);
+                std::string d;
+                if (response_is_error(res, d)) failed.push_back("all: " + friendly_bridge_error(d));
+                else ok_names.push_back("all lights");
+            } else {
+                bool bridge_down = false;
+                for (auto const& id : targets.ids) {
+                    std::string label = hue.light_name(id);
+                    if (label.empty()) label = id;
+                    if (has_change && !body.contains("on") && !hue.light_is_on(id)) { skipped_off.push_back(label); continue; }
+                    if (bridge_down) { failed.push_back(label + ": not attempted, the bridge is not responding"); continue; }
+                    res = hue.set_light(id, body);
+                    std::string d;
+                    if (response_is_error(res, d)) {
+                        failed.push_back(label + ": " + friendly_bridge_error(d));
+                        // A connection failure or timeout (make_request()'s own "CURL failed")
+                        // means the bridge itself isn't answering. Trying every remaining light
+                        // would take up to 16 s each and could outlast olli's dead-link timeout
+                        // for this tool, so stop after the first.
+                        if (d.rfind("CURL failed", 0) == 0) bridge_down = true;
+                    } else {
+                        ok_names.push_back(label);
                     }
                 }
             }
 
-            if (!color_set && args.contains("preset")) {
-                static const std::map<std::string, std::vector<double>> palette = {
-                    {"red", {0.675, 0.322}}, {"green", {0.409, 0.518}}, {"blue", {0.167, 0.04}},
-                    {"yellow", {0.432, 0.500}}, {"cyan", {0.157, 0.357}}, {"magenta", {0.41, 0.17}},
-                    {"orange", {0.55, 0.41}}, {"purple", {0.27, 0.13}}, {"pink", {0.41, 0.21}},
-                    {"white", {0.31, 0.32}}
-                };
-                auto it = palette.find(args.value("preset", ""));
-                if (it != palette.end()) body["xy"] = it->second;
-            }
+            std::string applied_text;
+            for (size_t k = 0; k < applied.size(); ++k) applied_text += (k ? ", " : "") + applied[k];
 
-            std::string res = hue.set_light(target, body);
-
-            std::string err_detail;
-            if (response_is_error(res, err_detail)) {
-                std::string err = "Error controlling light '" + target + "': " + err_detail;
+            if (ok_names.empty() && skipped_off.empty()) {
+                std::string detail = failed.empty() ? "nothing was sent" : failed.front();
+                std::string err = "Error controlling light '" + target + "': " + detail;
                 link.send_result(call_id, err, failure_instruction);
                 return "Error: set_hue_light (" + target + ")";
             }
@@ -826,51 +1483,58 @@ namespace {
             // LIGHT_REFRESH_INTERVAL_SECONDS later.
             hue.refresh_lights();
 
-            if (has_flash && flash_count > 1) {
-                std::string resolved_id = hue.resolve_id(target);
-                if (!resolved_id.empty() && resolved_id != "all") {
-                    // Detached, fire-and-forget - matches the original
-                    // TOOL_HUE::handle_tool()'s flash-cancel thread exactly.
-                    // References the anonymous-namespace-scope `hue` above
-                    // directly (static storage duration for the process's
-                    // whole lifetime, same assumption the original made
-                    // about its own TOOL_HUE-owned `hue` member).
-                    std::thread([resolved_id, flash_count]() {
-                        std::this_thread::sleep_for(std::chrono::seconds(flash_count));
-                        hue.set_light(resolved_id, {{"alert", "none"}});
-                    }).detach();
-                }
+            if (has_flash && flash_count > 1 && !targets.whole_group && targets.ids.size() == 1) {
+                std::string resolved_id = targets.ids.front();
+                // Detached, fire-and-forget - matches the original
+                // TOOL_HUE::handle_tool()'s flash-cancel thread exactly.
+                // References the anonymous-namespace-scope `hue` above
+                // directly (static storage duration for the process's
+                // whole lifetime, same assumption the original made
+                // about its own TOOL_HUE-owned `hue` member).
+                std::thread([resolved_id, flash_count]() {
+                    std::this_thread::sleep_for(std::chrono::seconds(flash_count));
+                    hue.set_light(resolved_id, {{"alert", "none"}});
+                }).detach();
             }
 
-            // The bridge's own success response reports "bri" back on its
-            // native 0-254 scale, not the 0-100 percentage the model sent -
-            // same mismatch bri_to_brightness_percent() already corrects for
-            // list_hue_lights' own display. Left as-is here, a model told
-            // (via DIRECTOR_NOTE) to report this "without changing the
-            // facts/values" would read a requested 30% back as "76%" - seen
-            // live. Rewrite every "/bri" leaf in place before it's handed
-            // back, same conversion, same rounding.
-            try {
-                json res_json = json::parse(res);
-                if (res_json.is_array()) {
-                    for (auto& entry : res_json) {
-                        if (!entry.is_object() || !entry.contains("success")) continue;
-                        json& success = entry["success"];
-                        if (!success.is_object()) continue;
-                        for (auto& [path, value] : success.items()) {
-                            if (path.size() >= 4 && path.compare(path.size() - 4, 4, "/bri") == 0 && value.is_number()) {
-                                value = bri_to_brightness_percent(value.get<int>());
+            std::string summary;
+            bool single_or_group = targets.whole_group || (targets.ids.size() == 1 && failed.empty() && skipped_off.empty());
+            if (single_or_group) {
+                // The bridge's own success response reports "bri" back on its
+                // native 0-254 scale, not the 0-100 percentage the model sent -
+                // same mismatch bri_to_brightness_percent() already corrects for
+                // list_hue_lights' own display. Left as-is here, a model told
+                // (via DIRECTOR_NOTE) to report this "without changing the
+                // facts/values" would read a requested 30% back as "76%" - seen
+                // live. Rewrite every "/bri" leaf in place before it's handed
+                // back, same conversion, same rounding.
+                try {
+                    json res_json = json::parse(res);
+                    if (res_json.is_array()) {
+                        for (auto& entry : res_json) {
+                            if (!entry.is_object() || !entry.contains("success")) continue;
+                            json& success = entry["success"];
+                            if (!success.is_object()) continue;
+                            for (auto& [path, value] : success.items()) {
+                                if (path.size() >= 4 && path.compare(path.size() - 4, 4, "/bri") == 0 && value.is_number()) {
+                                    value = bri_to_brightness_percent(value.get<int>());
+                                }
                             }
                         }
+                        res = res_json.dump();
                     }
-                    res = res_json.dump();
+                } catch (...) {
+                    // Malformed/unexpected shape - fall back to the raw
+                    // response rather than losing the result entirely.
                 }
-            } catch (...) {
-                // Malformed/unexpected shape - fall back to the raw
-                // response rather than losing the result entirely.
+                summary = "Light command for " + target + " processed. Result: " + res;
+            } else {
+                auto join = [](const std::vector<std::string>& v) { std::string o; for (size_t k = 0; k < v.size(); ++k) o += (k ? ", " : "") + v[k]; return o; };
+                summary = "Light command processed for: " + (ok_names.empty() ? std::string("(none)") : join(ok_names)) + ".";
+                if (!skipped_off.empty()) summary += " Not changed because they are off: " + join(skipped_off) + ".";
+                if (!failed.empty()) summary += " FAILED: " + join(failed) + ".";
             }
-
-            std::string summary = "Light command for " + target + " processed. Result: " + res;
+            if (!applied_text.empty()) summary += " Applied: " + applied_text + ".";
             link.send_result(call_id, summary);
             return "Call answered: set_hue_light (" + target + ")";
         }
@@ -917,6 +1581,27 @@ namespace {
             static_cast<int>(std::lround(g / max_channel * 255.0)),
             static_cast<int>(std::lround(b / max_channel * 255.0))
         };
+    }
+
+    // What a light that is ON is showing, in words: a warm/cool white with its
+    // temperature, or a color with its nearest name and hex. A light with no
+    // color support says so (it can only be dimmed).
+    std::string describe_light_color(const LightState& s)
+    {
+        if (s.colormode == "ct" && s.ct > 0) return describe_kelvin(mired_to_kelvin(s.ct));
+        if ((s.colormode == "xy" || s.colormode == "hs") && s.xy.size() == 2) {
+            RGB c = xy_to_rgb(s.xy[0], s.xy[1]);
+            char hex[16];
+            std::snprintf(hex, sizeof(hex), "#%02x%02x%02x", c.r, c.g, c.b);
+            std::string nearest;
+            double best = 1e9;
+            for (auto const& [pname, pxy] : color_palette()) {
+                double d = std::hypot(s.xy[0] - pxy[0], s.xy[1] - pxy[1]);
+                if (d < best) { best = d; nearest = pname; }
+            }
+            return best <= 0.06 ? "color ~" + nearest + " (" + hex + ")" : std::string("color ") + hex;
+        }
+        return "no color control";
     }
 
     // [##########] style, 10 cells, filled left-to-right by percent
@@ -1184,7 +1869,17 @@ int main(int argc, char* argv[])
                 json msg;
                 while (l->next_message(msg)) {
                     std::string type = msg.value("type", "");
-                    if (type == "call") tool_status = handle_call(*l, msg);
+                    if (type == "call") {
+                        // A malformed call (a wrongly typed argument) must never take the whole
+                        // tool down: answer it with an error instead.
+                        try {
+                            tool_status = handle_call(*l, msg);
+                        } catch (const std::exception& e) {
+                            std::string call_id = msg.contains("call_id") && msg["call_id"].is_string() ? msg["call_id"].get<std::string>() : "";
+                            l->send_error(call_id, std::string("Could not understand that request: ") + e.what());
+                            tool_status = "Error: bad request";
+                        }
+                    }
                     else if (type == "identity") handle_identity(msg);
                 }
             }

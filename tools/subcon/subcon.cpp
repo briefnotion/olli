@@ -333,14 +333,15 @@ namespace {
             {"tools", json::array({
                 {
                     {"name", "get_subcon_notes"},
-                    {"description", "The ONLY way to know what is on your mind: you cannot know without calling this tool, and you "
-                                     "must not guess. Call it whenever the user asks if you have anything on your mind, anything "
-                                     "else, whether anything came up, what you have been thinking about, or if you have any "
-                                     "thoughts - every single time, even right after you already answered, because your background "
-                                     "subconscious keeps working and a new note can appear at any moment. Also call it when the "
-                                     "user returns or greets you after being away. It answers instantly with whatever it has "
-                                     "noticed (weather, something left unresolved, an upcoming appointment, lights left on, a "
-                                     "forgotten timer)."},
+                    {"description", "Your background notes: things your subconscious noticed while the user was busy (weather, something left "
+                                     "unresolved in past conversations, an upcoming appointment, lights left on, a forgotten timer). This is the ONLY way "
+                                     "to know what they are, so you cannot know without calling this tool, and you must not guess. Call it whenever the "
+                                     "user asks for an update in general terms - \"any updates?\", \"give me an update\", \"update me\", \"got any updates "
+                                     "for me?\", \"what's new?\", \"catch me up\", \"anything I should know?\", \"any news?\", \"anything else?\", or a "
+                                     "general \"status update\" - every single time, even right after you already answered, because a new note can appear "
+                                     "at any moment. Also call it when the user returns or greets you after being away. Do NOT use it when the user asks "
+                                     "about the status of one specific thing (the lights, a timer, the time, who is home): use that thing's own tool. "
+                                     "It answers instantly."},
                     {"parameters", {{"type", "object"}, {"properties", json::object()}, {"required", json::array()}}}
                 }
             })}

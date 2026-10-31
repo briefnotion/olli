@@ -4457,4 +4457,27 @@ it can actually act under its persona's judgment, not just talk about it.
   one-word JSON answer land in that instance's history).
 - Also seen while looking: second guess's stage-5 correction sometimes answers with the raw
   `{"needs_correction":false}` JSON, which streams to the screen/TTS and is committed to the main
-  history as a real reply (8 lines in ron's chat logs 30-31 Oct, and one in `history.json`). Not fixed.
+  history as a real reply (8 lines in ron's chat logs 30-31 Oct, and one in `history.json`). Fixed
+  the same day - see the next entry.
+
+### Second guess: stop the correction step answering with a copy of the JSON verdict (2026-10-31, built + tested, committed with the entry below it)
+
+- Cause: stage 5 (the "Go ahead - correct what was wrong..." call) runs in the same private conversation
+  as stage 4's structured `{"needs_correction":true}` reply. The model sometimes imitates that shape and
+  answers the correction prompt with `{"needs_correction":false}`. Stage 5 streams live, so it reached the
+  screen and TTS, and stage 6 then committed it to the main history as a real reply. Chaining off that
+  committed message is also a likely part of why a review sometimes ran many passes in a row.
+- Reproduced straight against Ollama (qwen3:8b, think on, all 18 tool defs, repeat_penalty 1.3, the exact
+  stage-5 conversation): the raw JSON came back 2 of 60 times with the JSON turn in the conversation and
+  0 of 60 with it replaced by a plain sentence. Small numbers - the effect is suggestive, not proven. In the
+  dog scenario (40 calls each) the reply used a tool 33/40 as before and 29/40 with the fix; that gap is
+  within noise but worth watching.
+- Fix: `SIDETRACK_CLASS::run_second_guess()`, stage 4's "not done" branch, just before the stage-5 call:
+  the last assistant message in `SIDETRACK_CHAT_INSTANCE.history` (the JSON verdict) is rewritten to
+  "Review result: this reply needs correction." That history is second guess's private copy, so the main
+  chat history and the DONE-check call itself are untouched. No lock needed (the instance is not
+  processing at that point).
+- Live check on the claude profile: a request the model could not fully honor made stage 4 answer true,
+  stage 5 replied in plain text, it was committed, and `history.json` has no `needs_correction` text. One
+  live pass cannot show the rate dropped (the leak is only a few percent) - check ron's chat logs after a
+  few days of use for lines that are exactly `{"needs_correction":...}`.

@@ -410,6 +410,26 @@ void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ollama_system
             // only to answer in sentences, the model narrates "let me fix
             // that" instead of acting. Naming the action path next to the
             // text path keeps both.
+            //
+            // The wording alone doesn't stop it: the model still sometimes
+            // answers this prompt with a copy of the JSON verdict above -
+            // {"needs_correction":false} streamed to the screen/TTS and
+            // committed to the main history as a real reply (8 lines in ron's
+            // chat logs 30-31 Oct; reproduced straight against Ollama, 2 of 60
+            // with the JSON turn in the conversation, 0 of 60 without it). So
+            // the thing it imitates is replaced here, in this instance's own
+            // private history only, with a plain sentence saying the same.
+            // The instance isn't processing (poll_second_guess_call() joined
+            // its thread), so no lock is needed, same as stage 2's pushes.
+            if (!SIDETRACK_CHAT_INSTANCE.history.empty())
+            {
+                Message& verdict = SIDETRACK_CHAT_INSTANCE.history.back();
+                if (verdict.role == "assistant" && verdict.tool_calls.empty())
+                {
+                    verdict.content = "Review result: this reply needs correction.";
+                }
+            }
+
             comms.INPUT_FROM_USER.set("Go ahead - correct what was wrong, or actually follow through on "
                                      "what you already claimed. Nothing beyond that. If it needs an "
                                      "action, use your tools; otherwise reply in plain text.");

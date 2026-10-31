@@ -1042,6 +1042,11 @@ void IO_WORKER_CLASS::thread_main()
         web_server.reset();
     }
 
+    // A spoken line waiting for its interrupt to be handed to the main
+    // thread first - see step 6's own comment for why.
+    std::string held_voice_line;
+    bool voice_line_held = false;
+
     RUN = true;
     while (RUN)
     {
@@ -1146,6 +1151,33 @@ void IO_WORKER_CLASS::thread_main()
             // VOCA_EVENT, io_worker.h) is neither a transcript nor an
             // interrupt - just log it straight to comms_buffer and skip the
             // rest of this block for that event.
+            //
+            // A transcript's interrupt and its submission can't go out in
+            // the same tick: ollama_system::input() (olla.cpp) clears
+            // comms.INTERRUPTED while accepting the line, before
+            // sidetrack.check() runs, so second-guess never sees it.
+            // Typing doesn't have this problem - the first keystroke sets
+            // INTERRUPTED seconds before Enter. So the interrupt goes out
+            // first, and the line is held until exchange() has handed it
+            // over (it clears comms_buffer.INTERRUPTED when it does). The
+            // echo to the screen below still happens right away.
+            if (voice_line_held && !comms_buffer.INTERRUPTED)
+            {
+                if (comms_buffer.ENTER_PRESSED)
+                {
+                    // Same append-if-pending handling as below.
+                    comms_buffer.INPUT_FROM_USER.add_to("\n" + held_voice_line);
+                }
+                else
+                {
+                    comms_stt_tts.INPUT_FROM_USER.set(held_voice_line);
+                    comms_stt_tts.ENTER_PRESSED = true;
+                    comms_buffer = comms_stt_tts;
+                }
+                held_voice_line.clear();
+                voice_line_held = false;
+            }
+
             VOCA_EVENT voca_event;
             if (popVocaEvent(voca_event))
             {
@@ -1167,21 +1199,14 @@ void IO_WORKER_CLASS::thread_main()
                         output.user_input += voca_event.text;
                         if (web_server) web_server->push_user_message(voca_event.text, comms_buffer.INPUT_FROM_USER_COLOR);
 
-                        if (comms_buffer.ENTER_PRESSED)
-                        {
-                            // exchange() hasn't picked up a still-pending
-                            // submission yet (from this channel, or from
-                            // keyboard's own step below, later this same
-                            // tick) - append rather than drop or overwrite
-                            // it, so nothing said/typed gets lost; both go
-                            // out together on the next exchange() cycle.
-                            comms_buffer.INPUT_FROM_USER.add_to("\n" + voca_event.text);
-                        }
+                        // Held, not submitted yet - the key_input.INTERRUPTED
+                        // below goes out first. Two lines in a row just
+                        // join, same as a pending submission would.
+                        if (voice_line_held) held_voice_line += "\n" + voca_event.text;
                         else
                         {
-                            comms_stt_tts.INPUT_FROM_USER.set(voca_event.text);
-                            comms_stt_tts.ENTER_PRESSED = true;
-                            comms_buffer = comms_stt_tts;
+                            held_voice_line = voca_event.text;
+                            voice_line_held = true;
                         }
                     }
                     key_input.INTERRUPTED = true;

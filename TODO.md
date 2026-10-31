@@ -4381,3 +4381,27 @@ it can actually act under its persona's judgment, not just talk about it.
 - Test-rig note: tools also connect to subcon (47603) and take the profile name it
   announces, so a scratch test hue tool running while the user's subcon is up switches to
   profile "ron". The rig now names its scratch profile "ron" for that reason.
+
+### Voice: a spoken line now interrupts second-guess the way typing does (2026-10-31, built, NOT committed, NOT tested by ear, NOT installed)
+
+- Symptom (reported by the user): speaking while the second-guess "thinking" bubble was up
+  showed the line on screen at once but did not stop the review; olli answered only after
+  the review ended. ron's debug log showed the same thing three times in a row (23:13-23:16,
+  each review ran to its end after the user spoke, then went on to a "go ahead" step and
+  committed a follow-up to the history after the user had already moved on).
+- Cause: typing interrupts on the first keystroke, seconds before Enter. A spoken line is
+  one finished event, so its interrupt and its submission left in the same tick, and
+  `ollama_system::input()` (olla.cpp) clears `comms.INTERRUPTED` while accepting the line -
+  before `sidetrack.check()` runs - so second-guess never saw it.
+- Fix, `IO_WORKER_CLASS::thread_main()` step 6 only: a transcript with text sets the
+  interrupt right away but the line is held (`held_voice_line`/`voice_line_held`, locals above
+  the loop) until `comms_buffer.INTERRUPTED` is false again, which means `exchange()` has
+  handed the interrupt to the main thread. The main loop runs `exchange()` before
+  `chat.input()` and `sidetrack.check()`, so the interrupt arrives a tick before the line.
+  The on-screen echo is unchanged (still immediate). Costs a few ms per spoken line.
+  "stop talking" (an empty event) and noise are untouched - only a transcript with real
+  text is held, so nothing fires on noise.
+- Not done: the web page has the same gap (line + interrupt in one tick) - left alone on
+  purpose. Needs a live check: speak mid-review, the log should show "interrupted
+  mid-response - stopping" and the line should be answered at once; also speak mid-reply
+  (should still cut it off) and quit with a line held (should exit cleanly).

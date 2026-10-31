@@ -1181,11 +1181,19 @@ void IO_WORKER_CLASS::thread_main()
             VOCA_EVENT voca_event;
             if (popVocaEvent(voca_event))
             {
+                // ollama_system::jump_input() (olla.cpp) exits the program on
+                // these exact lines, typed or spoken. Exiting by voice isn't
+                // wanted, so a spoken one is dropped here, before it echoes,
+                // interrupts or reaches the chat - same exact-match test as
+                // jump_input() itself, so nothing else is affected.
+                std::string spoken = trim(voca_event.text);
+                bool spoken_exit_phrase = (spoken == "bye" || spoken == "quit" || spoken == "Goodbye.");
+
                 if (!voca_event.status_message.empty())
                 {
                     comms_buffer.INPUT_FROM_SYSTEM.add_to(voca_event.status_message);
                 }
-                else
+                else if (!spoken_exit_phrase)
                 {
                     if (!voca_event.text.empty())
                     {

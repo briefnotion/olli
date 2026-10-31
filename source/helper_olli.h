@@ -153,8 +153,8 @@ class Settings {
 // anymore. Moved 2026-09-26: name/full_name/about are static (set once in
 // main.cpp, never touched again), but presence genuinely changes mid-session
 // and needs to be visible cross-thread the same way COMMS::busy_count()
-// already is (subcon_worker's own exchange() copies it out, same as the
-// busy level) - COMMS is where that kind of live state belongs, not a
+// already is (the since-removed in-olli subcon's exchange() copied it out,
+// same as the busy level) - COMMS is where that kind of live state belongs, not a
 // write-once settings-adjacent object like CLASS_SYSTEM. Reachable
 // everywhere COMMS already is, since a tool that wants a name to show/act
 // on will want it the same way it'd want anything else there.

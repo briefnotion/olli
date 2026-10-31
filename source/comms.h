@@ -216,8 +216,8 @@ class COMMS
         // is where cross-thread-visible live state already lives (see
         // busy_count() below) - USER_IDENTITY::presence needs exactly that,
         // unlike name/full_name/about which are set once and never change.
-        // Keeping exchange()'s signature the same (SUBCON_WORKER_CLASS::
-        // exchange(COMMS&), subcon_worker.h) was part of the point - one
+        // Keeping exchange()'s signature the same (the since-removed
+        // SUBCON_WORKER_CLASS::exchange(COMMS&)) was part of the point - one
         // more field on the object already being handed across, not a new
         // parameter.
         // --------------------------------------------------------------
@@ -372,8 +372,8 @@ class COMMS
             return *this;
         }
 
-        // "How busy is the system" signal, first piece of subcon_worker's
-        // real design (IDEAS.md/TODO.md) - superseded the old single flat
+        // "How busy is the system" signal, first piece of the (since-removed)
+        // in-olli subcon's design (IDEAS.md/TODO.md) - superseded the old single flat
         // int busy + free-function (comms_busy_inc/_dec/comms_busy) design.
         // Just sums/drains each of the 4 text fields' own COMMS_STRING
         // counters - deliberately not tracking ENTER_PRESSED/INTERRUPTED/

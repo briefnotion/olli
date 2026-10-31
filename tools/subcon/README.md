@@ -7,7 +7,8 @@ worth telling you, and keeps those findings in a queue. Olli **pulls** them
 when it asks: the model calls the `get_subcon_notes` tool, and subcon answers
 instantly with one digest of whatever is waiting.
 
-It used to be a thread inside olli (`source/subcon_worker.cpp`). The design
+It used to be a thread inside olli (`source/subcon_worker.cpp`, removed 2026-10-31 -
+still in git history, last present at commit `481e697`). The design
 and rules - the five tasks, the run caps, the finding gate - are unchanged and
 described in [`SUBCON.md`](../../SUBCON.md); this document covers what is new:
 it is now its own program, and it is both a **remote tool of olli** and a
@@ -84,11 +85,9 @@ Think cycle **on** and force **off** are the defaults.
 Everything lives under `<profile folder>/subcon/` - for `ron`,
 `~/olli_files_ron/subcon/`, **the same folder and the same formats the in-olli
 subcon used**, so an existing profile's history and run caps carry over
-unchanged. (Which also means the old in-olli subcon and this tool must not both
-be running against one profile - they would both write these files. The old one
-lives inside olli and does not take the `subcon.lock` described above, so it
-**must be retired first**: stop olli's own subcon from running before this tool
-is started on that profile.)
+unchanged. (The old in-olli subcon wrote these same files, which is why the two
+could never run against one profile. It has since been removed from olli, so
+only this tool writes them.)
 
 | File | Contents |
 |---|---|
@@ -188,8 +187,8 @@ names; nothing needed adding.
 | `fetch_website_content` could fetch any address | refuses loopback, private-LAN, link-local, CGNAT, multicast and reserved addresses, checked on the address curl actually connects to, so hostnames and redirects are covered too (added 2026-10-30). Not covered: an `http(s)_proxy` environment variable |
 
 The task list, caps, minimum gaps, 24-hour-or-since-arrival window, finding
-gate and prompts are ported unchanged (`subcon_tasks.h` is a copy of
-`source/subcon_tasks.h`, still header-only and unit-testable; the delivery gate,
+gate and prompts are ported unchanged (`subcon_tasks.h` was copied from
+`source/subcon_tasks.h`, since removed; it is still header-only and unit-testable; the delivery gate,
 quiet hours and hold rules were removed from the copy because nothing uses them).
 To add, reword or retire a task, edit `subcon_task_defs()` and rebuild; on the
 next start saved state is merged by `key` and retired tasks go to

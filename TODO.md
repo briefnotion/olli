@@ -4382,7 +4382,7 @@ it can actually act under its persona's judgment, not just talk about it.
   announces, so a scratch test hue tool running while the user's subcon is up switches to
   profile "ron". The rig now names its scratch profile "ron" for that reason.
 
-### Voice: a spoken line now interrupts second-guess the way typing does (2026-10-31, built, NOT committed, NOT tested by ear, NOT installed)
+### Voice: a spoken line now interrupts second-guess the way typing does (2026-10-31, tested live by the user - "ran great"; committed 481e697)
 
 - Symptom (reported by the user): speaking while the second-guess "thinking" bubble was up
   showed the line on screen at once but did not stop the review; olli answered only after
@@ -4401,7 +4401,29 @@ it can actually act under its persona's judgment, not just talk about it.
   The on-screen echo is unchanged (still immediate). Costs a few ms per spoken line.
   "stop talking" (an empty event) and noise are untouched - only a transcript with real
   text is held, so nothing fires on noise.
-- Not done: the web page has the same gap (line + interrupt in one tick) - left alone on
-  purpose. Needs a live check: speak mid-review, the log should show "interrupted
-  mid-response - stopping" and the line should be answered at once; also speak mid-reply
-  (should still cut it off) and quit with a line held (should exit cleanly).
+- Web: first thought to have the same gap - checked later the same day, it does not (see the
+  next entry). The user's live test (speak mid-review) ran well; "bye" by voice was tried
+  but is not wanted anyway (see the next entry).
+
+### Spoken "bye" ignored; in-olli subcon code removed; web interrupt checked (2026-10-31, built + quick live test by the user - voice "bye"/"goodbye" did nothing; NOT committed)
+
+- Spoken exit phrases: `IO_WORKER_CLASS::thread_main()` step 6 now drops a transcript that is exactly
+  "bye", "quit" or "Goodbye." (the same exact-match test `ollama_system::jump_input()` uses to exit),
+  before it echoes, interrupts or reaches the chat. Typing them still exits. whisper normally
+  writes "Bye." with a period, which never matched and still doesn't: it is an ordinary chat line.
+  A dropped line leaves no trace on screen. The user tried both by voice: nothing happened.
+- Removed `source/subcon_worker.h`, `source/subcon_worker.cpp`, `source/subcon_tasks.h`, the four
+  `#if 0` blocks in `main.cpp`, the one in `main.h`, and the line in `source/CMakeLists.txt`.
+  `tools/subcon/` has its own copy of `subcon_tasks.h` and does not use any of them. Still in git
+  history, last present at commit 481e697. Docs updated (README.md, SUBCON.md, tools/subcon/README.md).
+  Builds clean; the user then ran it briefly and it seemed fine.
+- Cleanup afterward: the comments that pointed at the removed subcon (`olla.h`, `olla.cpp`,
+  `comms.h`, `helper_olli.h`) now say it is gone. The `drains_events` flag in `olla.h` was only
+  ever set to false by that subcon, so it is always true now; it is KEPT (as an opt-out for any
+  future instance that shares tool_worker but shouldn't drain events) rather than removed,
+  because removing it means re-indenting the live PART 5 event loop for no change in behavior.
+  `COMMS::busy_count()` is still maintained but nothing reads it any more.
+- Web interrupt: checked and no change needed. The web page already sends an interrupt ping the
+  moment you start typing in its box (`/interrupt`, web_server.cpp ~270), the same as a keystroke
+  on the keyboard, so a web submission does not have the voice gap. (The note in the 2026-10-31
+  voice entry above saying web had the same gap was a guess made before checking, and was wrong.)

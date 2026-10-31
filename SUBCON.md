@@ -6,8 +6,9 @@
 > gate below describe both versions. Everything about **delivery** (the
 > presence/idle/quiet-hours gate, the model's "deliver now or wait" call,
 > announcements) describes the old in-olli thread, which was retired on
-> 2026-10-30 (kept under `#if 0` in `source/subcon_worker.*` and `main.cpp`, not
-> compiled); the tool has no delivery gate (a "busy" signal is a later
+> 2026-10-30 and removed from the source on 2026-10-31 (`source/subcon_worker.*`,
+> `source/subcon_tasks.h`; still in git history, last present at commit
+> `481e697`); the tool has no delivery gate (a "busy" signal is a later
 > idea). The "Switches and knobs" table is also the old thread's. The tool's
 > own options are in its README.
 
@@ -18,9 +19,10 @@ found is actually worth telling you, and hands the worthwhile bits to the real
 chat at a sensible moment. It never takes part in your conversation, and your
 conversation never sees its working.
 
-Code: `source/subcon_worker.cpp` / `.h` (the thread and its state machine) and
-`source/subcon_tasks.h` (the task list and every time-based rule, kept free of
-threads and the clock so it can be unit tested). Design history and the
+Code: [`tools/subcon/`](tools/subcon/README.md) - `subcon_tasks.h` there holds
+the task list and every time-based rule, kept free of threads and the clock so it
+can be unit tested. (The old in-olli thread, `source/subcon_worker.cpp` / `.h`,
+is gone - see the banner above.) Design history and the
 original brainstorm: `IDEAS.md` ("The subconscious").
 
 ## What it does, in order
@@ -52,7 +54,7 @@ small context window.
 
 ## The tasks
 
-Defined in code, `subcon_task_defs()` in `source/subcon_tasks.h`:
+Defined in code, `subcon_task_defs()` in `tools/subcon/subcon_tasks.h`:
 
 | Task | What it checks | Max per period | Min gap |
 |---|---|---|---|
@@ -133,7 +135,7 @@ read-only list (`is_read_only_tool()`); a call outside it is logged with
 `[SAFETY]` and that cycle's finding is thrown away. This is detection, not
 prevention - blocking would have to live in the shared tool dispatch.
 
-## Switches and knobs (all in `subcon_worker.cpp` / `subcon_tasks.h`)
+## Switches and knobs (the old in-olli thread's; the tool's own are in its README)
 
 | Name | Default | Meaning |
 |---|---|---|

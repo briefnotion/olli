@@ -436,9 +436,8 @@ digest. Nothing is pushed to you. See [SUBCON.md](SUBCON.md) for the tasks,
 limits and files it keeps in `<profile>/subcon/`, and
 [tools/subcon/README.md](tools/subcon/README.md) for how it runs and connects.
 
-(Subcon used to be a thread inside olli. That code is retired: it is kept in
-`source/subcon_worker.*` and `main.cpp` under `#if 0`, not compiled, so it can be
-brought back if needed. Don't run both against the same profile.)
+(Subcon used to be a thread inside olli. That code was removed on 2026-10-31;
+it is still in git history, last present at commit `481e697`.)
 
 ---
 

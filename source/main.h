@@ -21,9 +21,6 @@
 #include "sidetrack.h"
 #include "io_worker.h"
 #include "tool_worker.h"
-#if 0 // retired 2026-10-30, see subcon_worker.h
-#include "subcon_worker.h"
-#endif
 
 using json = nlohmann::json;
 

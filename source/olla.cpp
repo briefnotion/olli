@@ -1059,7 +1059,7 @@ void ollama_system::process(IO_WORKER_CLASS& io_worker, CLASS_SYSTEM* system, st
         // result-claiming loop just above, which is safe for any instance
         // to share (id-based), this one has no way to tell "mine" from
         // "someone else's" at all, so an instance that shouldn't compete
-        // for ambient events (subcon_worker's own subcon_llm) opts out
+        // for ambient events (the removed in-olli subcon's subcon_llm did) opts out
         // here entirely rather than risk silently absorbing one meant for
         // the real chat.
         if (drains_events)

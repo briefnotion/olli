@@ -6,6 +6,8 @@
 #include "user_io.h"
 #include "tool_worker.h"
 #include <algorithm>
+#include <cmath>
+#include <cstdio>
 
 // One instance of every TOOL_* class - callers populate their own tools_list
 // with this (see process()'s comment in olla.h for why tools_list is a
@@ -274,15 +276,59 @@ static std::string summarize_tool_calls(const std::vector<ToolCall>& calls)
     return ss.str();
 }
 
+// Reads Ollama's "logprobs" array (one {token, logprob, ...} per generated
+// token; a sibling of "message" in a response or stream chunk, not inside it)
+// and appends each entry to 'out' as a plain probability, exp(logprob).
+// Per-entry try/catch, same reasoning as parse_tool_calls() above - one
+// malformed entry must not cost the rest of the array, or the reply itself.
+static void append_token_probs(const json& logprobs, std::vector<TokenProb>& out)
+{
+    if (!logprobs.is_array()) return;
+
+    for (const auto& entry : logprobs) {
+        try {
+            out.push_back({entry.value("token", ""), std::exp(entry.at("logprob").get<double>())});
+        } catch (const std::exception&) {
+            // skipped - a missing or non-numeric logprob is just no data
+        }
+    }
+}
+
+// Boils a list of token probabilities down to the small summary stored on
+// Message (olla.h's Confidence). Empty input stays present == false, which is
+// how "no data" is told apart from "0% sure".
+static Confidence summarize_confidence(const std::vector<TokenProb>& tokens)
+{
+    Confidence c;
+    if (tokens.empty()) return c;
+
+    double sum = 0.0;
+    double lowest = 1.0;
+    for (const TokenProb& t : tokens) {
+        sum += t.probability;
+        if (t.probability < lowest) lowest = t.probability;
+        if (t.probability < 0.5) ++c.below_half;
+    }
+
+    c.present = true;
+    c.tokens = static_cast<int>(tokens.size());
+    c.mean = sum / static_cast<double>(tokens.size());
+    c.lowest = lowest;
+    return c;
+}
+
 void ollama_system::send(TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const std::string& role, const json& response_format) {
     std::string new_user_input = filter_non_printable(comms.INPUT_FROM_USER.peek());
-    
+
     // 1. Set initial states
     status.is_active = true;
     last_received.complete = false; // Reset completion flag
     last_received.response = "";
     last_received.thinking = "";
     last_received.tool_calls.clear();
+    last_received.response_tokens.clear();
+    last_received.thinking_tokens.clear();
+    last_received.confidence = Confidence();
 
     // A real user message (or a background task-runner's next scripted
     // command - also sent with role "user") starts a fresh turn - see
@@ -370,6 +416,11 @@ void ollama_system::send(TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const std
         body["format"] = response_format;
     }
 
+    // Asks Ollama to send back the probability of every token it generates
+    // (top choice only, no runner-ups) - it is computed anyway, this just
+    // stops it being thrown away. See Confidence (olla.h).
+    body["logprobs"] = true;
+
     httplib::Client cli(PROPS.host, PROPS.port);
     cli.set_read_timeout(120);
 
@@ -443,6 +494,20 @@ void ollama_system::send(TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const std
 
                         parse_tool_calls(msg_chunk, last_received.tool_calls);
                     }
+
+                    // "logprobs" is a sibling of "message" in a chunk, not inside
+                    // it, and carries one entry per token - a chunk is one token
+                    // of either thinking or reply text. A chunk with no text of
+                    // either kind (a tool call, say) is skipped, so tool-call
+                    // tokens never count towards a reply's confidence.
+                    if (j_chunk.contains("logprobs") && j_chunk.contains("message")) {
+                        const auto& msg_for_probs = j_chunk["message"];
+                        if (!msg_for_probs.value("content", std::string()).empty()) {
+                            append_token_probs(j_chunk["logprobs"], last_received.response_tokens);
+                        } else if (!msg_for_probs.value("thinking", std::string()).empty()) {
+                            append_token_probs(j_chunk["logprobs"], last_received.thinking_tokens);
+                        }
+                    }
                 } catch (...) {}
                 return true;
             }
@@ -471,6 +536,25 @@ void ollama_system::send(TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const std
 
                     parse_tool_calls(msg_obj, last_received.tool_calls);
                 }
+
+                // The whole reply's tokens arrive as one array here, thinking
+                // first and then the reply (the streaming path above gets
+                // them split per chunk). Tell them apart by walking until the
+                // thinking text's length has been used up.
+                if (j_res.contains("logprobs")) {
+                    std::vector<TokenProb> all_tokens;
+                    append_token_probs(j_res["logprobs"], all_tokens);
+
+                    size_t thinking_left = accumulated_thinking.size();
+                    for (const TokenProb& t : all_tokens) {
+                        if (thinking_left > 0) {
+                            last_received.thinking_tokens.push_back(t);
+                            thinking_left = (t.token.size() >= thinking_left) ? 0 : thinking_left - t.token.size();
+                        } else {
+                            last_received.response_tokens.push_back(t);
+                        }
+                    }
+                }
             } catch (const json::parse_error& e) {
                 last_received.complete = false;
                 std::cerr << "[Error] JSON Parse failed in send: " << e.what() << std::endl;
@@ -484,7 +568,17 @@ void ollama_system::send(TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const std
 
     last_received.response = accumulated_content;
     last_received.thinking = accumulated_thinking;
-    
+
+    // A reply with no text of its own (a pure tool call) has nothing to
+    // summarize - stays present == false rather than scoring tool-call tokens.
+    // Same for a structured-output reply (response_format given): the grammar
+    // forces its opening tokens, which score ~0 whatever the model thought, so
+    // a summary over them would be misleading. response_tokens still holds
+    // every token for anything that wants to look at the answer word itself.
+    if (!accumulated_content.empty() && response_format.empty()) {
+        last_received.confidence = summarize_confidence(last_received.response_tokens);
+    }
+
     // No longer requires tool_calls to be empty - a response that includes
     // both explanatory text AND a tool call used to have that text silently
     // discarded here: it was already live in response_buffer (so the user
@@ -501,9 +595,23 @@ void ollama_system::send(TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const std
         assistant_msg.role = "assistant";
         assistant_msg.content = final_content;
         assistant_msg.tool_calls = last_received.tool_calls;
+        assistant_msg.confidence = last_received.confidence;
         history.push_back(assistant_msg);
 
         DEBUG_LOG_CLASS::instance().log_message(debug_label, "assistant", final_content.empty() ? summarize_tool_calls(last_received.tool_calls) : final_content);
+
+        if (last_received.confidence.present) {
+            const Confidence& c = last_received.confidence;
+            // Which word was the least certain one - makes "lowest" readable.
+            std::string lowest_token;
+            for (const TokenProb& t : last_received.response_tokens) {
+                if (t.probability <= c.lowest) { lowest_token = t.token; break; }
+            }
+            char line[256];
+            std::snprintf(line, sizeof(line), "confidence: mean %.2f, lowest %.4f (\"%s\"), %d of %d tokens under 50%%",
+                          c.mean, c.lowest, lowest_token.c_str(), c.below_half, c.tokens);
+            DEBUG_LOG_CLASS::instance().log_event(debug_label, line);
+        }
     }
 
     // Same trailing blank line the old direct-cout version always printed

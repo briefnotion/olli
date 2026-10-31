@@ -58,6 +58,46 @@ struct ToolCall {
     }
 };
 
+// How sure the model was of its own words, summarized from Ollama's logprobs
+// (send(), olla.cpp). Only filled for an assistant reply's content tokens -
+// not thinking, not tool calls. A probability here is exp(logprob), so 0.65
+// means 65%. It is the model's own certainty about each word it picked, not
+// a measure of whether the statement is true. Declared before Message for the
+// same reason ToolCall is.
+struct Confidence {
+    bool   present    = false; // false = no data (user/system/tool messages, old history, tool-call-only replies, structured-output replies)
+    int    tokens     = 0;     // how many reply tokens this covers
+    double mean       = 0.0;   // average probability, 0.0-1.0
+    double lowest     = 0.0;   // the single least-sure token, 0.0-1.0
+    int    below_half = 0;     // tokens the model gave under 50%
+
+    // .value() throughout, same reasoning as ToolCall above - and every
+    // history.json saved before this existed simply has no "confidence" key.
+    friend void to_json(json& j, const Confidence& c) {
+        j = json{
+            {"present", c.present},
+            {"tokens", c.tokens},
+            {"mean", c.mean},
+            {"lowest", c.lowest},
+            {"below_half", c.below_half}
+        };
+    }
+
+    friend void from_json(const json& j, Confidence& c) {
+        c.present = j.value("present", false);
+        c.tokens = j.value("tokens", 0);
+        c.mean = j.value("mean", 0.0);
+        c.lowest = j.value("lowest", 0.0);
+        c.below_half = j.value("below_half", 0);
+    }
+};
+
+// One generated token and the probability the model gave it (0.0-1.0).
+struct TokenProb {
+    std::string token;
+    double probability = 0.0;
+};
+
 /**
  * @brief Structure representing a single chat message in the history.
  */
@@ -66,6 +106,12 @@ struct Message {
     std::string content = "";
     std::string tool_call_id = "";
     int consolidation_level = 0;
+
+    // Summary of the model's confidence in this message's words - see
+    // Confidence above. Only an assistant reply that went through send()
+    // has it; everything else (and any history saved before this existed)
+    // is present == false.
+    Confidence confidence;
 
     // The assistant's own tool_calls request for this message, if any -
     // see ollama_system::send()'s comment on why this is recorded now
@@ -86,6 +132,9 @@ struct Message {
             {"consolidation_level", m.consolidation_level},
             {"tool_calls", m.tool_calls}
         };
+        // Only written when there is something to say - keeps every other
+        // message in history.json exactly as it was.
+        if (m.confidence.present) j["confidence"] = m.confidence;
     }
 
     // Helper to convert a JSON object back into a Message object
@@ -99,6 +148,8 @@ struct Message {
         // any of them. This is the one field here that must tolerate
         // being absent.
         m.tool_calls = j.value("tool_calls", json::array()).get<std::vector<ToolCall>>();
+        // Same reasoning: absent in every history.json saved before it existed.
+        m.confidence = j.value("confidence", json::object()).get<Confidence>();
     }
 };
 
@@ -107,6 +158,16 @@ struct ChatResult {
     std::string thinking;
     std::vector<ToolCall> tool_calls;
     bool complete = false;
+
+    // Per-token probabilities from Ollama's logprobs, split the same way
+    // response/thinking are. Not saved anywhere - for whatever wants the
+    // exact token (e.g. a yes/no answer) while this result is still current.
+    std::vector<TokenProb> response_tokens;
+    std::vector<TokenProb> thinking_tokens;
+
+    // Summary of response_tokens - what send() copies onto the assistant
+    // Message it pushes to history.
+    Confidence confidence;
 };
 
 /**

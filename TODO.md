@@ -4427,3 +4427,34 @@ it can actually act under its persona's judgment, not just talk about it.
   moment you start typing in its box (`/interrupt`, web_server.cpp ~270), the same as a keystroke
   on the keyboard, so a web submission does not have the voice gap. (The note in the 2026-10-31
   voice entry above saying web had the same gap was a guess made before checking, and was wrong.)
+
+### Reply confidence: every Ollama reply now carries a summary of how sure the model was (2026-10-31, built + tested on the claude profile, NOT committed, NOT installed)
+
+- `send()` (olla.cpp) now asks Ollama for `logprobs` on every call (top choice only) and keeps the
+  probability of each generated token (`exp(logprob)`). `logprobs` is a sibling of `message` in a
+  response/stream chunk, one entry per token; a chunk with reply text feeds `response_tokens`, a chunk
+  with thinking text feeds `thinking_tokens` (both on `ChatResult`, not saved anywhere). A chunk with
+  neither (a tool call) is skipped.
+- `Confidence` (olla.h) = `present`, `tokens`, `mean`, `lowest`, `below_half`; summarized from the reply
+  tokens and copied onto the assistant `Message` (`Message::confidence`). Saved in `history.json` only
+  when `present`; old history files without the key load fine (`.value()`), and an older build reading
+  a new history file ignores the key. Not sent to the model, not shown on screen, not spoken.
+- Debug log: one line per reply in `debug_full_history.txt`, e.g.
+  `confidence: mean 0.93, lowest 0.0757 (" ref"), 2 of 30 tokens under 50%`.
+- Left `present == false` on purpose: tool-call-only replies, and any structured-output reply (a
+  `response_format` was given, e.g. second guess's `{"needs_correction":...}`). Found in testing: the
+  grammar forces such a reply's opening tokens (`{"`, `{`, ` "`), and the model's own probability for
+  those is ~0, so the lowest/mean over a structured reply is meaningless (`_cor` at 0.0000). The answer
+  word itself IS meaningful (a yes/no/maybe test gave `maybe` 0.65 for "is 161% isopropyl alcohol
+  possible", `yes` 1.00 for "is the sky blue"). `response_tokens` still holds every token, so a caller
+  can read the answer word's own probability.
+- What it is NOT: a truth score. It is the model's own certainty about each word it picked; a model can
+  be 100% sure of something wrong. Untested against real right/wrong olli answers.
+- Idea discussed, NOT built (user prefers no helper function): a `YesNoMaybe answer` member on
+  `ChatResult` (value 1 = yes, -1 = no, 0 = maybe, plus the answer word's confidence), filled inside
+  `send()` only when `response_format` equals a shared yes/no/maybe schema constant, so callers read
+  `last_received.answer.value` and nothing else. Use it on a throwaway instance (the question and
+  one-word JSON answer land in that instance's history).
+- Also seen while looking: second guess's stage-5 correction sometimes answers with the raw
+  `{"needs_correction":false}` JSON, which streams to the screen/TTS and is committed to the main
+  history as a real reply (8 lines in ron's chat logs 30-31 Oct, and one in `history.json`). Not fixed.

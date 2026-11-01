@@ -120,15 +120,199 @@ void command_tts_output(size_t& i, COMMS& instance_comms, const std::string& com
     ++i;
 }
 
+void command_echo_input(size_t& i, COMMS& instance_comms, const std::string& command)
+{
+    // "[ECHO_INPUT:" is 12 chars; the trailing "]" is 1 more.
+    std::string value = command.substr(12, command.size() - 12 - 1);
+    instance_comms.ENABLE_ECHO_INPUT = (value == "on");
+    ++i;
+}
+
 void command_plain(SCRIPT_STATE& state, std::string& current_input, const std::string& command)
 {
     current_input = command;
     state = SCRIPT_STATE::EXECUTE_COMMAND;
 }
 
+void command_end(SCRIPT_STATE& state)
+{
+    state = SCRIPT_STATE::DONE;
+}
+
+// ---- [IF] / [ELSE] / [MAYBE] / [ENDIF] ----
+//
+// The scans below only ever look forward, and only at the markers belonging
+// to the [IF] they started from: an [IF] inside a branch bumps depth, its
+// [ENDIF] drops it, and anything at depth > 0 is that inner block's business.
+
+// Index of the next [ELSE], [MAYBE] or [ENDIF] at this nesting level, starting
+// the search at 'from'. commands.size() if there isn't one.
+static size_t find_next_branch_marker(const std::vector<std::string>& commands, size_t from)
+{
+    int depth = 0;
+    for (size_t k = from; k < commands.size(); ++k)
+    {
+        const std::string& line = commands[k];
+        // An [IF] can't run on past the end of the sub it is in, so a missing
+        // [ENDIF] inside a sub is an error instead of quietly matching an
+        // [ENDIF] somewhere else in the script.
+        if (starts_with(line, "[ENDSUB]") || starts_with(line, "[SUB:"))
+        {
+            return commands.size();
+        }
+        if (starts_with(line, "[IF]"))
+        {
+            ++depth;
+        }
+        else if (starts_with(line, "[ENDIF]"))
+        {
+            if (depth == 0) return k;
+            --depth;
+        }
+        else if (depth == 0 && (starts_with(line, "[ELSE]") || starts_with(line, "[MAYBE]")))
+        {
+            return k;
+        }
+    }
+    return commands.size();
+}
+
+// Index of this block's [ENDIF], or commands.size() if it never closes.
+static size_t find_endif(const std::vector<std::string>& commands, size_t from)
+{
+    size_t k = from;
+    while (k < commands.size())
+    {
+        k = find_next_branch_marker(commands, k);
+        if (k < commands.size() && starts_with(commands[k], "[ENDIF]")) return k;
+        ++k;
+    }
+    return commands.size();
+}
+
+// Where to continue for a branch: the line after the 'wanted' marker ("[ELSE]"
+// or "[MAYBE]"), or the block's [ENDIF] itself when there is no such branch.
+static size_t find_branch_start(const std::vector<std::string>& commands, size_t from, const std::string& wanted)
+{
+    size_t k = from;
+    while (k < commands.size())
+    {
+        k = find_next_branch_marker(commands, k);
+        if (k >= commands.size()) break;
+        if (starts_with(commands[k], wanted)) return k + 1;
+        if (starts_with(commands[k], "[ENDIF]")) return k;
+        ++k;
+    }
+    return commands.size();
+}
+
+// A script with a broken block can't be run sensibly, so say so and stop.
+static void stop_script(SCRIPT_STATE& state, COMMS& instance_comms, const std::string& message)
+{
+    instance_comms.INPUT_FROM_LLM.set("--------------------------\nSCRIPT ERROR: " + message + "\n");
+    state = SCRIPT_STATE::DONE;
+}
+
+void command_if(SCRIPT_STATE& state, size_t& i, std::string& current_input, const TASK_SIMPLE& found_task, COMMS& instance_comms, const std::string& command)
+{
+    if (find_endif(found_task.COMMANDS, i + 1) >= found_task.COMMANDS.size())
+    {
+        stop_script(state, instance_comms, "[IF] has no [ENDIF]: " + command);
+        return;
+    }
+
+    // "[IF]" is 4 chars.
+    current_input = command.substr(4);
+    state = SCRIPT_STATE::EXECUTE_IF;
+}
+
+void command_skip_to_endif(SCRIPT_STATE& state, size_t& i, const TASK_SIMPLE& found_task, COMMS& instance_comms)
+{
+    i = find_endif(found_task.COMMANDS, i + 1);
+    if (i >= found_task.COMMANDS.size())
+    {
+        stop_script(state, instance_comms, "[ELSE]/[MAYBE] has no [ENDIF]");
+    }
+}
+
+// ---- [SUB] / [ENDSUB] / [GOSUB] / [RETURN] ----
+
+// How many calls can be open at once. A sub that calls itself (to ask a
+// question again) would otherwise never stop if every answer was a "maybe".
+static const size_t MAX_GOSUB_DEPTH = 16;
+
+// Index of the "[SUB:name]" line, or commands.size() if there isn't one.
+static size_t find_sub(const std::vector<std::string>& commands, const std::string& name)
+{
+    const std::string wanted = "[SUB:" + name + "]";
+    for (size_t k = 0; k < commands.size(); ++k)
+    {
+        if (commands[k] == wanted) return k;
+    }
+    return commands.size();
+}
+
+void command_sub(SCRIPT_STATE& state, size_t& i, const TASK_SIMPLE& found_task, const std::vector<size_t>& call_stack, COMMS& instance_comms)
+{
+    // A [SUB] line is only ever reached two ways: the main flow fell into
+    // it (nothing is calling anything - skip the whole definition), or a
+    // sub that is running contains another definition (not allowed).
+    if (!call_stack.empty())
+    {
+        stop_script(state, instance_comms, "a [SUB] inside another [SUB]: " + found_task.COMMANDS[i]);
+        return;
+    }
+
+    size_t k = i + 1;
+    while (k < found_task.COMMANDS.size() && !starts_with(found_task.COMMANDS[k], "[ENDSUB]"))
+    {
+        ++k;
+    }
+    if (k >= found_task.COMMANDS.size())
+    {
+        stop_script(state, instance_comms, "[SUB] has no [ENDSUB]: " + found_task.COMMANDS[i]);
+        return;
+    }
+    i = k + 1;
+}
+
+void command_gosub(SCRIPT_STATE& state, size_t& i, const TASK_SIMPLE& found_task, std::vector<size_t>& call_stack, COMMS& instance_comms, const std::string& command)
+{
+    // "[GOSUB:" is 7 chars; the trailing "]" is 1 more.
+    std::string name = command.substr(7, command.size() - 7 - 1);
+
+    size_t sub = find_sub(found_task.COMMANDS, name);
+    if (sub >= found_task.COMMANDS.size())
+    {
+        stop_script(state, instance_comms, "there is no [SUB:" + name + "] for " + command);
+        return;
+    }
+    if (call_stack.size() >= MAX_GOSUB_DEPTH)
+    {
+        stop_script(state, instance_comms, "more than " + std::to_string(MAX_GOSUB_DEPTH) + " calls open at once (a sub calling itself forever?): " + command);
+        return;
+    }
+
+    call_stack.push_back(i + 1);
+    i = sub + 1;
+}
+
+// Both [RETURN] and the [ENDSUB] that closes a sub end a call the same way.
+void command_return(SCRIPT_STATE& state, size_t& i, std::vector<size_t>& call_stack, COMMS& instance_comms, const std::string& command)
+{
+    if (call_stack.empty())
+    {
+        stop_script(state, instance_comms, command + " with no [GOSUB] to return to");
+        return;
+    }
+
+    i = call_stack.back();
+    call_stack.pop_back();
+}
+
 // Prefix-matching dispatch only - each [MARKER]'s actual logic lives in its
 // own command_*() function above.
-void command_get_command(SCRIPT_STATE& state, size_t& i, std::string& current_input, const TASK_SIMPLE& found_task, ollama_system& instance, COMMS& instance_comms, const std::filesystem::path& files_dir, bool& keyboard_was_enabled)
+void command_get_command(SCRIPT_STATE& state, size_t& i, std::string& current_input, const TASK_SIMPLE& found_task, ollama_system& instance, COMMS& instance_comms, const std::filesystem::path& files_dir, bool& keyboard_was_enabled, std::vector<size_t>& call_stack)
 {
     if (i >= found_task.COMMANDS.size())
     {
@@ -169,6 +353,38 @@ void command_get_command(SCRIPT_STATE& state, size_t& i, std::string& current_in
     else if (starts_with(command, "[TTS_OUTPUT:") && command.back() == ']')
     {
         command_tts_output(i, instance_comms, command);
+    }
+    else if (starts_with(command, "[ECHO_INPUT:") && command.back() == ']')
+    {
+        command_echo_input(i, instance_comms, command);
+    }
+    else if (starts_with(command, "[END]"))
+    {
+        command_end(state);
+    }
+    else if (starts_with(command, "[GOSUB:") && command.back() == ']')
+    {
+        command_gosub(state, i, found_task, call_stack, instance_comms, command);
+    }
+    else if (starts_with(command, "[SUB:") && command.back() == ']')
+    {
+        command_sub(state, i, found_task, call_stack, instance_comms);
+    }
+    else if (starts_with(command, "[RETURN]") || starts_with(command, "[ENDSUB]"))
+    {
+        command_return(state, i, call_stack, instance_comms, command);
+    }
+    else if (starts_with(command, "[IF]"))
+    {
+        command_if(state, i, current_input, found_task, instance_comms, command);
+    }
+    else if (starts_with(command, "[ELSE]") || starts_with(command, "[MAYBE]"))
+    {
+        command_skip_to_endif(state, i, found_task, instance_comms);
+    }
+    else if (starts_with(command, "[ENDIF]"))
+    {
+        ++i;
     }
 #if 0
     // Draft, not yet implemented - sketched 2026-09-06 during a
@@ -335,7 +551,10 @@ void command_wait_ask(SCRIPT_STATE& state, std::string& current_input, COMMS& in
 
 void command_execute_command(SCRIPT_STATE& state, const std::string& current_input, ollama_system& instance, COMMS& instance_comms, TOOL_WORKER_CLASS* tool_worker)
 {
-    instance_comms.INPUT_FROM_LLM.set("--------------------------\nINPUT: " + current_input + "\n");
+    if (instance_comms.ENABLE_ECHO_INPUT)
+    {
+        instance_comms.INPUT_FROM_LLM.set("--------------------------\nINPUT: " + current_input + "\n");
+    }
     instance_comms.INPUT_FROM_USER.set(current_input);
 
     // Run send() on its own thread instead of calling it
@@ -346,19 +565,77 @@ void command_execute_command(SCRIPT_STATE& state, const std::string& current_inp
     // returned. Same pattern as ollama_system::input()
     // (olla.cpp) and sidetrack.cpp's own
     // start_second_guess_call().
+    // An [IF] question (EXECUTE_IF) goes out exactly like a normal line, with
+    // two differences: it asks for a yes/no/maybe answer, and its reply
+    // isn't streamed - it would otherwise be shown (and spoken) as the raw
+    // {"answer":"yes"}. command_wait_if_response() turns streaming back on
+    // and shows the answer in plain words.
+    bool is_question = (state == SCRIPT_STATE::EXECUTE_IF);
+    json response_format;
+    if (is_question)
+    {
+        response_format = YES_NO_MAYBE_FORMAT;
+        instance.PROPS.stream_output = false;
+    }
+
     instance.status.interrupt_signal = false;
     instance.is_processing = true;
     if (instance.chat_thread.joinable()) instance.chat_thread.join();
-    instance.chat_thread = std::thread([&instance, tool_worker, &instance_comms]()
+    instance.chat_thread = std::thread([&instance, tool_worker, &instance_comms, response_format]()
     {
         // Real tool_worker, not nullptr - the caller's own (TOOL_TASK_RUNNER::
         // handle_tool(), tools.cpp), shared the same way tools_list already
         // is, so a script's own commands can actually reach a remote tool.
-        instance.send(tool_worker, instance_comms, "user");
+        instance.send(tool_worker, instance_comms, "user", response_format);
         instance.is_processing = false;
     });
 
-    state = SCRIPT_STATE::WAIT_RESPONSE;
+    state = is_question ? SCRIPT_STATE::WAIT_IF_RESPONSE : SCRIPT_STATE::WAIT_RESPONSE;
+}
+
+void command_wait_ask_for_if(SCRIPT_STATE& state, size_t& i, std::string& current_input, const TASK_SIMPLE& found_task, ollama_system& instance, COMMS& instance_comms, bool& keyboard_was_enabled)
+{
+    if (!instance_comms.ENTER_PRESSED)
+    {
+        return;
+    }
+    instance_comms.ENTER_PRESSED = false;
+    instance_comms.ENABLE_KEYBOARD_INPUT = keyboard_was_enabled;
+
+    std::string answer = instance_comms.INPUT_FROM_USER.peek();
+    while (!answer.empty() && (answer.back() == '\n' || answer.back() == '\r'))
+    {
+        answer.pop_back();
+    }
+
+    // Onto the [IF] line, then the usual start of an [IF] (checks the block has
+    // its [ENDIF], sets current_input to the question, state to EXECUTE_IF).
+    ++i;
+    command_if(state, i, current_input, found_task, instance_comms, found_task.COMMANDS[i]);
+    if (state != SCRIPT_STATE::EXECUTE_IF)
+    {
+        return; // the block was broken and the script has been stopped
+    }
+
+    // The player's words again, right in front of the question. They are also
+    // in the history as their own message (below), but on a short answer like
+    // "climb the stairs" the model sometimes lost track of which message was
+    // the player's: measured on a real game, about 30% wrong without this and
+    // 0 wrong in 70 with it. The question is taken back out of the history
+    // after it is answered, so this quote does not stay.
+    current_input = "The player's answer: \"" + answer + "\"\n" + current_input;
+
+    // The player's words, as a message with no reply. No chat thread is running
+    // here, so the lock is only for the other readers of the history.
+    Message player_said;
+    player_said.role = "user";
+    player_said.content = answer;
+    std::lock_guard<std::mutex> lock(history_mutex);
+    instance.history.push_back(player_said);
+
+    // send() logs every message it adds to the history; this one is added here
+    // instead, so it is logged here too (debug_full_history.txt).
+    DEBUG_LOG_CLASS::instance().log_message(instance.debug_label, "user", answer);
 }
 
 void command_wait_response(SCRIPT_STATE& state, size_t& i, ollama_system& instance)
@@ -380,12 +657,63 @@ void command_wait_response(SCRIPT_STATE& state, size_t& i, ollama_system& instan
     }
 }
 
-void advance_script_state(SCRIPT_STATE& state, size_t& i, std::string& current_input, const TASK_SIMPLE& found_task, ollama_system& instance, COMMS& instance_comms, TOOL_WORKER_CLASS* tool_worker, const std::filesystem::path& files_dir, bool& keyboard_was_enabled)
+void command_wait_if_response(SCRIPT_STATE& state, size_t& i, ollama_system& instance, const TASK_SIMPLE& found_task, COMMS& instance_comms)
+{
+    if (!instance.is_processing && instance.chat_thread.joinable())
+    {
+        instance.chat_thread.join();
+    }
+
+    if (instance.is_processing || !instance.last_received.complete)
+    {
+        return;
+    }
+    instance.last_received.complete = false;
+    instance.PROPS.stream_output = true;
+
+    int answer = instance.last_received.answer.value;
+    std::string answer_word = (answer == 1 ? "yes" : (answer == -1 ? "no" : "maybe"));
+    // Not shown for now: it lands after the narration it is judging, and in a
+    // game "ANSWER: no" after "stairs up" reads as wrong (the question there is
+    // about the cellar). Consider an on/off switch for it (like [ECHO_INPUT])
+    // if seeing the answer is needed again.
+    // instance_comms.INPUT_FROM_LLM.set("ANSWER: " + answer_word + "\n");
+    (void)instance_comms; // only used by the line above; kept so the signature stays as it is
+
+    // Take the question and its one-word answer back out of the history. Left
+    // there, the raw {"answer":"yes"} gets copied by later lines of the script
+    // and shows up in the report the main chat is given when the script ends
+    // (handle_tool(), tools.cpp). A rewritten "Answer: yes" turned out to be
+    // copied too: after a few of them the narrator started replying "Answer:
+    // yes" to ordinary lines. The branch taken is all the script needs to
+    // remember. The thread is already joined above.
+    if (instance.history.size() >= 2 &&
+        instance.history.back().role == "assistant" &&
+        instance.history[instance.history.size() - 2].role == "user")
+    {
+        instance.history.pop_back();
+        instance.history.pop_back();
+    }
+
+    // i is still on the [IF] line. Yes runs the lines right after it; no and
+    // maybe jump to their own branch, or to [ENDIF] if the script has none.
+    if (answer == 1)
+    {
+        ++i;
+    }
+    else
+    {
+        i = find_branch_start(found_task.COMMANDS, i + 1, answer == -1 ? "[ELSE]" : "[MAYBE]");
+    }
+    state = SCRIPT_STATE::GET_COMMAND;
+}
+
+void advance_script_state(SCRIPT_STATE& state, size_t& i, std::string& current_input, const TASK_SIMPLE& found_task, ollama_system& instance, COMMS& instance_comms, TOOL_WORKER_CLASS* tool_worker, const std::filesystem::path& files_dir, bool& keyboard_was_enabled, std::vector<size_t>& call_stack)
 {
     switch (state)
     {
         case SCRIPT_STATE::GET_COMMAND:
-            command_get_command(state, i, current_input, found_task, instance, instance_comms, files_dir, keyboard_was_enabled);
+            command_get_command(state, i, current_input, found_task, instance, instance_comms, files_dir, keyboard_was_enabled, call_stack);
             break;
 
         case SCRIPT_STATE::WAIT_ENTER:
@@ -393,15 +721,28 @@ void advance_script_state(SCRIPT_STATE& state, size_t& i, std::string& current_i
             break;
 
         case SCRIPT_STATE::WAIT_ASK:
-            command_wait_ask(state, current_input, instance_comms, keyboard_was_enabled);
+            // An [IF] right after the [ASK] judges what the player typed.
+            if (i + 1 < found_task.COMMANDS.size() && starts_with(found_task.COMMANDS[i + 1], "[IF]"))
+            {
+                command_wait_ask_for_if(state, i, current_input, found_task, instance, instance_comms, keyboard_was_enabled);
+            }
+            else
+            {
+                command_wait_ask(state, current_input, instance_comms, keyboard_was_enabled);
+            }
             break;
 
         case SCRIPT_STATE::EXECUTE_COMMAND:
+        case SCRIPT_STATE::EXECUTE_IF:
             command_execute_command(state, current_input, instance, instance_comms, tool_worker);
             break;
 
         case SCRIPT_STATE::WAIT_RESPONSE:
             command_wait_response(state, i, instance);
+            break;
+
+        case SCRIPT_STATE::WAIT_IF_RESPONSE:
+            command_wait_if_response(state, i, instance, found_task, instance_comms);
             break;
 
         // No-op here on purpose - see SCRIPT_STATE::WAIT_TOOL_RESULT's own

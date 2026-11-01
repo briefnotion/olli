@@ -1,0 +1,144 @@
+NAME: haunted lighthouse
+PURPOSE: You are the narrator of a short, spooky text adventure at an abandoned lighthouse during a storm. Speak to the player as "you". Keep every reply to two or three sentences. Never use tools, and never end the story unless you are told to.
+DIRECTORY: haunted_lighthouse
+---
+# The same story as lighthouse_adventure.task, rebuilt with subroutines.
+#
+# What the subroutines buy here:
+#   * It reads flat. Each room and each ending is its own [SUB]; the old
+#     version nested every room one level inside the one before it.
+#   * A muddled answer ("maybe") at the door or the stairs asks again, by the
+#     sub calling itself, instead of ending the game.
+#   * Every ending is a sub that finishes with [END], so nothing after a
+#     [GOSUB] ever has to run.
+#
+# One thing to know: calls nest (shore -> hall -> top of the tower, plus one
+# more for each retry), and at most 16 can be open at once. A player who types
+# gibberish about ten times in a row would hit that limit and see a SCRIPT ERROR.
+#
+# The [IF] questions are worded the way lighthouse_adventure.task explains:
+# yes, no and maybe each spelled out, with examples for "no".
+#
+# An [IF] straight after an [ASK] judges what the player typed. The narrator is
+# given those words but does not answer them yet, so a branch that carries the
+# story on starts with a line like "React to what the player just did, in one
+# sentence." and a branch that is an ending just narrates the ending.
+
+# ---------------- endings ----------------
+
+[SUB:ending_keeper]
+Narrate a triumphant ending in three sentences: the great lamp blazes, the ghost of the keeper smiles and fades, and a ship far out at sea steers safely clear of the rocks.
+[PRINT]
+[PRINT]*** ENDING 1 of 5: THE KEEPER'S RELIEF ***
+[PRINT]
+[PRINT]=== THE END ===
+[END]
+[ENDSUB]
+
+[SUB:ending_dark_lamp]
+Narrate a sad ending in three sentences: the lamp stays dark, the keeper's ghost sighs and drifts away, and a ship's horn sounds far out on the rocks.
+[PRINT]
+[PRINT]*** ENDING 2 of 5: THE DARK LAMP ***
+[PRINT]
+[PRINT]=== THE END ===
+[END]
+[ENDSUB]
+
+[SUB:ending_long_wait]
+Narrate a strange ending in three sentences: the keeper's ghost waits patiently while you hesitate, until the storm outside quietly stops and dawn comes.
+[PRINT]
+[PRINT]*** ENDING 3 of 5: THE LONG WAIT ***
+[PRINT]
+[PRINT]=== THE END ===
+[END]
+[ENDSUB]
+
+[SUB:ending_swallowed]
+Narrate a dark ending in three sentences: you did not climb the stairs, and whatever you chose instead, the shadows of the hall close around you and the lighthouse keeps its secrets.
+[PRINT]
+[PRINT]*** ENDING 4 of 5: SWALLOWED BY THE DARK ***
+[PRINT]
+[PRINT]=== THE END ===
+[END]
+[ENDSUB]
+
+[SUB:ending_walk_away]
+Narrate a quiet ending in three sentences: you turn away from the lighthouse, the storm swallows its light, and by morning there is nothing on the rocks but the sea.
+[PRINT]
+[PRINT]*** ENDING 5 of 5: THE ROAD NOT TAKEN ***
+[PRINT]
+[PRINT]=== THE END ===
+[END]
+[ENDSUB]
+
+# ---------------- rooms ----------------
+
+# The top of the tower: the last room. A "maybe" here is an ending of its own.
+[SUB:top_of_tower]
+Describe the top of the tower in two sentences: the great lamp stands cold and dark, a brass lever beside it, and a faint voice, the ghost of the old keeper, whispers "will you light it?"
+[ASK]What do you do?
+[IF]Answer yes if the player lit the lamp. Answer no if the player chose not to light the lamp, for example by refusing, leaving, ignoring the ghost, or doing something else. Answer maybe only if the player's message was unrelated or made no sense.
+[GOSUB:ending_keeper]
+[ELSE]
+[GOSUB:ending_dark_lamp]
+[MAYBE]
+[GOSUB:ending_long_wait]
+[ENDIF]
+[ENDSUB]
+
+# The entrance hall. The room is described once; the question lives in its own
+# sub so a "maybe" can ask it again without describing the hall a second time.
+# The question is about the CELLAR (yes = cellar, no = anything else, which
+# means up the stairs) on purpose: measured on this model, "Did the player go
+# down into the cellar?" was answered correctly every time, while the same
+# question turned around ("Did the player go up the stairs?") sent a player
+# who chose the cellar to "maybe".
+[SUB:hall]
+Describe the entrance hall in two sentences: dust, a spiral staircase climbing into the dark, a trapdoor in the floor leading down to a cellar, and an old lantern on a hook by the stairs.
+[GOSUB:hall_choice]
+[ENDSUB]
+
+[SUB:hall_choice]
+[ASK]Take the stairs up, or the trapdoor down to the cellar?
+[IF]Did the player go down into the cellar? Answer yes if they did. Answer no if they went up the stairs or went somewhere else instead. Answer maybe only if the message was gibberish or unrelated to the lighthouse.
+[GOSUB:ending_swallowed]
+[ELSE]
+React to what the player just did, in one sentence.
+[GOSUB:top_of_tower]
+[MAYBE]
+[PRINT]Your words are lost in the dark. Try again.
+[GOSUB:hall_choice]
+[ENDIF]
+[ENDSUB]
+
+# The shore, where the story starts. Same idea: described once, asked as often
+# as it takes.
+[SUB:shore]
+Set the scene in two sentences: you are standing on a rocky shore in a violent storm, facing the heavy door of an abandoned lighthouse. The door is slightly open and a faint light flickers inside.
+[GOSUB:shore_choice]
+[ENDSUB]
+
+[SUB:shore_choice]
+[ASK]What do you do?
+[IF]Answer yes if the player went inside the lighthouse. Answer no if the player chose not to go inside, for example by leaving, staying outside, or waiting. Answer maybe only if the player's message was unrelated or made no sense.
+React to what the player just did, in one sentence.
+[GOSUB:hall]
+[ELSE]
+[GOSUB:ending_walk_away]
+[MAYBE]
+[PRINT]The wind tears your words away. Try again.
+[GOSUB:shore_choice]
+[ENDIF]
+[ENDSUB]
+
+# ---------------- the game ----------------
+
+# The player should see the story, not the instructions that produce it: with
+# the echo off, the lines sent to the narrator (and the [IF] questions) are not
+# printed or spoken, only the narrator's replies are.
+[ECHO_INPUT:off]
+[PRINT]
+[PRINT]=== THE LIGHTHOUSE ===
+[GOSUB:shore]
+# Every path above finishes with [END]; this is only here as a safety net.
+[END]

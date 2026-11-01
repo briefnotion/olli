@@ -4481,3 +4481,225 @@ it can actually act under its persona's judgment, not just talk about it.
   stage 5 replied in plain text, it was committed, and `history.json` has no `needs_correction` text. One
   live pass cannot show the rate dropped (the leak is only a few percent) - check ron's chat logs after a
   few days of use for lines that are exactly `{"needs_correction":...}`.
+
+### Mail tool, first version: a standing "when new mail arrives, do X" rule for one Gmail inbox (2026-10-31, built + tested against a FAKE IMAP server, NOT run against real Gmail, NOT committed, NOT installed)
+
+- New `tools/mail/` (mail.cpp, Makefile, README.md; added to `build/install_to_home.sh`, TOOLS.md). One tool,
+  `set_mail_action` (`announce`, `action_tool`, `action_arguments`, `clear`; no arguments = show the rule).
+  Modeled on the clock's timer: it sends the same `event` (optional `message` for olli to say in character,
+  optional prepared `action` olli runs itself; an empty message means no narration). Decisions the user made:
+  standing rule (survives restarts), announce nothing about the mail itself, Gmail app password, Inbox only,
+  check once an hour.
+- Read-only by construction: the only IMAP command sent after login is `STATUS INBOX (UIDNEXT UIDVALIDITY)`.
+  It never selects the mailbox or fetches a message, so it cannot see a sender, subject or body. "New mail" =
+  UIDNEXT went up; a UIDVALIDITY change resets the baseline silently; the first check only sets the baseline.
+  TLS to imap.gmail.com:993 only (loopback test override `--test-imap-port` is plain IMAP to 127.0.0.1 only),
+  64 KB reply cap, 15 s connect / 30 s total timeouts, runs on a worker thread so it can't stall the heartbeat.
+  Credentials: `<profile>/mail/credentials.json`, refused unless owner-only (chmod 600); a placeholder is created
+  on first run. A wrong password backs off for at least an hour (no lockout).
+- Why the rule is safe to let the model set: the action is chosen when the rule is set, so an email can only
+  trigger it. `set_mail_action` can't be the action of a rule. Events go to olli only; subcon can reach the tool
+  but `set_mail_action` is not on subcon's read-only allowlist.
+- Tests (scratchpad `mailtest/t_mail.py`, scratch HOME, fake olli on 48601, fake plain IMAP on loopback; never the
+  real 47601/47603): 29 checks, passed twice - placeholder credentials, refusing open-permission credentials
+  (found and fixed a bug: the problem was only logged once per run), baseline, event with announcement + action,
+  fires once per arrival, clear, action-only (empty message), renumbered inbox, junk arguments, a rule can't run
+  itself, restart keeps rule and state, event held while olli is away then delivered once, wrong password backs off.
+  Wire note: an error answer is a `result` message with an `error` field.
+- NOT verified: a real Gmail login. The one assumption is that libcurl's custom `STATUS` request returns Gmail's
+  untagged `* STATUS "INBOX" (UIDNEXT n UIDVALIDITY n)` line to the write callback, as it does against the fake
+  server. First real run: put credentials in `~/olli_files_ron/mail/`, run `./mail --poll-seconds 60`, and watch
+  its output for "first check - baseline set".
+- Not built yet (discussed): a second, read-only command that fetches headers for subcon's "personal or
+  important" judgment (needs a decision on what may be spoken), IMAP IDLE push, a subcon task for mail.
+- Test-rig note: olli (ron) and subcon were running during testing, so the tool has `--olli-port` and
+  `--subcon-port` (test-only) to talk to fake servers instead.
+
+## 2026-11-01 - `[IF]`/`[ELSE]`/`[MAYBE]`/`[ENDIF]` in .task scripts, and `ChatResult::answer`
+
+- `olla.h`/`olla.cpp`: `struct YesNoMaybe { int value; }` (1 yes, -1 no, 0 maybe), `ChatResult::answer`, and
+  `YES_NO_MAYBE_FORMAT` (schema `{"answer": "yes"|"no"|"maybe"}`). `send()` resets `answer` each call and, only when
+  called with `response_format == YES_NO_MAYBE_FORMAT`, reads the reply into it. An unreadable reply leaves 0 (maybe)
+  and writes a line to the debug log. No signature changes (send() already had `response_format`). No confidence value
+  on the answer yet; the notes' token-probability idea ("maybe" when the answer word scores low) is NOT built.
+- `tools_task_script.h/.cpp`: new markers `[IF]<question>`, `[ELSE]`, `[MAYBE]`, `[ENDIF]` (see AUTOMATIONS.md);
+  new states `EXECUTE_IF`, `WAIT_IF_RESPONSE`; new `command_if`, `command_skip_to_endif`, `command_wait_if_response`;
+  three small static scan helpers (nesting-aware, forward only). `command_execute_command` also handles `EXECUTE_IF`:
+  same send, plus the format, with `stream_output` off for that one call (otherwise the screen/TTS gets the raw JSON).
+  `tools.cpp` was NOT changed - `i` was already passed by reference, so a jump is just setting `i`.
+- Found in testing: the whole instance history is handed to the main chat when a script ends, so the raw
+  `{"answer":"yes"}` replies showed up there and the main chat quoted them. Fixed in `command_wait_if_response`:
+  the reply in history is rewritten to `Answer: yes` right after it is read (same fix as second guess's verdict).
+- A missing `[ENDIF]` stops the script with a `SCRIPT ERROR` line when that `[IF]` is reached, not at load time
+  (the loader, `tools_helper.cpp`, was out of scope). Possible later: check every script at load time.
+- Tests (scratch copy of the `claude` profile, new build, audio muted; ron untouched): yes/no each ran only their own
+  branch; nested `[IF]` in both the yes and no branch; missing `[ELSE]`/`[MAYBE]` skipped to `[ENDIF]`; branches in
+  `[MAYBE]`-then-`[ELSE]` order; `[IF]` without `[ENDIF]` stopped with the error; "maybe" reached on "Is Pluto a
+  planet? Answer maybe if experts disagree." (qwen3:8b rarely says maybe without that wording - "Will it rain in
+  Nashville on March 3rd, 2031?" got "no"). A normal line after an `[IF]` came back as normal text, not JSON.
+- Not tested: `[IF]` combined with `[WAIT_FOR_RESULT]` / `DELAY_TOOL_RETURNS`, `[ASK]` inside a branch, and a user
+  interrupt while an `[IF]` is waiting. Not committed.
+
+## 2026-11-01 (later) - `lighthouse_adventure.task`, and what it taught about writing `[IF]` questions
+
+- New `sample_scripts/lighthouse_adventure.task`: branching text adventure, three choices, seven endings, nested
+  `[IF]`. No code changes for this; it only uses `[IF]`, `[ASK]` and plain/`[PRINT]` lines. Not installed to any
+  profile's `scripts/` yet (ron still runs the old build; an old build would treat the `[IF]` lines as plain text).
+- Real play-throughs on the scratch `claude` profile, one game at a time: win (door, stairs, lamp) -> ending 1;
+  refuse the lamp -> 2; cellar -> 4; maybe at the stairs (nonsense) -> 5; walk away -> 6; nonsense at the door -> 7.
+  Ending 3 (nonsense at the lamp) was not played; a direct probe gave `maybe` 9 of 10.
+- Finding (important for anyone writing `[IF]` questions): qwen3:8b is very sensitive to the question's wording.
+  Measured against the real conversation, 10 runs per input:
+  - "Did the player choose to go inside? Answer maybe only if you cannot tell." -> `maybe` for a player who plainly
+    walked in (9 of 10 in one run). Do not use this wording.
+  - Bare "Did the player ...?" -> never `maybe`; answered `yes` to nonsense.
+  - What worked (50 of 50): "Answer yes if <A>. Answer no if <B>, for example <examples>. Answer maybe only if the
+    player's message was unrelated or made no sense." The examples after "no" mattered ("staying outside, or
+    waiting" - without them waiting outside came back `maybe`).
+  - Known weak spot: at the stairs, "go back outside" is still judged `yes` under every wording tried. Narrowing
+    what the player is asked ("Take the stairs up, or the trapdoor down?") is the practical fix.
+  - Same question can give a different split from one session to the next (the identical request gave 7 yes / 3 maybe,
+    then 1 yes / 9 maybe) - judge a wording by 10 runs over several inputs, not by one run.
+- Not changed, but worth knowing: the model's answer to an `[IF]` question stays in the script instance's history as
+  `Answer: yes`. A direct probe found no sign that earlier answers bias later ones.
+- Test-rig lesson: when driving an interactive script from outside, never type a command until the previous game is
+  finished and waiting - my driver typed "run ..." into a game that was waiting for an answer, which put junk in that
+  game's history and produced a false "cellar -> yes". Debug log entries from two games running at once also share one
+  label (`task-runner:lighthouse adventure`) and interleave, so they can't be told apart afterwards.
+
+## 2026-11-01 (later still) - `[END]`
+
+- New `[END]` marker (`command_end()`, tools_task_script.h/.cpp): sets the state to DONE from anywhere, including inside
+  an `[IF]` branch. The normal end-of-script wrap-up (held tool results, report to the main chat) still runs. No
+  signature changes; `[ENDIF]` is not confused with it (the closing bracket is part of the match).
+- Tested on the scratch `claude` profile: an `[END]` in an untaken branch does nothing, one in a taken branch stops the
+  script, and a bare `[END]` stops a plain script after its first line.
+- `lighthouse_adventure.task` was NOT changed to use it (it already works as tested).
+- Design agreed with the user, NOT built: `[SUB:name]` ... `[ENDSUB]` / `[GOSUB:name]` / `[RETURN]`, definitions skipped
+  when the main flow falls into them, top-level only, no arguments, call stack = `std::vector<size_t>` of return line
+  indexes (one local in handle_tool()'s loop, passed to advance_script_state() and command_get_command() - the one
+  accepted signature change), depth cap (about 16) that stops with a SCRIPT ERROR, undefined name caught when the
+  GOSUB is reached. Main use: flat scripts, shared endings, and re-asking a room on "maybe" by calling itself.
+
+## 2026-11-01 (night) - subroutines: `[SUB]`/`[ENDSUB]`/`[GOSUB]`/`[RETURN]`
+
+- Built as agreed (see the previous entry): `command_sub`, `command_gosub`, `command_return`, a small `find_sub`,
+  `MAX_GOSUB_DEPTH = 16`. Call stack is a `std::vector<size_t>` of return line indexes, a local in
+  `handle_tool()` (tools.cpp) passed through `advance_script_state()` -> `command_get_command()` - the one accepted
+  signature change; nothing else in tools.cpp changed. The [IF] block scans now stop at `[ENDSUB]`/`[SUB:` so an unclosed
+  `[IF]` in a sub is an error instead of matching an `[ENDIF]` elsewhere.
+- Tested on the scratch `claude` profile (scripts gs_*.task, scratch only): call/return order with nested calls and a
+  second call of the same sub; early `[RETURN]`; `[END]` inside a sub; undefined sub; runaway self-call (exactly 16
+  runs, then the error); stray `[RETURN]`; nested definition; unclosed `[IF]` in a sub; a sub containing a real
+  `[IF]` called twice; a sub that calls itself on "maybe" and asks again (maybe -> retry -> yes -> one clean unwind).
+  A full lighthouse game still plays (win path -> ending 1).
+- Found while testing, fixed in `command_wait_if_response`: rewriting the `[IF]` reply to "Answer: yes" in the script's
+  history (my earlier fix) was itself copied - after a retry the narrator answered a plain line with "Answer: yes".
+  The question and its answer are now REMOVED from the history instead; the report to the main chat no longer lists
+  them either. Side effect: `[FILE_APPEND]` right after an `[IF]` appends the raw answer (documented in AUTOMATIONS.md).
+- Not done: `lighthouse_adventure.task` was not rewritten to use subs (it still works as is); no sample script uses
+  `[SUB]` yet; a missing `[SUB]` name is only caught when its `[GOSUB]` is reached, not when the script loads.
+
+## 2026-11-01 (night, later) - `haunted_lighthouse.task`: the adventure rebuilt with subroutines
+
+- New `sample_scripts/haunted_lighthouse.task` (NAME `haunted lighthouse`): one `[SUB]` per room and per ending, flat
+  layout, `[END]` at every ending, a "maybe" at the door (`shore_choice`) or the hall (`hall_choice`) retries by calling
+  itself, "maybe" at the lamp is an ending. Five endings (the old maybe-endings became retries). The original
+  `lighthouse_adventure.task` is unchanged. Not installed to any profile's scripts/ by me.
+- All five endings reached in real play on the scratch `claude` profile, a fresh olli per game after a driver
+  desync: win with a gibberish retry at the hall (1), refuse the lamp (2), gibberish at the lamp (3), cellar (4),
+  walk away (5). The door retry was seen in an earlier game (gibberish -> maybe -> "Try again" -> yes); the hall retry
+  in the final one.
+- Finding 1: two similar names (`lighthouse adventure` / `lighthouse adventure 2`) made the main chat drop the "2"
+  and run the original - several of my first "new script" results were really the old script (spotted by "ENDING 6 of
+  7" in a five-ending game). Renamed. Check which script ran before trusting a result.
+- Finding 2 (wording): with the real hall conversation, "Did the player go up the stairs? ... no if the cellar" never
+  produced `no` (cellar and "outside" came back `maybe`, 8 of 8, across five wordings). Turning it around to
+  "Did the player go down into the cellar? Answer yes if they did. Answer no if they went up the stairs or went
+  somewhere else instead. Answer maybe only if the message was gibberish or unrelated to the lighthouse." gave
+  gibberish maybe 8/8, stairs no 8/8, cellar yes 8/8, outside no 8/8. Ask [IF] questions in the positive.
+  Side effect of the new wording: "go back outside" at the hall now means "no" = up the stairs.
+- Finding 3: the debug log (`debug_full_history.txt`) is overwritten at each olli start, so a failing game's exact
+  conversation is lost unless you copy the file right after the game.
+- Test-rig lesson (again): `pkill -f <pattern>` inside a command whose own text contains the pattern kills that command
+  (exit 144). Use `ps ... | grep "[p]attern"` or kill a known PID.
+- ron was found stopped during testing (clean "Chat Ended", chat log ends "Ron: bye" at 01:33:59 after the adventure's
+  text from the old build). The user confirmed afterwards that they stopped it on purpose to stay out of my testing;
+  my first guess (that they were playing the game on it) was wrong. Not part of any test.
+
+## 2026-11-02 - `[ECHO_INPUT:on/off]`
+
+- Problem (user's): a script prints `INPUT: <line>` (plus a dashed line) for every line it sends to the model, so a game
+  shows (and, with TTS on, speaks) the narrator's instructions and the `[IF]` questions. The user's observation that
+  made the fix simple: `INPUT_FROM_USER` is only the handoff to `send()` (it clears it), so that echo is the only way
+  a script line reaches the screen.
+- Change: `COMMS::ENABLE_ECHO_INPUT` (comms.h, default true, copied in `operator=`), `command_echo_input()`
+  (tools_task_script.h/.cpp, same shape as `[TTS_OUTPUT:...]`), and one `if` around the echo in
+  `command_execute_command()`. Per-script, because a script's `instance_comms` is created fresh for each run (the flag
+  can't leak into the main chat). No signature changes. Agreed with the user over a per-line `[QUIET]` prefix.
+- Tested on the scratch `claude` profile: echo on (INPUT line + dashes shown), off (nothing but the reply, also for the
+  `[IF]` question), on again (shown again). `ANSWER:` is deliberately still shown - the user's "next topic".
+- Not done: no sample script uses it yet (haunted_lighthouse.task would be the natural one); not tested by ear that the
+  spoken echo is gone too (the test run was muted), only that it is no longer written to the channel the speech reads.
+
+## 2026-11-02 (later) - `ANSWER: yes/no/maybe` line no longer shown
+
+- `command_wait_if_response()` (tools_task_script.cpp): the `instance_comms.INPUT_FROM_LLM.set("ANSWER: ...")` line is
+  commented out, with a note. Reason (user's call): the line lands after the narration it judges, and in a game
+  "ANSWER: no" after "stairs up" reads as wrong (the hall question is about the cellar). The `[IF]` still works exactly
+  as before; only the printed line is gone. `(void)instance_comms;` keeps the build quiet (it is -Werror) and the
+  signature unchanged. AUTOMATIONS.md updated. If seeing the answer is needed again: an on/off switch like
+  `[ECHO_INPUT]`, or a line in the debug log (`DEBUG_LOG_CLASS::log_event`).
+- Checked while looking into the "order" question: nothing is lost or reordered on screen; a narrator reply that
+  looked cut off was only a screen line wrap. The real order is: typed line -> narrator replies to it -> `[IF]`
+  judges the exchange -> next block. The reply is therefore written before the branch is known.
+
+## 2026-11-02 (night) - an `[IF]` right after an `[ASK]` judges what the player typed
+
+- Problem (user's): after `[ASK]` the typed line was sent to the narrator as a normal turn and the narrator replied;
+  the `[IF]` then judged that reply, i.e. the story's progress, not the player's answer. "ANSWER: no" after "stairs up"
+  looked wrong for the same reason.
+- Change (tools_task_script.h/.cpp, no signature changes): `advance_script_state()`'s `WAIT_ASK` case checks whether the
+  next line is `[IF]`; if so it calls the new `command_wait_ask_for_if()` instead of `command_wait_ask()`. That helper
+  does the usual Enter/keyboard restore, runs `command_if()` (so the block's `[ENDIF]` is checked first), adds the typed
+  text to the instance's history as a user message with no reply (under `history_mutex`, and logged to
+  debug_full_history.txt like any message `send()` adds), and leaves the state at `EXECUTE_IF`.
+  `command_wait_if_response()` is unchanged: it already removed only the question + answer, so the player's words stay.
+  `[ASK]` followed by anything else is unchanged.
+- `haunted_lighthouse.task` (repo copy only): the two branches that carry the story on now start with
+  "React to what the player just did, in one sentence." Header comment explains the pattern.
+- Tested on the scratch `claude` profile: full game with a gibberish retry then the win (the wording and order are
+  right: typed line, reaction, next room); door "I tiptoe inside very slowly, holding my breath" -> logged history
+  shows the words before the question, and the reaction mentions the footsteps/silence; cellar path -> ending 4;
+  `[ASK]` + plain line unchanged (pineapple test).
+- Behaviour change to know about: every `[ASK]` followed by `[IF]` on the new build (both lighthouse scripts in ron's
+  profile) now skips the narrator's reaction unless a branch asks for it. `lighthouse_adventure.task` was NOT updated.
+  ron's copy of `haunted_lighthouse.task` was updated to match the repo copy at the user's request (02-Nov night); the
+  user will test it after installing the new build.
+- Not tested: `[FILE_IN]` fallback followed by `[IF]`.
+- Future idea (user's): pulling parts out of an answer ("did the user enter one or two names? first word = first name,
+  last word = last name"). Needs real variables ([SET], sketched in the disabled code in command_get_command) and an
+  extraction call with its own response_format (a schema with the fields wanted), not yes/no/maybe. Not designed yet.
+- Test-rig lesson, again: `pgrep -f <pattern>` inside the waiting command matches itself, so the wait never ends. The
+  user noticed ("im not seeing anything running"). Poll a marker line in the output file instead.
+
+## 2026-11-02 (late) - the player's words repeated inside the `[IF]` question
+
+- Found in the user's own game on ron: "climb the stairs" at the hall was judged `yes` to "Did the player go down into
+  the cellar?" and the cellar ending played. Replaying that exact conversation (rebuilt from ron's debug log): 6 of 20
+  wrong with the question as it was. The narrator's door reaction in that game also said the staircase was
+  "descending", which probably did not help.
+- What was tried on that exact context (10 runs per input, 6-7 inputs): the current question wording was the best of the
+  rewordings (3-4 wrong in 60-70); "The player was asked ... yes if the trapdoor" and a "judge only the last message"
+  wording were much worse (20-38 wrong). Repeating the player's words inside the question message ahead of the same
+  wording: 0 wrong in 70.
+- Change (command_wait_ask_for_if, tools_task_script.cpp, two lines + a comment): `current_input` becomes
+  `The player's answer: "<typed>"` + newline + the script's question. The words are still also added to the history as
+  their own message, and the question (with the quote) is still removed after it is answered.
+- Verified through the real engine (scratch claude profile): the logged question carries the quote; "climb the stairs"
+  gave `no` both times it was asked; the game reached Ending 2. NOT re-run on ron by me.
+- Test-rig lesson: counting lines in `tmux capture-pane -S -9000` breaks once the pane's history limit (default 2000
+  lines) is exceeded - counts DROP as old lines scroll off, so "wait until count > N" times out in the third game of a
+  session. Use a marker file/counter or a fresh session per game.
+- Still model-dependent: the model is wrong sometimes. If a short answer is judged wrongly again, the next steps would
+  be asking the model to choose between the two named options instead of yes/no, or a keyword pre-check. Not built.

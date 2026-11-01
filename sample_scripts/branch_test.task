@@ -1,0 +1,20 @@
+NAME: branch test
+PURPOSE: Answer questions briefly and honestly.
+DIRECTORY: branch_test
+---
+[PRINT]Starting branch test.
+[IF]Is the sky blue on a clear day?
+[PRINT]The model said yes.
+[ELSE]
+[PRINT]The model said no.
+[MAYBE]
+[PRINT]The model wasn't sure.
+[ENDIF]
+[IF]Is Pluto a planet? Answer maybe if experts disagree.
+[PRINT]The model said yes.
+[ELSE]
+[PRINT]The model said no.
+[MAYBE]
+[PRINT]The model wasn't sure.
+[ENDIF]
+[PRINT]Branch test complete.

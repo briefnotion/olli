@@ -222,6 +222,10 @@ fix, `TODO.md`) - an `enum` field (`"yes"`/`"no"`/`"maybe"`) instead of a
 plain boolean, so the model reports genuine uncertainty as a real answer
 rather than being forced to pick a side.
 
+**Built 2026-11-01** as `[IF]<question>` / `[ELSE]` / `[MAYBE]` / `[ENDIF]` - see
+`AUTOMATIONS.md` and the 2026-11-01 entry in `TODO.md`. The paragraph below is the
+original note from before it was designed.
+
 Not designed further yet - parked until ready to work through it
 properly (parser changes to `TOOL_TASK_RUNNER::handle_tool()`/
 `tools_task_script.cpp`, how nesting works, what happens to a call

@@ -37,6 +37,13 @@ enum class SCRIPT_STATE
     // (tools.cpp), which this file deliberately has no access to.
     WAIT_TOOL_RESULT,
 
+    // [IF]<question> - EXECUTE_IF sends the question the way EXECUTE_COMMAND
+    // sends a line, except asking for a yes/no/maybe answer
+    // (YES_NO_MAYBE_FORMAT, olla.h). WAIT_IF_RESPONSE waits for it, then
+    // jumps i to whichever branch matches the answer.
+    EXECUTE_IF,
+    WAIT_IF_RESPONSE,
+
     DONE
 };
 
@@ -89,7 +96,62 @@ void command_file_append(size_t& i, ollama_system& instance, const std::string& 
 // duration.
 void command_keyboard_input(size_t& i, COMMS& instance_comms, const std::string& command);
 void command_tts_output(size_t& i, COMMS& instance_comms, const std::string& command);
+// [ECHO_INPUT:on/off] - same shape as the two above. Off hides the
+// "INPUT: <line>" echo (and the dashed line above it) of every line sent to the
+// model, [IF] questions included, so the player sees only the model's reply.
+// See COMMS::ENABLE_ECHO_INPUT (comms.h).
+void command_echo_input(size_t& i, COMMS& instance_comms, const std::string& command);
 void command_plain(SCRIPT_STATE& state, std::string& current_input, const std::string& command);
+
+// [END] - finish the script right here. Works anywhere, including inside an
+// [IF] branch, so an ending doesn't have to be the last thing in its block.
+// The script's normal wrap-up (held tool results, the report to the main chat)
+// still runs afterwards, exactly as if it had run out of lines.
+void command_end(SCRIPT_STATE& state);
+
+// [SUB:name] ... [ENDSUB], [GOSUB:name], [RETURN] - subroutines. A sub is a
+// block of lines that only runs when something calls it; when the main flow
+// falls into a [SUB] it skips straight to after the [ENDSUB]. [GOSUB] jumps to
+// the line after the matching [SUB] and remembers where to come back to;
+// [ENDSUB] (or an early [RETURN]) goes back. Subs can call other subs, and
+// themselves (that is how a room asks its question again); they can't take
+// arguments, can't be defined inside another sub, and a call chain deeper than
+// MAX_GOSUB_DEPTH (tools_task_script.cpp) stops the script with an error.
+//
+// call_stack holds, for each call still open, the line index to return to. It
+// is a plain local in TOOL_TASK_RUNNER::handle_tool() (tools.cpp), threaded
+// through advance_script_state() the same way i and current_input are - a
+// static here would be shared by two scripts running at once.
+void command_sub(SCRIPT_STATE& state, size_t& i, const TASK_SIMPLE& found_task, const std::vector<size_t>& call_stack, COMMS& instance_comms);
+void command_gosub(SCRIPT_STATE& state, size_t& i, const TASK_SIMPLE& found_task, std::vector<size_t>& call_stack, COMMS& instance_comms, const std::string& command);
+void command_return(SCRIPT_STATE& state, size_t& i, std::vector<size_t>& call_stack, COMMS& instance_comms, const std::string& command);
+
+// [IF]<question> ... [ELSE] ... [MAYBE] ... [ENDIF] - a three-way branch on
+// the model's yes/no/maybe answer. The lines after [IF] are the yes branch;
+// [ELSE] is no and [MAYBE] is maybe; both are optional and can come in either
+// order. A branch that isn't there means "skip to [ENDIF]". [IF]s can nest.
+//
+// command_if() checks there's an [ENDIF] for this [IF] before asking
+// anything (no point spending an LLM call on a script that can't finish),
+// then hands the question to EXECUTE_IF. command_skip_to_endif() is what
+// [ELSE]/[MAYBE] do when a script reaches them by running the branch above
+// them: that branch is done, so skip the rest of the block. [ENDIF] itself
+// does nothing but move on.
+void command_if(SCRIPT_STATE& state, size_t& i, std::string& current_input, const TASK_SIMPLE& found_task, COMMS& instance_comms, const std::string& command);
+void command_skip_to_endif(SCRIPT_STATE& state, size_t& i, const TASK_SIMPLE& found_task, COMMS& instance_comms);
+
+// An [IF] placed straight after an [ASK] (or after a [FILE_IN] that fell back
+// to asking) judges what the player typed, instead of what the narrator said
+// about it. So in that case WAIT_ASK does not send the typed line to the model
+// as its own turn: this puts the player's words into the model's history as a
+// message, without asking for a reply, and starts the [IF] question right
+// behind it. The narrator therefore knows what the player said (the words
+// stay in history; only the question and its one-word answer are taken back
+// out afterwards, command_wait_if_response()) but has not reacted to it yet -
+// a plain line in the chosen branch ("React to what the player just did.")
+// decides where it does. Called by advance_script_state()'s WAIT_ASK case, only
+// when the next line is an [IF]; i is still on the [ASK] line.
+void command_wait_ask_for_if(SCRIPT_STATE& state, size_t& i, std::string& current_input, const TASK_SIMPLE& found_task, ollama_system& instance, COMMS& instance_comms, bool& keyboard_was_enabled);
 
 // One function per SCRIPT_STATE (tools_task_script.cpp) - each takes only
 // the references it actually touches, not a uniform signature, so what a
@@ -97,11 +159,14 @@ void command_plain(SCRIPT_STATE& state, std::string& current_input, const std::s
 // Free functions, not TOOL_TASK_RUNNER methods, deliberately: none of them
 // can reach chat/comms/tc_id/io_worker/task_manager/OLLI_DIRECTORY even by
 // accident, only exactly what's passed in below.
-void command_get_command(SCRIPT_STATE& state, size_t& i, std::string& current_input, const TASK_SIMPLE& found_task, ollama_system& instance, COMMS& instance_comms, const std::filesystem::path& files_dir, bool& keyboard_was_enabled);
+void command_get_command(SCRIPT_STATE& state, size_t& i, std::string& current_input, const TASK_SIMPLE& found_task, ollama_system& instance, COMMS& instance_comms, const std::filesystem::path& files_dir, bool& keyboard_was_enabled, std::vector<size_t>& call_stack);
 void command_wait_enter(SCRIPT_STATE& state, size_t& i, COMMS& instance_comms, bool& keyboard_was_enabled);
 void command_wait_ask(SCRIPT_STATE& state, std::string& current_input, COMMS& instance_comms, bool& keyboard_was_enabled);
 void command_execute_command(SCRIPT_STATE& state, const std::string& current_input, ollama_system& instance, COMMS& instance_comms, TOOL_WORKER_CLASS* tool_worker);
 void command_wait_response(SCRIPT_STATE& state, size_t& i, ollama_system& instance);
+// WAIT_IF_RESPONSE - when the answer arrives, show it and set i to the start
+// of the matching branch.
+void command_wait_if_response(SCRIPT_STATE& state, size_t& i, ollama_system& instance, const TASK_SIMPLE& found_task, COMMS& instance_comms);
 
 // Drives the state machine one tick - called once per iteration of
 // TOOL_TASK_RUNNER::handle_tool()'s while loop (tools.cpp). Just dispatch -
@@ -112,6 +177,6 @@ void command_wait_response(SCRIPT_STATE& state, size_t& i, ollama_system& instan
 // tool_worker is the caller's own (nullable) - only EXECUTE_COMMAND
 // actually needs it (forwarded to command_execute_command()'s own send()
 // call), but every state gets it passed down for a uniform signature.
-void advance_script_state(SCRIPT_STATE& state, size_t& i, std::string& current_input, const TASK_SIMPLE& found_task, ollama_system& instance, COMMS& instance_comms, TOOL_WORKER_CLASS* tool_worker, const std::filesystem::path& files_dir, bool& keyboard_was_enabled);
+void advance_script_state(SCRIPT_STATE& state, size_t& i, std::string& current_input, const TASK_SIMPLE& found_task, ollama_system& instance, COMMS& instance_comms, TOOL_WORKER_CLASS* tool_worker, const std::filesystem::path& files_dir, bool& keyboard_was_enabled, std::vector<size_t>& call_stack);
 
 #endif

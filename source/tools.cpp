@@ -726,6 +726,10 @@ void TOOL_TASK_RUNNER::handle_tool(IO_WORKER_CLASS& io_worker, ollama_system& ch
         // whichever command first uses it.
         bool keyboard_was_enabled = true;
 
+        // Return line for each [GOSUB] still open - see command_gosub()
+        // (tools_task_script.h). Empty whenever the script is not inside a sub.
+        std::vector<size_t> call_stack;
+
         // One flat loop drives the whole script - same shape as the main
         // chat's own while loop (main.cpp), just with the state machine
         // below standing in for "type a line". instance.process() and
@@ -861,7 +865,7 @@ void TOOL_TASK_RUNNER::handle_tool(IO_WORKER_CLASS& io_worker, ollama_system& ch
             }
             else
             {
-                advance_script_state(state, i, current_input, found_task, instance, instance_comms, tool_worker, files_dir, keyboard_was_enabled);
+                advance_script_state(state, i, current_input, found_task, instance, instance_comms, tool_worker, files_dir, keyboard_was_enabled, call_stack);
             }
 
             io_worker.exchange(instance_comms, tool_worker);

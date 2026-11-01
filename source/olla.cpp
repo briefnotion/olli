@@ -317,6 +317,16 @@ static Confidence summarize_confidence(const std::vector<TokenProb>& tokens)
     return c;
 }
 
+// Asks for a reply shaped like {"answer":"yes"}, "no" or "maybe" - send()
+// turns it into last_received.answer (olla.h's YesNoMaybe).
+const json YES_NO_MAYBE_FORMAT = {
+    {"type", "object"},
+    {"properties", {
+        {"answer", {{"type", "string"}, {"enum", json::array({"yes", "no", "maybe"})}}}
+    }},
+    {"required", json::array({"answer"})}
+};
+
 void ollama_system::send(TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const std::string& role, const json& response_format) {
     std::string new_user_input = filter_non_printable(comms.INPUT_FROM_USER.peek());
 
@@ -329,6 +339,7 @@ void ollama_system::send(TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const std
     last_received.response_tokens.clear();
     last_received.thinking_tokens.clear();
     last_received.confidence = Confidence();
+    last_received.answer = YesNoMaybe();
 
     // A real user message (or a background task-runner's next scripted
     // command - also sent with role "user") starts a fresh turn - see
@@ -577,6 +588,19 @@ void ollama_system::send(TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const std
     // every token for anything that wants to look at the answer word itself.
     if (!accumulated_content.empty() && response_format.empty()) {
         last_received.confidence = summarize_confidence(last_received.response_tokens);
+    }
+
+    // Only for a call that asked for YES_NO_MAYBE_FORMAT. Anything we can't
+    // read stays at 0 (maybe) - and is noted in the debug log, so a broken
+    // reply shows up there instead of quietly becoming a "maybe".
+    if (response_format == YES_NO_MAYBE_FORMAT) {
+        try {
+            std::string word = json::parse(accumulated_content).at("answer").get<std::string>();
+            if (word == "yes") last_received.answer.value = 1;
+            else if (word == "no") last_received.answer.value = -1;
+        } catch (const json::exception& e) {
+            DEBUG_LOG_CLASS::instance().log_event(debug_label, std::string("yes/no/maybe reply wasn't readable, treating as maybe: ") + e.what());
+        }
     }
 
     // No longer requires tool_calls to be empty - a response that includes

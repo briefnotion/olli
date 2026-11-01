@@ -1,0 +1,65 @@
+NAME: lighthouse adventure
+PURPOSE: You are the narrator of a short, spooky text adventure at an abandoned lighthouse during a storm. Speak to the player as "you". Keep every reply to two or three sentences. Never use tools, and never end the story unless you are told to.
+DIRECTORY: lighthouse_adventure
+---
+# A branching text adventure - three choices deep, seven endings.
+#
+# How it works: a plain line is sent to the narrator (the model), [ASK] takes
+# what the player types and sends that to the narrator too, and [IF] then asks
+# the model a yes/no/maybe question about what the player just did. Only the
+# branch that matches runs. The story carries on INSIDE the branch the player
+# earns; the other branches are endings (there is no way to end a script
+# early, so an ending is simply the last thing in its branch).
+#
+# Every question spells out what yes, no and maybe each mean. That is on
+# purpose, and it was tested: a bare "Did the player ...?" answered yes to nonsense,
+# and "... Answer maybe only if you cannot tell." made the model say maybe to a
+# player who had plainly walked through the door. Naming a few examples for "no"
+# was needed too - without "staying outside, or waiting" it called waiting
+# outside a maybe. Maybe is kept for a message that is off-topic or nonsense,
+# and gets its own odd little ending. A small model still misjudges the odd
+# answer now and then (for example "go back outside" at the stairs), which is
+# why the player is asked a narrow either/or question at each step.
+[PRINT]
+[PRINT]=== THE LIGHTHOUSE ===
+Set the scene in two sentences: you are standing on a rocky shore in a violent storm, facing the heavy door of an abandoned lighthouse. The door is slightly open and a faint light flickers inside.
+[ASK]What do you do?
+[IF]Answer yes if the player went inside the lighthouse. Answer no if the player chose not to go inside, for example by leaving, staying outside, or waiting. Answer maybe only if the player's message was unrelated or made no sense.
+Describe the entrance hall in two sentences: dust, a spiral staircase climbing into the dark, a trapdoor in the floor leading down to a cellar, and an old lantern on a hook by the stairs.
+[ASK]Take the stairs up, or the trapdoor down to the cellar?
+[IF]Answer yes if the player went up the stairs. Answer no if the player went to the cellar or back outside instead. Answer maybe only if the player's message was unrelated or made no sense.
+Describe the top of the tower in two sentences: the great lamp stands cold and dark, a brass lever beside it, and a faint voice, the ghost of the old keeper, whispers "will you light it?"
+[ASK]What do you do?
+[IF]Answer yes if the player lit the lamp. Answer no if the player chose not to light the lamp, for example by refusing, leaving, ignoring the ghost, or doing something else. Answer maybe only if the player's message was unrelated or made no sense.
+Narrate a triumphant ending in three sentences: the great lamp blazes, the ghost of the keeper smiles and fades, and a ship far out at sea steers safely clear of the rocks.
+[PRINT]
+[PRINT]*** ENDING 1 of 7: THE KEEPER'S RELIEF ***
+[ELSE]
+Narrate a sad ending in three sentences: the lamp stays dark, the keeper's ghost sighs and drifts away, and a ship's horn sounds far out on the rocks.
+[PRINT]
+[PRINT]*** ENDING 2 of 7: THE DARK LAMP ***
+[MAYBE]
+Narrate a strange ending in three sentences: the keeper's ghost waits patiently while you hesitate, until the storm outside quietly stops and dawn comes.
+[PRINT]
+[PRINT]*** ENDING 3 of 7: THE LONG WAIT ***
+[ENDIF]
+[ELSE]
+Narrate a dark ending in three sentences: you did not climb the stairs, and whatever you chose instead, the shadows of the hall close around you and the lighthouse keeps its secrets.
+[PRINT]
+[PRINT]*** ENDING 4 of 7: SWALLOWED BY THE DARK ***
+[MAYBE]
+Narrate a comic ending in three sentences: you hesitate so long that the lantern gutters out, and you spend the night sitting in the entrance hall until the storm passes.
+[PRINT]
+[PRINT]*** ENDING 5 of 7: A VERY LONG NIGHT ***
+[ENDIF]
+[ELSE]
+Narrate a quiet ending in three sentences: you turn away from the lighthouse, the storm swallows its light, and by morning there is nothing on the rocks but the sea.
+[PRINT]
+[PRINT]*** ENDING 6 of 7: THE ROAD NOT TAKEN ***
+[MAYBE]
+Narrate a quiet ending in three sentences: the wind shoves you off your feet and rolls you down the beach, and by the time you stand up the lighthouse light has gone out.
+[PRINT]
+[PRINT]*** ENDING 7 of 7: BLOWN AWAY ***
+[ENDIF]
+[PRINT]
+[PRINT]=== THE END ===

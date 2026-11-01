@@ -293,6 +293,15 @@ class COMMS
         // --------------------------------------------------------------
         bool ENABLE_KEYBOARD_INPUT = true;
         bool ENABLE_TTS_OUTPUT = true;
+
+        // Whether a running .task script shows the "INPUT: <line>" echo of each
+        // line it sends to the model. Checked where that echo is produced
+        // (command_execute_command(), tools_task_script.cpp), nowhere else -
+        // the line itself is not a user message: INPUT_FROM_USER only hands it
+        // to send(), which clears it, so this echo is the only way a script's
+        // line ever reaches the screen (or the speech). Set from a script with
+        // [ECHO_INPUT:on/off]. Default true: scripts echo, as they always did.
+        bool ENABLE_ECHO_INPUT = true;
         // --------------------------------------------------------------
 
         // --------------------------------------------------------------
@@ -368,6 +377,7 @@ class COMMS
             EXIT_REQUESTED = other.EXIT_REQUESTED;
             ENABLE_KEYBOARD_INPUT = other.ENABLE_KEYBOARD_INPUT;
             ENABLE_TTS_OUTPUT = other.ENABLE_TTS_OUTPUT;
+            ENABLE_ECHO_INPUT = other.ENABLE_ECHO_INPUT;
             TOOL_ATTACHMENTS = other.TOOL_ATTACHMENTS;
             return *this;
         }

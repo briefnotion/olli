@@ -153,6 +153,20 @@ struct Message {
     }
 };
 
+// A three-way answer: yes, no, or maybe. Filled in by send() (olla.cpp) only
+// when it was called with YES_NO_MAYBE_FORMAT as its response_format; for any
+// other call it stays 0. Read it as:
+//     if (last_received.answer.value == 1) { /* yes */ }
+//     else if (last_received.answer.value == -1) { /* no */ }
+//     else { /* maybe */ }
+struct YesNoMaybe {
+    int value = 0; // 1 = yes, -1 = no, 0 = maybe (also what you get if the reply couldn't be read)
+};
+
+// The response_format that asks for one of those three words - pass it to
+// send() and last_received.answer is filled in. Defined in olla.cpp.
+extern const json YES_NO_MAYBE_FORMAT;
+
 struct ChatResult {
     std::string response;
     std::string thinking;
@@ -168,6 +182,9 @@ struct ChatResult {
     // Summary of response_tokens - what send() copies onto the assistant
     // Message it pushes to history.
     Confidence confidence;
+
+    // See YesNoMaybe above. Not saved anywhere, reset at the start of every send().
+    YesNoMaybe answer;
 };
 
 /**

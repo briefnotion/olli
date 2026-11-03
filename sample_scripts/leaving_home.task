@@ -1,0 +1,7 @@
+NAME: leaving home
+PURPOSE: Runs a small set of commands when the user leaves home. 
+DIRECTORY: leaving_home
+---
+# Needs a Hue scene named "away" (saved with the hue tool's scene commands).
+[TTS_OUTPUT:off]
+With the tool hue, load the scene away.

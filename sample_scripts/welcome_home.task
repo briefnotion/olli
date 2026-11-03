@@ -1,0 +1,12 @@
+NAME: welcome home
+PURPOSE: Runs a small set of commands when the user gets home. 
+DIRECTORY: welcome_home
+---
+# Needs a Hue scene named "home" (saved with the hue tool's scene commands), and
+# the wellness_check.task sample next to it. Meant to be started when the
+# presence tool says you have arrived, or just by asking for it.
+[TTS_OUTPUT:off]
+With the tool hue, load the scene home.
+
+# Then check in, if the subcon has anything to say. See wellness_check.task.
+[RUN:wellness check]

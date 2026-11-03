@@ -235,7 +235,7 @@ If `FILE_IN` can't find/read `name`, it doesn't abort the script - it falls
 back to the same pause-and-prompt behavior as `[ASK]`, so you can paste the
 content in by hand and the script continues from there.
 
-Sample scripts (`system test`, `process resume`, `print test`, `branch test`, `lighthouse adventure`, `haunted lighthouse`, `wellness check`, and an
+Sample scripts (`system test`, `process resume`, `print test`, `branch test`, `lighthouse adventure`, `haunted lighthouse`, `wellness check`, `welcome home`, `leaving home`, and an
 original creative one, `fitter status`) live under `sample_scripts/` in this
 repo - copy whichever ones you want into a profile's own `scripts/`
 directory to use them.

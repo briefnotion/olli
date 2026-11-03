@@ -1,14 +1,19 @@
 NAME: system test
 PURPOSE: This is a series of a few simple questions to check responses.
 DIRECTORY: system_test
+DELAY_TOOL_RETURNS: true
 ---
+Turn off thinking mode.
+
 # Keyboard off for the whole run - [ASK] and [PAUSE] below each silently
 # turn it on for themselves and restore this setting when done, so nothing
 # else in the script needs to think about it.
 [KEYBOARD_INPUT:off]
+
 # TTS off too, just for this first section - unlike keyboard, nothing
 # auto-restores this one, so it's turned back on explicitly below.
 [TTS_OUTPUT:off]
+
 turn off all the lights.
 Ask the user for the name of a dog.
 [ASK]What is a name for a dog?
@@ -17,14 +22,30 @@ what was the previous word?
 [TTS_OUTPUT:on]
 # Timer, lights, and basic facts check
 Set a timer for 30 seconds and when the timer goes off, blink any light.
+
 turn all the lights back on.
+
 show the numbers 1 through 10
+
 what time is it?
+[WAIT_FOR_RESULT]
+
 what is the opposite of up?
 what is 2 + 2?
+
+# Branch on the model's own answer: [IF] asks a yes/no/maybe question about
+# what it just said, and only the matching block below runs.
+[IF]Was your previous answer to "what is 2 + 2?" the number 4?
+[PRINT]CHECK PASSED: the math answer was correct.
+[ELSE]
+[PRINT]CHECK FAILED: the math answer was wrong.
+[MAYBE]
+[PRINT]CHECK UNSURE: could not tell whether the math answer was right.
+[ENDIF]
 
 # Web search, then wrap up
 what is the weather like in New York City right now?
 how many eggs are in a dozon eggs.
 [PAUSE]wait
+[TTS_OUTPUT:off]
 Announce the system test is complete.

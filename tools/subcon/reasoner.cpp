@@ -297,6 +297,17 @@ SUBCON_PULL_RESULT SUBCON_REASONER::pull_notes()
     return out;
 }
 
+size_t SUBCON_REASONER::count_notes()
+{
+    int expired = subcon_expire_old_notes(queue, unix_now());
+    if (expired > 0)
+    {
+        log("dropped " + std::to_string(expired) + " note(s) that went unheard too long");
+        save_queue();
+    }
+    return subcon_count_pending(queue);
+}
+
 // ---------------------------------------------------------------------
 // Prompts (ported unchanged from the old subcon_worker.cpp - see there for
 // the dated findings behind each wording)

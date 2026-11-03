@@ -1,6 +1,7 @@
 #ifndef tools_task_script_h
 #define tools_task_script_h
 
+#include <chrono>
 #include <cstddef>
 #include <filesystem>
 #include <memory>
@@ -44,6 +45,12 @@ enum class SCRIPT_STATE
     EXECUTE_IF,
     WAIT_IF_RESPONSE,
 
+    // [RUN:name] - run another task to completion, then carry on. Like
+    // WAIT_TOOL_RESULT, advance_script_state()'s own case for this is a no-op:
+    // starting a task needs TOOL_TASK_RUNNER::handle_tool() itself (tools.cpp),
+    // which this file has no access to.
+    RUN_TASK,
+
     DONE
 };
 
@@ -75,7 +82,13 @@ std::string sanitize_path_segment(const std::string& raw);
 // script only has to manage this itself for stretches where NONE of these
 // commands run, not around every single one of them.
 void command_pause(SCRIPT_STATE& state, COMMS& instance_comms, bool& keyboard_was_enabled);
-void command_ask(SCRIPT_STATE& state, COMMS& instance_comms, const std::string& command, bool& keyboard_was_enabled);
+// [ASK]<text>, or [ASK:seconds]<text> / [ASK:seconds,sub_name]<text> - the
+// second and third forms give up waiting after that many seconds. ask_deadline
+// is where that time is kept between ticks (a plain local in TOOL_TASK_RUNNER::
+// handle_tool(), tools.cpp, like i and call_stack); a default-constructed
+// time_point means "no time limit". What a timeout does is command_ask_timed_out()
+// below.
+void command_ask(SCRIPT_STATE& state, COMMS& instance_comms, const std::string& command, bool& keyboard_was_enabled, std::chrono::steady_clock::time_point& ask_deadline);
 
 // [WAIT_FOR_RESULT] - just the state transition; no keyboard_was_enabled
 // save/restore needed (unlike command_pause/command_ask above), nothing
@@ -83,6 +96,13 @@ void command_ask(SCRIPT_STATE& state, COMMS& instance_comms, const std::string& 
 // for why resolving the wait itself happens outside this file entirely.
 void command_wait_for_result(SCRIPT_STATE& state);
 void command_print(size_t& i, COMMS& instance_comms, const std::string& command);
+
+// [RUN:task name] - just the state transition (and a check that a name was
+// given); the loop in TOOL_TASK_RUNNER::handle_tool() (tools.cpp) does the
+// rest. The named task runs on its own, to the end, and when it is done this
+// script goes on with the next line. A task can [RUN] other tasks, or itself;
+// handle_tool() stops the script with an error when that goes too deep.
+void command_run(SCRIPT_STATE& state, COMMS& instance_comms, const std::string& command);
 void command_file_in(SCRIPT_STATE& state, std::string& current_input, COMMS& instance_comms, const std::string& command, const std::filesystem::path& files_dir, bool& keyboard_was_enabled);
 void command_file_append(size_t& i, ollama_system& instance, const std::string& command, const std::filesystem::path& files_dir);
 // [KEYBOARD_INPUT:on/off] / [TTS_OUTPUT:on/off] - the general boolean-toggle
@@ -153,13 +173,21 @@ void command_skip_to_endif(SCRIPT_STATE& state, size_t& i, const TASK_SIMPLE& fo
 // when the next line is an [IF]; i is still on the [ASK] line.
 void command_wait_ask_for_if(SCRIPT_STATE& state, size_t& i, std::string& current_input, const TASK_SIMPLE& found_task, ollama_system& instance, COMMS& instance_comms, bool& keyboard_was_enabled);
 
+// Called every tick while WAIT_ASK is waiting (advance_script_state()). Does
+// nothing unless the [ASK:...] line has a time limit, no answer has come in,
+// and the limit has passed. Then the wait is over: with no sub name the script
+// ends; with one, it is called like [GOSUB:name], and when the sub returns the
+// script carries on after the whole [ASK] block - past a following
+// [IF]...[ENDIF] too, since there is no answer for it to judge.
+void command_ask_timed_out(SCRIPT_STATE& state, size_t& i, const TASK_SIMPLE& found_task, COMMS& instance_comms, bool& keyboard_was_enabled, std::vector<size_t>& call_stack, std::chrono::steady_clock::time_point& ask_deadline);
+
 // One function per SCRIPT_STATE (tools_task_script.cpp) - each takes only
 // the references it actually touches, not a uniform signature, so what a
 // given command can and can't reach is visible right here at a glance.
 // Free functions, not TOOL_TASK_RUNNER methods, deliberately: none of them
 // can reach chat/comms/tc_id/io_worker/task_manager/OLLI_DIRECTORY even by
 // accident, only exactly what's passed in below.
-void command_get_command(SCRIPT_STATE& state, size_t& i, std::string& current_input, const TASK_SIMPLE& found_task, ollama_system& instance, COMMS& instance_comms, const std::filesystem::path& files_dir, bool& keyboard_was_enabled, std::vector<size_t>& call_stack);
+void command_get_command(SCRIPT_STATE& state, size_t& i, std::string& current_input, const TASK_SIMPLE& found_task, ollama_system& instance, COMMS& instance_comms, const std::filesystem::path& files_dir, bool& keyboard_was_enabled, std::vector<size_t>& call_stack, std::chrono::steady_clock::time_point& ask_deadline);
 void command_wait_enter(SCRIPT_STATE& state, size_t& i, COMMS& instance_comms, bool& keyboard_was_enabled);
 void command_wait_ask(SCRIPT_STATE& state, std::string& current_input, COMMS& instance_comms, bool& keyboard_was_enabled);
 void command_execute_command(SCRIPT_STATE& state, const std::string& current_input, ollama_system& instance, COMMS& instance_comms, TOOL_WORKER_CLASS* tool_worker);
@@ -177,6 +205,6 @@ void command_wait_if_response(SCRIPT_STATE& state, size_t& i, ollama_system& ins
 // tool_worker is the caller's own (nullable) - only EXECUTE_COMMAND
 // actually needs it (forwarded to command_execute_command()'s own send()
 // call), but every state gets it passed down for a uniform signature.
-void advance_script_state(SCRIPT_STATE& state, size_t& i, std::string& current_input, const TASK_SIMPLE& found_task, ollama_system& instance, COMMS& instance_comms, TOOL_WORKER_CLASS* tool_worker, const std::filesystem::path& files_dir, bool& keyboard_was_enabled, std::vector<size_t>& call_stack);
+void advance_script_state(SCRIPT_STATE& state, size_t& i, std::string& current_input, const TASK_SIMPLE& found_task, ollama_system& instance, COMMS& instance_comms, TOOL_WORKER_CLASS* tool_worker, const std::filesystem::path& files_dir, bool& keyboard_was_enabled, std::vector<size_t>& call_stack, std::chrono::steady_clock::time_point& ask_deadline);
 
 #endif

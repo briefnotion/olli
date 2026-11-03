@@ -22,11 +22,15 @@ it is now its own program, and it is both a **remote tool of olli** and a
 ```
 
 - **As a tool of olli**: one `OLLI_LINK` to olli's port (47601), registering
-  one tool, `get_subcon_notes`. The answer is built in code from the persisted
+  `get_subcon_notes`. The answer is built in code from the persisted
   queue (`reasoner.cpp`, `pull_notes()`) - no model is ever used for delivery,
   so olli is never kept waiting. Everything included is marked delivered. The
   result carries a `special_instruction` so olli relays the facts faithfully in
   its own voice (the same wording idea as the old announcement).
+  A second tool, `count_subcon_notes`, answers only how many notes are waiting
+  (`count_notes()`): the same number a pull would hand over, nothing marked
+  delivered. Scripts use it to decide whether to bother the user at all (the
+  `wellness check` task).
 - **As a server for tools**: listens on 127.0.0.1:47603 and speaks olli's own
   protocol ([`../PROTOCOL.md`](../PROTOCOL.md), "Two servers"). The other
   tools register their tools with it, and subcon calls them during think

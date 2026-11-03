@@ -104,6 +104,13 @@ class SUBCON_REASONER {
         // model or the worker - and marks what it returns as delivered.
         SUBCON_PULL_RESULT pull_notes();
 
+        // What a count_subcon_notes call answers with: how many notes a
+        // pull_notes() made right now would hand over. Counts only - nothing is
+        // marked delivered, so a count never uses a note up. Drops notes that
+        // went unheard too long first, exactly as pull_notes() does, so the
+        // number is the same one a pull would then give.
+        size_t count_notes();
+
         // For the display.
         std::string stage_description() const;
         std::string presence() const { return presence_value; }

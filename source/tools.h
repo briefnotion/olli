@@ -235,6 +235,11 @@ class TOOL_TASK_RUNNER : public TOOL_BASE
 
         std::filesystem::path OLLI_DIRECTORY;
 
+        // How many tasks are running inside one another right now, through
+        // [RUN:name] (tools_task_script.h). Nested runs happen one inside the
+        // other on the same thread, so a plain int is enough.
+        int run_depth = 0;
+
     public:
         void configure(ollama_system& chat) override;
         void register_tool(ollama_system& chat, json& tools) override;

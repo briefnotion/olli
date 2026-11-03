@@ -43,12 +43,83 @@ void command_wait_for_result(SCRIPT_STATE& state)
     state = SCRIPT_STATE::WAIT_TOOL_RESULT;
 }
 
-void command_ask(SCRIPT_STATE& state, COMMS& instance_comms, const std::string& command, bool& keyboard_was_enabled)
+static void stop_script(SCRIPT_STATE& state, COMMS& instance_comms, const std::string& message);
+
+// Splits an [ASK] line: "[ASK]text", "[ASK:30]text" or "[ASK:30,name]text".
+// seconds is 0 when there is no time limit, sub_name is empty when no sub was
+// named, text_start is where the request text begins. False for a header that
+// is not a positive number of seconds, optionally followed by ",name".
+static bool parse_ask(const std::string& command, double& seconds, std::string& sub_name, size_t& text_start)
 {
+    seconds = 0;
+    sub_name.clear();
+    if (starts_with(command, "[ASK]"))
+    {
+        text_start = 5;
+        return true;
+    }
+
+    // "[ASK:" is 5 chars.
+    size_t close = command.find(']', 5);
+    if (close == std::string::npos)
+    {
+        return false;
+    }
+    std::string header = command.substr(5, close - 5);
+    size_t comma = header.find(',');
+    std::string seconds_text = header.substr(0, comma);
+    if (comma != std::string::npos)
+    {
+        sub_name = header.substr(comma + 1);
+    }
+
+    try
+    {
+        size_t used = 0;
+        seconds = std::stod(seconds_text, &used);
+        if (used != seconds_text.size()) return false;
+    }
+    catch (const std::exception&)
+    {
+        return false;
+    }
+    if (seconds <= 0) return false;
+
+    text_start = close + 1;
+    return true;
+}
+
+void command_ask(SCRIPT_STATE& state, COMMS& instance_comms, const std::string& command, bool& keyboard_was_enabled, std::chrono::steady_clock::time_point& ask_deadline)
+{
+    double seconds;
+    std::string sub_name;
+    size_t text_start;
+    if (!parse_ask(command, seconds, sub_name, text_start))
+    {
+        stop_script(state, instance_comms, "[ASK:seconds,name] needs a number of seconds above 0: " + command);
+        return;
+    }
+
+    if (seconds > 0)
+    {
+        ask_deadline = std::chrono::steady_clock::now() + std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(seconds));
+    }
+
     keyboard_was_enabled = instance_comms.ENABLE_KEYBOARD_INPUT;
     instance_comms.ENABLE_KEYBOARD_INPUT = true;
-    instance_comms.INPUT_FROM_LLM.set("--------------------------\nREQUEST: " + command.substr(5) + "\n");
+    instance_comms.INPUT_FROM_LLM.set("--------------------------\nREQUEST: " + command.substr(text_start) + "\n");
     state = SCRIPT_STATE::WAIT_ASK;
+}
+
+void command_run(SCRIPT_STATE& state, COMMS& instance_comms, const std::string& command)
+{
+    // "[RUN:" is 5 chars; the trailing "]" is 1 more.
+    if (command.size() <= 6)
+    {
+        stop_script(state, instance_comms, "[RUN:] needs a task name: " + command);
+        return;
+    }
+    state = SCRIPT_STATE::RUN_TASK;
 }
 
 void command_print(size_t& i, COMMS& instance_comms, const std::string& command)
@@ -310,9 +381,62 @@ void command_return(SCRIPT_STATE& state, size_t& i, std::vector<size_t>& call_st
     call_stack.pop_back();
 }
 
+void command_ask_timed_out(SCRIPT_STATE& state, size_t& i, const TASK_SIMPLE& found_task, COMMS& instance_comms, bool& keyboard_was_enabled, std::vector<size_t>& call_stack, std::chrono::steady_clock::time_point& ask_deadline)
+{
+    const std::chrono::steady_clock::time_point no_limit;
+    if (ask_deadline == no_limit || instance_comms.ENTER_PRESSED || std::chrono::steady_clock::now() < ask_deadline)
+    {
+        return;
+    }
+    ask_deadline = no_limit;
+    instance_comms.ENABLE_KEYBOARD_INPUT = keyboard_was_enabled;
+
+    // i is still on the [ASK] line, which command_ask() already checked.
+    double seconds;
+    std::string sub_name;
+    size_t text_start;
+    parse_ask(found_task.COMMANDS[i], seconds, sub_name, text_start);
+
+    if (sub_name.empty())
+    {
+        command_end(state);
+        return;
+    }
+
+    // Where to come back to: the line after the [ASK], or after the whole
+    // [IF] block if one follows it.
+    size_t resume = i + 1;
+    if (resume < found_task.COMMANDS.size() && starts_with(found_task.COMMANDS[resume], "[IF]"))
+    {
+        size_t endif = find_endif(found_task.COMMANDS, resume + 1);
+        if (endif >= found_task.COMMANDS.size())
+        {
+            stop_script(state, instance_comms, "[IF] has no [ENDIF]: " + found_task.COMMANDS[resume]);
+            return;
+        }
+        resume = endif + 1;
+    }
+
+    size_t sub = find_sub(found_task.COMMANDS, sub_name);
+    if (sub >= found_task.COMMANDS.size())
+    {
+        stop_script(state, instance_comms, "there is no [SUB:" + sub_name + "] for " + found_task.COMMANDS[i]);
+        return;
+    }
+    if (call_stack.size() >= MAX_GOSUB_DEPTH)
+    {
+        stop_script(state, instance_comms, "more than " + std::to_string(MAX_GOSUB_DEPTH) + " calls open at once (a sub calling itself forever?): " + found_task.COMMANDS[i]);
+        return;
+    }
+
+    call_stack.push_back(resume);
+    i = sub + 1;
+    state = SCRIPT_STATE::GET_COMMAND;
+}
+
 // Prefix-matching dispatch only - each [MARKER]'s actual logic lives in its
 // own command_*() function above.
-void command_get_command(SCRIPT_STATE& state, size_t& i, std::string& current_input, const TASK_SIMPLE& found_task, ollama_system& instance, COMMS& instance_comms, const std::filesystem::path& files_dir, bool& keyboard_was_enabled, std::vector<size_t>& call_stack)
+void command_get_command(SCRIPT_STATE& state, size_t& i, std::string& current_input, const TASK_SIMPLE& found_task, ollama_system& instance, COMMS& instance_comms, const std::filesystem::path& files_dir, bool& keyboard_was_enabled, std::vector<size_t>& call_stack, std::chrono::steady_clock::time_point& ask_deadline)
 {
     if (i >= found_task.COMMANDS.size())
     {
@@ -326,9 +450,13 @@ void command_get_command(SCRIPT_STATE& state, size_t& i, std::string& current_in
     {
         command_pause(state, instance_comms, keyboard_was_enabled);
     }
-    else if (starts_with(command, "[ASK]"))
+    else if (starts_with(command, "[ASK]") || starts_with(command, "[ASK:"))
     {
-        command_ask(state, instance_comms, command, keyboard_was_enabled);
+        command_ask(state, instance_comms, command, keyboard_was_enabled, ask_deadline);
+    }
+    else if (starts_with(command, "[RUN:") && command.back() == ']')
+    {
+        command_run(state, instance_comms, command);
     }
     else if (starts_with(command, "[WAIT_FOR_RESULT]"))
     {
@@ -708,12 +836,12 @@ void command_wait_if_response(SCRIPT_STATE& state, size_t& i, ollama_system& ins
     state = SCRIPT_STATE::GET_COMMAND;
 }
 
-void advance_script_state(SCRIPT_STATE& state, size_t& i, std::string& current_input, const TASK_SIMPLE& found_task, ollama_system& instance, COMMS& instance_comms, TOOL_WORKER_CLASS* tool_worker, const std::filesystem::path& files_dir, bool& keyboard_was_enabled, std::vector<size_t>& call_stack)
+void advance_script_state(SCRIPT_STATE& state, size_t& i, std::string& current_input, const TASK_SIMPLE& found_task, ollama_system& instance, COMMS& instance_comms, TOOL_WORKER_CLASS* tool_worker, const std::filesystem::path& files_dir, bool& keyboard_was_enabled, std::vector<size_t>& call_stack, std::chrono::steady_clock::time_point& ask_deadline)
 {
     switch (state)
     {
         case SCRIPT_STATE::GET_COMMAND:
-            command_get_command(state, i, current_input, found_task, instance, instance_comms, files_dir, keyboard_was_enabled, call_stack);
+            command_get_command(state, i, current_input, found_task, instance, instance_comms, files_dir, keyboard_was_enabled, call_stack, ask_deadline);
             break;
 
         case SCRIPT_STATE::WAIT_ENTER:
@@ -721,6 +849,13 @@ void advance_script_state(SCRIPT_STATE& state, size_t& i, std::string& current_i
             break;
 
         case SCRIPT_STATE::WAIT_ASK:
+            // An [ASK:seconds...] may give up instead of waiting.
+            command_ask_timed_out(state, i, found_task, instance_comms, keyboard_was_enabled, call_stack, ask_deadline);
+            if (state != SCRIPT_STATE::WAIT_ASK)
+            {
+                break;
+            }
+
             // An [IF] right after the [ASK] judges what the player typed.
             if (i + 1 < found_task.COMMANDS.size() && starts_with(found_task.COMMANDS[i + 1], "[IF]"))
             {
@@ -729,6 +864,12 @@ void advance_script_state(SCRIPT_STATE& state, size_t& i, std::string& current_i
             else
             {
                 command_wait_ask(state, current_input, instance_comms, keyboard_was_enabled);
+            }
+
+            // Answered: the time limit, if there was one, is no longer needed.
+            if (state != SCRIPT_STATE::WAIT_ASK)
+            {
+                ask_deadline = std::chrono::steady_clock::time_point();
             }
             break;
 
@@ -750,6 +891,10 @@ void advance_script_state(SCRIPT_STATE& state, size_t& i, std::string& current_i
         // own loop (tools.cpp) checks for this state itself and resolves it
         // once something lands in its held_results/held_events.
         case SCRIPT_STATE::WAIT_TOOL_RESULT:
+            break;
+
+        // Same for [RUN:name] - see SCRIPT_STATE::RUN_TASK's own comment.
+        case SCRIPT_STATE::RUN_TASK:
             break;
 
         case SCRIPT_STATE::DONE:

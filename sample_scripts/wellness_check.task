@@ -1,0 +1,66 @@
+NAME: wellness check
+PURPOSE: If the subcon has notes waiting, asks if the user is there, and if so offers to run the subcon update.
+DIRECTORY: wellness_check
+DELAY_TOOL_RETURNS: true
+---
+# First see if the subcon has anything to deliver. None waiting: nothing to
+# check in about, so the script ends before it asks anything.
+#
+# Then ask "are you there?" with a one minute limit. No reply: ask once more. No
+# reply again, or an answer of no: the script ends. An answer of yes: offer
+# the subcon update.
+
+# Hide the [IF] questions below, so only the asking and the replies show.
+[ECHO_INPUT:off]
+
+Do this now using your tools: count the subcon notes waiting, and tell me the number.
+[WAIT_FOR_RESULT]
+[IF]Are any subcon notes waiting? Answer yes if the number is one or more. Answer no if the number is zero or there are none. Answer maybe only if no number was given.
+[ELSE]
+[END]
+[MAYBE]
+[END]
+[ENDIF]
+
+[ASK:60,second_try]Are you there?
+[IF]Did the player say they are here? Answer yes if they said yes, or that they are here. Answer no if they said no, or that they are busy or away. Answer maybe only if the message was gibberish or unrelated.
+[GOSUB:offer_update]
+[END]
+[ELSE]
+[END]
+[MAYBE]
+[GOSUB:second_try]
+[END]
+[ENDIF]
+[END]
+
+# The second and last "are you there?". Nothing is left to try after it, so
+# every way out of it ends the script.
+[SUB:second_try]
+[ASK:60]Hello? Are you still there?
+[IF]Did the player say they are here? Answer yes if they said yes, or that they are here. Answer no if they said no, or that they are busy or away. Answer maybe only if the message was gibberish or unrelated.
+[GOSUB:offer_update]
+[END]
+[ELSE]
+[END]
+[MAYBE]
+[END]
+[ENDIF]
+[END]
+[ENDSUB]
+
+# Only a clear yes runs the update. A no, a maybe or a minute of silence all
+# end the script.
+[SUB:offer_update]
+[ASK:60]Do you want me to run the subcon update?
+[IF]Did the player agree to run the subcon update? Answer yes if they said yes, ok or sure. Answer no if they said no or not now. Answer maybe only if the message was gibberish or unrelated.
+Do this now using your tools: check for subcon updates with get_subcon_notes, then tell me what it found.
+[WAIT_FOR_RESULT]
+[END]
+[ELSE]
+[END]
+[MAYBE]
+[END]
+[ENDIF]
+[END]
+[ENDSUB]

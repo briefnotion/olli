@@ -4703,3 +4703,40 @@ it can actually act under its persona's judgment, not just talk about it.
   session. Use a marker file/counter or a fresh session per game.
 - Still model-dependent: the model is wrong sometimes. If a short answer is judged wrongly again, the next steps would
   be asking the model to choose between the two named options instead of yes/no, or a keyword pre-check. Not built.
+
+## 2026-11-03 - timed `[ASK]`, `[RUN:name]`, `count_subcon_notes`, `wellness check`
+
+- **`[ASK:seconds]` / `[ASK:seconds,sub_name]`** (tools_task_script.cpp: `command_ask`, `parse_ask`,
+  `command_ask_timed_out`; the start time lives in a local `ask_deadline` in `handle_tool()`, tools.cpp, passed down the
+  same way `call_stack` is). No answer in time: the script ends, or calls the sub like `[GOSUB]` and resumes after the
+  whole `[ASK]` block (a following `[IF]...[ENDIF]` is skipped, there is no answer to judge). A plain `[ASK]` still waits
+  forever. A bad header (`[ASK:abc]`) stops the script with a `SCRIPT ERROR`. The deadline is cleared when the wait
+  ends, so it cannot leak into the next `[ASK]`. The sub-call part repeats about ten lines of `command_gosub`'s
+  checks (find the sub, depth cap, push the return line) so as not to change `command_gosub`'s signature.
+  Not done: the text the player was halfway through typing stays in the input box after a timeout.
+- **`[RUN:task name]`** runs another task to completion, then carries on (SCRIPT_STATE::RUN_TASK; handled in
+  `handle_tool()`'s loop like `WAIT_TOOL_RESULT`, because starting a task needs `handle_tool()` itself). It calls
+  `handle_tool()` again with a made-up tool call id, so the inner task gets its own instance and report. Depth capped at
+  4 tasks inside one another (`run_depth` member, `MAX_RUN_DEPTH` in tools.cpp); an unknown name stops with a
+  `SCRIPT ERROR`. `found_task` in `handle_tool()` is now a copy instead of a reference: the nested call reloads
+  `task_manager.TASK_LIST` (it starts with `clear()`), which would have left the outer script reading freed memory.
+  A plain line like "run the wellness check" in a script has that same danger and is unreliable (the model has to call
+  the tool), which is why this is a real command. The inner task starts with default settings, so an outer
+  `[TTS_OUTPUT:off]` does not carry in. Tested: outer runs inner and continues, unknown name, a task running itself
+  (stopped at the cap). Not tested by me: `welcome home` calling `wellness check` (user ran it and said it was fine).
+- **`count_subcon_notes`** (tools/subcon: subcon.cpp, reasoner.cpp/.hpp `count_notes()`): how many notes a pull would hand
+  over; nothing marked delivered. Tested against a fake olli with a scratch queue (2 pending + 1 delivered: count 2,
+  pull still gave both, count 0 afterwards, unknown tool name an error). The installed `~/olli/subcon` has to be
+  rebuilt and restarted for the tool to exist.
+- **`sample_scripts/wellness_check.task`**: counts the notes (`[IF]` ends the script on none or unclear), asks
+  "Are you there?" for a minute twice, then offers the subcon update. Renamed from "subcon check in", which the main
+  chat kept confusing with the subcon tool (it ignored or misrouted the command).
+- Found while testing, NOT fixed: in a freshly started olli the main chat sometimes never answers the first message
+  sent around the startup self-review (the message is logged, no reply, no tool call). The older installed build does the
+  same, so it is not from these changes. It cost most of an hour of test-rig confusion; send the first command
+  early (about 15-20 s after start) or after the review has finished, and check the debug log before blaming a script.
+- Seen once on `ron`, not investigated further: the model wrote `<speech>...</speech>` around its replies. Nothing in the
+  source writes it, and the bare model did not do it in five tries; treated as a model quirk. A restart with a fresh
+  history clears it.
+- Test-rig lessons repeated: `pkill -f` patterns match their own command line (and `pkill -x subcon` would hit the
+  user's real one: use the PID from `$!`); a background `until` loop is the way to wait, not `sleep`.

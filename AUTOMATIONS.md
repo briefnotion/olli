@@ -122,6 +122,30 @@ an `[IF]` works as before: the typed line goes to the model and it replies.
 Anything else an `[IF]` follows (a plain line, `[PRINT]`, a sub call) still
 judges what the narrator just said, as described above.
 
+**A time limit on `[ASK]`.** `[ASK:30]<text>` gives the player 30 seconds. If
+nothing is answered in time, the script ends. `[ASK:30,name]<text>` calls the
+sub `name` instead (like `[GOSUB:name]`), and when the sub returns the script
+carries on after the whole `[ASK]` block, skipping a following `[IF]...[ENDIF]`
+because there is no answer to judge. An answer in time works exactly as it does
+without a limit, `[IF]` included. The seconds must be a number above 0, or the
+script stops with a `SCRIPT ERROR`. Plain `[ASK]<text>` has no limit and waits
+forever.
+
+```
+[ASK:30,wandered_off]Are you still there?
+[IF]Did the player say they are here?
+[PRINT]Good.
+[ELSE]
+[PRINT]Fine, be that way.
+[ENDIF]
+[PRINT]On with the story.
+[END]
+
+[SUB:wandered_off]
+[PRINT]You seem to have wandered off.
+[ENDSUB]
+```
+
 `[END]` finishes the whole script on the spot, from anywhere, including inside
 an `[IF]` branch (so an ending doesn't have to be the last thing in its block).
 The script's normal wrap-up still runs afterwards, as if it had run out of
@@ -135,6 +159,25 @@ loop.
 The model rarely says "maybe" on its own for a question with a plain factual
 answer. Word the question to allow it, e.g. "... Answer maybe if experts
 disagree."
+
+## Running another task: `[RUN:name]`
+
+`[RUN:wellness check]` runs the task with that name from start to finish, then
+the script carries on with the next line. It prints a `RUNNING: <name>` line when
+it starts, and the inner task's report is folded into this script's history like
+any other tool result. Use it instead of copying one task's lines into another
+(`welcome home` ends with `[RUN:wellness check]`).
+
+A task can `[RUN]` tasks that `[RUN]` others, or itself. At most 4 tasks can be
+running inside one another (the first one included); one more stops the script
+with a `SCRIPT ERROR`. An unknown task name stops the script with a
+`SCRIPT ERROR` too. The name is matched the same way the main chat matches it
+(case does not matter). The inner task starts with its own default settings:
+a `[TTS_OUTPUT:off]` in the outer script does not carry into it, so the inner
+task is spoken unless it turns TTS off itself. Likewise `[ECHO_INPUT]`.
+
+Don't write it as a plain line like "run the wellness check": that leaves it to
+the model to call the tool, which it does not always do.
 
 ## Subroutines: `[SUB]`, `[ENDSUB]`, `[GOSUB]`, `[RETURN]`
 
@@ -192,10 +235,20 @@ If `FILE_IN` can't find/read `name`, it doesn't abort the script - it falls
 back to the same pause-and-prompt behavior as `[ASK]`, so you can paste the
 content in by hand and the script continues from there.
 
-Sample scripts (`system test`, `process resume`, `print test`, `branch test`, `lighthouse adventure`, `haunted lighthouse`, and an
+Sample scripts (`system test`, `process resume`, `print test`, `branch test`, `lighthouse adventure`, `haunted lighthouse`, `wellness check`, and an
 original creative one, `fitter status`) live under `sample_scripts/` in this
 repo - copy whichever ones you want into a profile's own `scripts/`
 directory to use them.
+
+`wellness_check.task` uses the timed `[ASK]`, `[IF]`, subroutines and the subcon
+tools together: it counts the notes waiting (`count_subcon_notes`) and ends if
+there are none, otherwise asks "Are you there?" (a minute, once more, then
+gives up), and on a yes offers to run the subcon update. It needs
+[`tools/subcon`](tools/subcon/README.md) running with the count tool, which is
+newer than the first subcon builds; without it the script ends at the first
+step, every time. Give a task a name that does not echo a tool's name: it was
+first called "subcon check in", and the main chat kept confusing it with the
+subcon tool.
 
 `lighthouse_adventure.task` is a small playable example: a text adventure three
 choices deep with seven endings, built from `[ASK]` and nested `[IF]` blocks.

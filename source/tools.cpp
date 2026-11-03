@@ -612,7 +612,11 @@ void TOOL_TASK_RUNNER::handle_tool(IO_WORKER_CLASS& io_worker, ollama_system& ch
         // this is being debugged - the plan is to load task definitions from
         // disk into memory at olli startup once the system grows. This
         // in-memory lookup is a placeholder for that.
-        const auto& found_task = *task_it;
+        //
+        // A copy, not a reference into the list: a [RUN:name] line starts a
+        // nested handle_tool() call, which reloads task_manager.TASK_LIST
+        // (clearing it) while this script is still reading its commands.
+        const TASK_SIMPLE found_task = *task_it;
 
         // The automation runs on its own background instance so it doesn't
         // block the main chat loop - see ollama_system::spawn_background_task().
@@ -729,6 +733,16 @@ void TOOL_TASK_RUNNER::handle_tool(IO_WORKER_CLASS& io_worker, ollama_system& ch
         // Return line for each [GOSUB] still open - see command_gosub()
         // (tools_task_script.h). Empty whenever the script is not inside a sub.
         std::vector<size_t> call_stack;
+
+        // When the current [ASK:seconds...] gives up waiting - see
+        // command_ask() (tools_task_script.h). A default-constructed
+        // time_point means the wait in progress has no time limit.
+        std::chrono::steady_clock::time_point ask_deadline;
+
+        // How many tasks may be running inside one another through [RUN:name]
+        // (this one included) before the script is stopped - so a task that
+        // runs itself ends with an error instead of never ending.
+        constexpr int MAX_RUN_DEPTH = 4;
 
         // One flat loop drives the whole script - same shape as the main
         // chat's own while loop (main.cpp), just with the state machine
@@ -863,9 +877,48 @@ void TOOL_TASK_RUNNER::handle_tool(IO_WORKER_CLASS& io_worker, ollama_system& ch
                     wait_baseline_set = false;
                 }
             }
+            else if (state == SCRIPT_STATE::RUN_TASK)
+            {
+                // [RUN:name] - "[RUN:" is 5 chars; the trailing "]" is 1 more.
+                const std::string& run_line = found_task.COMMANDS[i];
+                std::string run_name = run_line.substr(5, run_line.size() - 5 - 1);
+
+                bool run_known = std::any_of(
+                    task_manager.TASK_LIST.begin(),
+                    task_manager.TASK_LIST.end(),
+                    [this, &run_name](const TASK_SIMPLE& task) { return iequals(task.TASK_NAME, run_name); });
+
+                if (!run_known)
+                {
+                    instance_comms.INPUT_FROM_LLM.set("--------------------------\nSCRIPT ERROR: there is no task named '" + run_name + "' for " + run_line + "\n");
+                    state = SCRIPT_STATE::DONE;
+                }
+                else if (run_depth + 1 >= MAX_RUN_DEPTH)
+                {
+                    instance_comms.INPUT_FROM_LLM.set("--------------------------\nSCRIPT ERROR: more than " + std::to_string(MAX_RUN_DEPTH) + " tasks running inside one another (a task running itself forever?): " + run_line + "\n");
+                    state = SCRIPT_STATE::DONE;
+                }
+                else
+                {
+                    instance_comms.INPUT_FROM_LLM.set("--------------------------\nRUNNING: " + run_name + "\n");
+                    io_worker.exchange(instance_comms, tool_worker);
+
+                    // Through the same entry point the model uses, so the
+                    // inner task gets its own instance and its own report,
+                    // which lands in this script's history like any tool
+                    // result. The tool call id is made up - there is no
+                    // real call behind this one.
+                    ++run_depth;
+                    handle_tool(io_worker, instance, tools_list, tool_worker, instance_comms, "run_automation_task", json{{"intent_phrase", run_name}}, "run_task_" + std::to_string(run_depth));
+                    --run_depth;
+
+                    ++i;
+                    state = SCRIPT_STATE::GET_COMMAND;
+                }
+            }
             else
             {
-                advance_script_state(state, i, current_input, found_task, instance, instance_comms, tool_worker, files_dir, keyboard_was_enabled, call_stack);
+                advance_script_state(state, i, current_input, found_task, instance, instance_comms, tool_worker, files_dir, keyboard_was_enabled, call_stack, ask_deadline);
             }
 
             io_worker.exchange(instance_comms, tool_worker);

@@ -343,6 +343,14 @@ namespace {
                                      "about the status of one specific thing (the lights, a timer, the time, who is home): use that thing's own tool. "
                                      "It answers instantly."},
                     {"parameters", {{"type", "object"}, {"properties", json::object()}, {"required", json::array()}}}
+                },
+                {
+                    {"name", "count_subcon_notes"},
+                    {"description", "How many background notes are waiting to be delivered. Returns only the number; it does not tell you what the "
+                                     "notes say and it does not use them up, so they are still there for get_subcon_notes afterwards. Call it only when "
+                                     "asked how many notes are waiting, or whether there are any at all. For \"any updates?\" or anything else where the "
+                                     "user wants to hear the notes, call get_subcon_notes instead. It answers instantly."},
+                    {"parameters", {{"type", "object"}, {"properties", json::object()}, {"required", json::array()}}}
                 }
             })}
         };
@@ -496,6 +504,12 @@ int main(int argc, char* argv[])
                     SUBCON_PULL_RESULT pulled = reasoner.pull_notes();
                     link.send_result(call_id, pulled.text, pulled.special_instruction);
                 }
+            } else if (name == "count_subcon_notes") {
+                // Before olli's identity arrives there is no queue to count,
+                // the same case get_subcon_notes answers "nothing" for.
+                size_t waiting = reasoner.state_loaded() ? reasoner.count_notes() : 0;
+                link.send_result(call_id, "There " + std::string(waiting == 1 ? "is 1 subcon note" : "are " + std::to_string(waiting) + " subcon notes") + " waiting.",
+                                 "Tell the user that number briefly, in your own voice. Do not add or guess at anything else. Begin speaking now:");
             } else {
                 link.send_error(call_id, "Unknown tool name: " + name);
             }

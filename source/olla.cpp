@@ -17,6 +17,7 @@ void populate_default_tools(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list)
 {
     tools_list.push_back(std::make_unique<TOOL_SET_THINKING_MODE>());
     tools_list.push_back(std::make_unique<TOOL_WEB_SEARCH>());
+    tools_list.push_back(std::make_unique<TOOL_REMEMBER>());
     tools_list.push_back(std::make_unique<TOOL_TASK_RUNNER>());
     tools_list.push_back(std::make_unique<TOOL_DELEGATOR>());
 }

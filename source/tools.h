@@ -173,6 +173,33 @@ class TOOL_WEB_SEARCH : public TOOL_BASE
         void monitor_tool(ollama_system& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms) override;
 };
 
+// "remember_note" - the model saves something the user wants remembered
+// (an appointment, a birthday, a fact, an idea) as one small text file in
+// OLLI_DIRECTORY/collection/Olli_Remembers/. That is a normal RAG collection
+// folder (tools/rag), so rag_tool's regular sync picks the file up within
+// about 10 minutes and it becomes searchable like anything else the user put
+// there - nothing here talks to RAG itself. Everything the model needs to get
+// right is small and checked in code: the save time is stamped here, not by
+// the model, and an about_date that is not a real calendar date is refused.
+class TOOL_REMEMBER : public TOOL_BASE
+{
+    private:
+        std::filesystem::path notes_dir;
+
+        // {true, what-was-saved} or {false, why-not} - handle_tool() uses the
+        // bool to pick the normal or the failure framing, same as
+        // TOOL_WEB_SEARCH's pair-returning helpers (tools.cpp).
+        std::pair<bool, std::string> save_note(const std::string& text, const std::string& context, const std::string& title, const std::string& about_date, const std::string& about_time, const std::string& user_words);
+
+        void handle_tool(ollama_system& chat, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const json& args, const std::string& tc_id);
+
+    public:
+        void configure(ollama_system& chat) override;
+        void register_tool(ollama_system& chat, json& tools) override;
+        bool check(IO_WORKER_CLASS& io_worker, ollama_system& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const ToolCall& tc) override;
+        void monitor_tool(ollama_system& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms) override;
+};
+
 // Recursive sub-agent delegation - the model can hand a sub-question to a
 // specialist persona ("consult_expert"), which spawns an isolated
 // ollama_system sub-agent (chat.spawn_background_task(), same as

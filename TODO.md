@@ -4752,3 +4752,78 @@ it can actually act under its persona's judgment, not just talk about it.
 - Asked for by the user to help read second-guess loops and what it does with tools while reviewing.
 - Compiled only; not run by me (ron was up). To check: after any main-chat reply, the debug log should show a
   `sidetrack-second-guess / thinking` record before that pass's `assistant` record.
+
+## 2026-11-04 - `remember_note` (internal tool): notes saved as files in the Olli_Remembers collection
+
+- New `TOOL_REMEMBER` (tools.h/.cpp, registered in olla.cpp next to `TOOL_WEB_SEARCH`). Tool `remember_note(text,
+  title?, about_date?, about_time?)` writes one small text file per note into
+  `<profile>/collection/Olli_Remembers/`, named `YYYY-MM-DD_HHMM_<slug>.txt`. Nothing talks to RAG: rag_tool's normal
+  10-minute folder sync imports the file, so a new note is searchable after up to ten minutes.
+- File layout: `Remembered note: <title>`, `Saved: <time> (<weekday>)`, optional `About: <date> <time> (<weekday>)`, a
+  blank line, then the user's words exactly as given. The header lines are there on purpose: a note can be a few words,
+  and they give the search something to match.
+- The code, not the model, stamps the save time and works out weekdays. `about_date` must be a real YYYY-MM-DD date
+  (Feb 30 is refused), `about_time` a 24-hour HH:MM and only with a date; text is limited to 5000 characters. Failures
+  come back with the same "did NOT succeed" framing web_search uses, so olli can't say it saved something it didn't.
+- The tool description tells the model to get today's date from the clock tool (`get_clock_time`, format
+  `%Y-%m-%d %A`) for "next Tuesday"-style dates, and to leave `about_date` out when unsure.
+- Small files are not skipped by the importer: only the `conversations` collection has a minimum length (30 words), and the
+  repeated-text filter only looks at chunks of 20 words or more.
+- One-time setup: the collection must exist in the database (rag_admin, "Create collection", name `Olli_Remembers`),
+  otherwise the sync reports the folder as an orphan and never imports it.
+- Tested: the date, time and file-name helpers on their own (real dates, Feb 30, month 13, short or trailing-text
+  input, a leap year, a path-traversal string). NOT tested end to end - ron was running, so no second olli was started.
+- Not built: listing notes by date, forgetting a note (delete the file for now), reminders when a date is near (a
+  possible subcon task later).
+
+## 2026-11-04 (later) - `remember_note`: stray notes from second-guess, stricter wording, `context` field
+
+- Found in a live test on ron (debug_full_history.txt, 05:34-05:42): the main chat saved the birthday note correctly, but
+  the sidetrack-second-guess pass (which has every tool) saved two stray notes of its own, "correcting" a reply by saving it,
+  one with `about_date` 2023-11-04 because it assumed the year without checking the clock. The model also faked a
+  "reminder" with a one-year `set_timer` (real reminders are still not built; the user did not mind that part).
+- Not done: per-instance tool blocking (the user says there is no way to stop a tool in one instance without a big rewrite).
+- Done, all inside TOOL_REMEMBER: (1) the tool description now says to save ONLY on a clear, direct request, never because
+  dates/people came up, never to correct or repeat an earlier reply, and to ask when unsure; (2) new optional `context`
+  parameter (max 1000 characters): olli's own one-or-two-sentence explanation with pronouns resolved and missing details
+  stated as not given, written to the file as `Context (olli's wording): ...` above the user's untouched words, so
+  "his birthday is the 28th" is still understandable later.
+- Considered and skipped: a second model call asking the tool "should I store this?" (same model judging itself, adds
+  delay; revisit if stray notes still get through) and the code copying the user's last message verbatim (would not resolve
+  "his").
+- Compiled only; NOT tested live. To check on the claude profile: talk about birthdays/dates without asking to remember
+  anything (no note should appear, including from second-guess), then say "remember his birthday is the 28th" after
+  naming a person (the note should carry a Context line naming them).
+
+- Live test on the claude profile (same day): date chat alone saved nothing; `context` correctly resolved "his" to John Doe.
+  Found: the model invented `about_date` 1980-03-28 for "his birthday is the 28th" (month made up, year borrowed from his
+  birth year) and told the user "March 28th", contradicting its own context line ("month not given"). Also saved on "by the
+  way" with no explicit remember request (gray area). Fix: `about_date` description now says to include it only for a
+  complete date or a relative one, never fill in or borrow a missing part, and put partial dates in `context`. Wording
+  only; re-test needed (same John Doe script, plus a partial date, then a full one like "remember his birthday is June 28, 1980").
+
+- Wording alone did not stop the invented date (re-test: still 1980-03-28 for "the 28th"), so `TOOL_REMEMBER` now checks it in
+  code: new static `note_date_backed_by()` (tools.cpp). `about_date` is accepted only if the user's words (the note `text`
+  plus the latest user message in this instance's history, deliberately not older ones - a birth year mentioned earlier is
+  what got borrowed) hold a relative date (today, tomorrow, next, weekday names, days/weeks/months) or all three parts of the
+  date (year, day, month as a name/3-letter abbreviation/number). Otherwise the save is refused with the usual "did NOT
+  succeed" framing and nothing is written. `save_note` gained a `user_words` parameter; `handle_tool` builds it. Rough check,
+  not airtight (looks for the parts, not their order). Unit-tested on its own, 13 cases (partial date, borrowed year, ISO,
+  m/d/y, "Jun 28 1980", sept, tomorrow/next Tuesday/in 3 days, wrong year) - all pass.
+- Live on the claude profile: partial date refused (olli told the user the save failed and did not retry without the date -
+  the refusal text asks for a retry, the shared failure framing says to tell the user; left as is); full date saved
+  ("December 3, 2026 at 2:30 pm" -> `About: 2026-12-03 14:30 (Thursday)`).
+- STILL OPEN, deliberately not fixed: the second-guess pass can still save stray notes. Live on the claude profile it
+  judged "John Doe was born in 1980" wrong, claimed it had "not correctly used remember_note", and saved a note nobody asked
+  for. The wording in the tool description did not prevent it. A fix would refuse remember_note when the calling instance's
+  `debug_label` is "sidetrack-second-guess" (only `TOOL_REMEMBER::check` would change), but the user chose to keep this
+  change to just adding the tool, not to reach into other code. Per-instance tool blocking in general would need a bigger change.
+
+- Live bug found by the user on ron: "heres another thing to remember. when i buy oil for the car, it can be 5w30 or 5w20."
+  failed, while "try to remember my favorite color is cyan" worked. Cause: for the oil fact the model stamped today's date as
+  `about_date`, the date check refused it, and the refusal cost the user the whole note (it only worked after a retry).
+  Fix, in `TOOL_REMEMBER::save_note`: an `about_date` (and `about_time`) the user's words do not back up is now DROPPED and the
+  note is still saved; the result says "NOTE: the date ... was NOT recorded ... saved without a date" so olli doesn't claim
+  one. A malformed date/time (not YYYY-MM-DD / HH:MM) is still a hard error. The `about_date` description also now says to use
+  it only for a note about a particular day. Live-checked on the claude profile: oil fact, cyan, and "sister's birthday is
+  the 14th" all saved on the first try, none with an About line or an invented date; second-guess made no tool calls.

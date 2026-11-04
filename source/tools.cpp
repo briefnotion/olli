@@ -2,6 +2,8 @@
 #define tools_cpp
 
 #include <algorithm>
+#include <cstdio>
+#include <ctime>
 #include <regex>
 #include <thread>
 
@@ -313,6 +315,294 @@ bool TOOL_WEB_SEARCH::check(IO_WORKER_CLASS&, ollama_system& chat, CLASS_SYSTEM*
 
 // No periodic work needed - part of the common tool interface (see the note in tools.h).
 void TOOL_WEB_SEARCH::monitor_tool(ollama_system&, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>&, TOOL_WORKER_CLASS*, COMMS&) {}
+
+// ---- TOOL_REMEMBER ----
+
+// A real calendar date written exactly YYYY-MM-DD. timegm() quietly rolls an
+// impossible date over (Feb 30 -> Mar 2), so the result is compared back
+// against what was asked for. 'out' has tm_wday filled in on success.
+static bool parse_note_date(const std::string& text, std::tm& out)
+{
+    int year, month, day;
+    char extra;
+    if (text.size() != 10 || std::sscanf(text.c_str(), "%4d-%2d-%2d%c", &year, &month, &day, &extra) != 3)
+        return false;
+
+    std::tm asked{};
+    asked.tm_year = year - 1900;
+    asked.tm_mon = month - 1;
+    asked.tm_mday = day;
+    asked.tm_hour = 12;
+
+    std::tm rolled = asked;
+    if (timegm(&rolled) == -1)
+        return false;
+    if (rolled.tm_year != asked.tm_year || rolled.tm_mon != asked.tm_mon || rolled.tm_mday != asked.tm_mday)
+        return false;
+
+    out = rolled;
+    return true;
+}
+
+// Exactly HH:MM, 24-hour.
+static bool valid_note_time(const std::string& text)
+{
+    int hour, minute;
+    char extra;
+    return text.size() == 5 && std::sscanf(text.c_str(), "%2d:%2d%c", &hour, &minute, &extra) == 2
+           && hour >= 0 && hour < 24 && minute >= 0 && minute < 60;
+}
+
+// Letters and digits only, lowercase, one '-' between words, at most 40
+// characters - safe as part of a file name by construction (no '/', no '..').
+static std::string note_slug(const std::string& text)
+{
+    std::string slug;
+    for (char ch : text)
+    {
+        unsigned char c = static_cast<unsigned char>(ch);
+        if (std::isalnum(c))
+            slug += static_cast<char>(std::tolower(c));
+        else if (!slug.empty() && slug.back() != '-')
+            slug += '-';
+        if (slug.size() >= 40) break;
+    }
+    while (!slug.empty() && slug.back() == '-') slug.pop_back();
+    return slug.empty() ? "note" : slug;
+}
+
+// Whether 'words' (what the user actually said) backs up the date the model
+// wants to stamp on a note. Added after a live test where the model turned
+// "remember his birthday is the 28th" into 1980-03-28, inventing the month
+// and borrowing the year from a birth year mentioned earlier - even while its
+// own context line said the month was not given. Wording alone did not stop
+// it, so this is checked in code. A date passes if either:
+//  - the words hold a relative date (today, tomorrow, next Tuesday, in 3
+//    days ...), which the model had to work out from the clock; or
+//  - the words hold all three parts of this date: the year, the day, and the
+//    month (as a name like "June"/"Jun", or as a number).
+// A rough check, not an airtight one: it only looks for the parts, not that
+// they are written in a sensible order.
+static bool note_date_backed_by(const std::string& words, const std::tm& date)
+{
+    std::vector<std::string> letters;
+    std::vector<int> numbers;
+    for (size_t i = 0; i < words.size(); )
+    {
+        unsigned char c = static_cast<unsigned char>(words[i]);
+        size_t start = i;
+        if (std::isalpha(c))
+        {
+            while (i < words.size() && std::isalpha(static_cast<unsigned char>(words[i]))) ++i;
+            std::string word = words.substr(start, i - start);
+            for (char& ch : word) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            letters.push_back(word);
+        }
+        else if (std::isdigit(c))
+        {
+            while (i < words.size() && std::isdigit(static_cast<unsigned char>(words[i]))) ++i;
+            if (i - start <= 6) numbers.push_back(std::stoi(words.substr(start, i - start)));
+        }
+        else ++i;
+    }
+
+    static const char* relative[] = {"today", "tonight", "tomorrow", "yesterday", "next", "days", "weeks", "months",
+                                     "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"};
+    for (const std::string& word : letters)
+        for (const char* r : relative)
+            if (word == r) return true;
+
+    static const char* months[] = {"january", "february", "march", "april", "may", "june", "july",
+                                   "august", "september", "october", "november", "december"};
+    auto has_number = [&numbers](int n) { return std::find(numbers.begin(), numbers.end(), n) != numbers.end(); };
+
+    bool has_year = has_number(date.tm_year + 1900);
+    bool has_day = has_number(date.tm_mday);
+    bool has_month = has_number(date.tm_mon + 1);
+    std::string full = months[date.tm_mon];
+    for (const std::string& word : letters)
+        if (word == full || word == full.substr(0, 3) || (word == "sept" && date.tm_mon == 8)) has_month = true;
+
+    return has_year && has_day && has_month;
+}
+
+// No per-instance setup beyond finding the folder.
+void TOOL_REMEMBER::configure(ollama_system& chat) {
+    notes_dir = chat.PROPS.OLLI_DIRECTORY / "collection" / "Olli_Remembers";
+}
+
+void TOOL_REMEMBER::register_tool(ollama_system&, json& tools) {
+    tool_functions.clear();
+
+    json params = {
+        {"type", "object"},
+        {"properties", {
+            {"text", {{"type", "string"}, {"description", "What to remember, in the user's own words, as they said it. Do not summarize or shorten it."}}},
+            {"context", {{"type", "string"}, {"description", "Optional but strongly encouraged. One or two plain sentences, in your own words, that make the note understandable on its own months from now: who or what it is about, with every 'he', 'she', 'it', 'that' replaced by the actual name or thing from the conversation, and any detail the user left out (such as a missing month) stated as not given. Only use what was really said in this conversation - never guess or invent."}}},
+            {"title", {{"type", "string"}, {"description", "Optional. Two to five words naming the note, e.g. 'dentist appointment'."}}},
+            {"about_date", {{"type", "string"}, {"description", "Optional. The calendar date the note is about (an appointment, a birthday), written YYYY-MM-DD. Include it ONLY for a note that is about a particular day, and only when the user gave a complete date (day, month and year) or a relative date such as 'next Tuesday' or 'tomorrow' - for a relative date, first get today's date from the clock tool (get_clock_time with format '%Y-%m-%d %A') and work out the calendar date. NEVER fill in a missing day, month or year yourself, and never borrow a year from somewhere else in the conversation (such as a birth year). A birthday given as only 'the 28th' or 'March 28' has no complete date: leave this out and put what is known in context instead. The user's words are kept in text anyway."}}},
+            {"about_time", {{"type", "string"}, {"description", "Optional, only with about_date. The time of day the note is about, 24-hour HH:MM."}}}
+        }},
+        {"required", {"text"}}
+    };
+
+    tool_functions.push_back("remember_note");
+    add_tool(tools, "remember_note",
+        "Saves a note to remember for later. Use it ONLY when the user clearly and directly asks you to remember, note down "
+        "or not let them forget something (an appointment, a birthday, a fact, an idea). Merely talking about dates, people "
+        "or plans is NOT a request: do not save anything because a date or birthday came up in conversation. Never save your "
+        "own replies, and never use this to correct, repeat or follow through on something you said earlier - only the "
+        "user's own request to remember counts. If it is unclear whether they want something saved, ask them instead of "
+        "saving. If what they want saved is unclear (who 'he' is, which month 'the 28th' is), ask before saving. When they "
+        "do ask, call it, and never say it was saved without calling it. The time it was saved is stamped automatically. "
+        "This only saves; to find notes again later, search the knowledge base.",
+        params);
+}
+
+std::pair<bool, std::string> TOOL_REMEMBER::save_note(const std::string& text, const std::string& context, const std::string& title, const std::string& about_date_asked, const std::string& about_time_asked, const std::string& user_words) {
+    // Local copies: an about_date the user's words don't back up is dropped
+    // below (the note is still saved), not allowed to fail the whole save.
+    std::string about_date = about_date_asked;
+    std::string about_time = about_time_asked;
+    std::string dropped_date_note;
+
+    // Long enough for any real note; the limit is only here so a runaway
+    // call can't fill the disk one file at a time.
+    constexpr size_t MAX_NOTE_CHARACTERS = 5000;
+    constexpr size_t MAX_CONTEXT_CHARACTERS = 1000;
+
+    if (context.size() > MAX_CONTEXT_CHARACTERS)
+        return {false, "Error: context is longer than " + std::to_string(MAX_CONTEXT_CHARACTERS) + " characters (keep it to a sentence or two), nothing was saved."};
+
+    if (text.find_first_not_of(" \t\r\n") == std::string::npos)
+        return {false, "Error: the note was empty, nothing was saved."};
+    if (text.size() > MAX_NOTE_CHARACTERS)
+        return {false, "Error: the note is longer than " + std::to_string(MAX_NOTE_CHARACTERS) + " characters, nothing was saved."};
+
+    std::tm about_tm{};
+    if (!about_date.empty() && !parse_note_date(about_date, about_tm))
+        return {false, "Error: about_date '" + about_date + "' is not a real calendar date written YYYY-MM-DD, nothing was saved."};
+    if (!about_time.empty() && about_date.empty())
+        return {false, "Error: about_time was given without about_date, nothing was saved."};
+    if (!about_time.empty() && !valid_note_time(about_time))
+        return {false, "Error: about_time '" + about_time + "' is not a 24-hour HH:MM time, nothing was saved."};
+
+    // A date the user's words do not back up (a guessed month or year, or a
+    // plain fact that has no date at all, where the model stamped today's
+    // date anyway) must not end up on the note - but it should not cost the
+    // user the note either: a live test lost "oil can be 5w30 or 5w20" that
+    // way. So the date is dropped and the result says so honestly.
+    if (!about_date.empty() && !note_date_backed_by(user_words, about_tm))
+    {
+        dropped_date_note = " NOTE: the date '" + about_date + (about_time.empty() ? "" : " " + about_time) +
+                            "' was NOT recorded - the user's words do not contain a whole date (year, month and day) or a relative one like 'tomorrow'. "
+                            "The note was saved without a date. Do not tell the user it has a date.";
+        about_date.clear();
+        about_time.clear();
+        about_tm = std::tm{};
+    }
+
+    // The title is only a label: when the model gave none, the first few
+    // words of the note stand in.
+    std::string label = title;
+    if (label.find_first_not_of(" \t\r\n") == std::string::npos)
+    {
+        std::istringstream words(text);
+        std::string word;
+        for (int n = 0; n < 5 && (words >> word); ++n)
+            label += (n ? " " : "") + word;
+    }
+
+    std::time_t now = std::time(nullptr);
+    std::tm now_tm{};
+    localtime_r(&now, &now_tm);
+    char stamp[64], day_part[16], weekday[32];
+    std::strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M (%A)", &now_tm);
+    std::strftime(day_part, sizeof(day_part), "%Y-%m-%d_%H%M", &now_tm);
+    std::strftime(weekday, sizeof(weekday), "%A", &now_tm);
+
+    // The header lines are not just bookkeeping: a note can be a handful of
+    // words, and a few words of context ("Remembered note", the day, the
+    // weekday) give the search something to match besides the note itself.
+    std::string content = "Remembered note: " + label + "\nSaved: " + stamp + "\n";
+    if (!about_date.empty())
+    {
+        char about_weekday[32];
+        std::strftime(about_weekday, sizeof(about_weekday), "%A", &about_tm);
+        content += "About: " + about_date + (about_time.empty() ? "" : " " + about_time) + " (" + about_weekday + ")\n";
+    }
+    // olli's own words, labeled as such and kept apart from the user's, so
+    // the note stays honest about which is which. One line: newlines in the
+    // model's text would otherwise blur into the user's words below.
+    if (context.find_first_not_of(" \t\r\n") != std::string::npos)
+    {
+        std::string one_line = context;
+        for (char& ch : one_line)
+            if (ch == '\n' || ch == '\r') ch = ' ';
+        content += "Context (olli's wording): " + one_line + "\n";
+    }
+    content += "\n" + text + "\n";
+
+    std::error_code ec;
+    std::filesystem::create_directories(notes_dir, ec);
+    if (ec)
+        return {false, "Error: could not create the notes folder (" + ec.message() + "), nothing was saved."};
+
+    // Two notes in the same minute with the same words get -2, -3, ...
+    std::string base = std::string(day_part) + "_" + note_slug(label);
+    std::filesystem::path file = notes_dir / (base + ".txt");
+    for (int n = 2; std::filesystem::exists(file) && n < 100; ++n)
+        file = notes_dir / (base + "-" + std::to_string(n) + ".txt");
+
+    if (!write_file(file, content))
+        return {false, "Error: the file could not be written, nothing was saved."};
+
+    return {true, "Saved the note '" + label + "' as " + file.filename().string() + " in the Olli_Remembers collection. Saved at " + stamp +
+                  (about_date.empty() ? "" : "; it is about " + about_date + (about_time.empty() ? "" : " " + about_time)) +
+                  ". It will turn up in knowledge-base searches within about 10 minutes." + dropped_date_note};
+}
+
+void TOOL_REMEMBER::handle_tool(ollama_system& chat, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const json& args, const std::string& tc_id) {
+    // Same plain "this did not work" framing TOOL_WEB_SEARCH uses, so a
+    // failed save is never told to the user as if it had been saved.
+    static const std::string failure_instruction =
+        "This attempt did NOT succeed - it is an error, not real data. Tell "
+        "the user plainly, in your own words, that it failed and what "
+        "likely went wrong. Do not present this as a real answer to their "
+        "question.";
+
+    // value() throws on a wrongly-typed field (a number where text belongs),
+    // so each is read with an explicit type check instead.
+    auto text_arg = [&args](const char* key) {
+        return (args.contains(key) && args.at(key).is_string()) ? args.at(key).get<std::string>() : std::string();
+    };
+
+    // What the user really said: the note text plus their latest message in
+    // this instance's own history. Deliberately not older messages - a year
+    // mentioned earlier (a birth year) is exactly what got borrowed by mistake.
+    std::string user_words = text_arg("text");
+    for (auto it = chat.history.rbegin(); it != chat.history.rend(); ++it)
+        if (it->role == "user") { user_words += "\n" + it->content; break; }
+
+    auto [ok, result] = save_note(text_arg("text"), text_arg("context"), text_arg("title"), text_arg("about_date"), text_arg("about_time"), user_words);
+
+    chat.send_tool_result(tc_id, result);
+    chat.integrate_tool_result(tool_worker, comms, ok ? "" : failure_instruction, result);
+}
+
+bool TOOL_REMEMBER::check(IO_WORKER_CLASS&, ollama_system& chat, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>&, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const ToolCall& tc) {
+    if (tc.name != "remember_note")
+        return false;
+
+    chat.log("[System] Tool call received: " + tc.name + "\n");
+
+    handle_tool(chat, tool_worker, comms, tc.arguments, tc.id);
+
+    return true;
+}
+
+// No periodic work needed - part of the common tool interface (see the note in tools.h).
+void TOOL_REMEMBER::monitor_tool(ollama_system&, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>&, TOOL_WORKER_CLASS*, COMMS&) {}
 
 
 void TOOL_DELEGATOR::configure(ollama_system&) {}

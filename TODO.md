@@ -4740,3 +4740,15 @@ it can actually act under its persona's judgment, not just talk about it.
   history clears it.
 - Test-rig lessons repeated: `pkill -f` patterns match their own command line (and `pkill -x subcon` would hit the
   user's real one: use the PID from `$!`); a background `until` loop is the way to wait, not `sleep`.
+
+## 2026-11-04 - model thinking is logged to debug_full_history.txt
+
+- `ollama_system::send()` (olla.cpp) now writes whatever the model thought as its own record,
+  `=== <label> / thinking ===`, just ahead of the reply's `assistant` record. Written even when the reply that follows
+  is empty (a pass that thought and said nothing is the case worth reading). No length cut.
+- In practice that is the second-guess pass (`sidetrack-second-guess`, thinking on, sidetrack.cpp): both its review
+  turn and its structured `needs_correction` check. The main chat, consolidation and script instances run with thinking
+  off, so they log none. Anything that turns thinking on later gets logged automatically.
+- Asked for by the user to help read second-guess loops and what it does with tools while reviewing.
+- Compiled only; not run by me (ron was up). To check: after any main-chat reply, the debug log should show a
+  `sidetrack-second-guess / thinking` record before that pass's `assistant` record.

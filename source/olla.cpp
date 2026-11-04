@@ -580,6 +580,14 @@ void ollama_system::send(TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const std
     last_received.response = accumulated_content;
     last_received.thinking = accumulated_thinking;
 
+    // Whatever the model thought before answering, as its own record just
+    // ahead of the reply's (second guess is the one that runs with thinking
+    // on). Logged even when the reply that follows is empty: a pass that
+    // thought and then said nothing is exactly the kind worth reading.
+    if (!accumulated_thinking.empty()) {
+        DEBUG_LOG_CLASS::instance().log_message(debug_label, "thinking", accumulated_thinking);
+    }
+
     // A reply with no text of its own (a pure tool call) has nothing to
     // summarize - stays present == false rather than scoring tool-call tokens.
     // Same for a structured-output reply (response_format given): the grammar

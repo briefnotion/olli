@@ -31,6 +31,14 @@ it is now its own program, and it is both a **remote tool of olli** and a
   (`count_notes()`): the same number a pull would hand over, nothing marked
   delivered. Scripts use it to decide whether to bother the user at all (the
   `wellness check` task).
+  A third tool, `list_subcon_tasks` (added 2026-11-06), is read-only and lets olli answer
+  "what are you keeping an eye on for me?": with no argument it lists every task (what it
+  checks, its cap and minimum gap, runs used in the current period, when it last ran, when it
+  can run next, and whether it is waiting for a tool that isn't connected); with `task` set to
+  a task's name or label it adds that task's last three results. Built in code from the task
+  list and saved state (`describe_tasks()`), no model involved, nothing changed or marked
+  delivered. It deliberately does not show the `how_to` prompt text, and tasks are still
+  edited only in `tasks.json`.
 - **As a server for tools**: listens on 127.0.0.1:47603 and speaks olli's own
   protocol ([`../PROTOCOL.md`](../PROTOCOL.md), "Two servers"). The other
   tools register their tools with it, and subcon calls them during think
@@ -150,7 +158,7 @@ The budget is a constant in `reasoner.cpp`, sized for the default `num_ctx`:
 if you lower `num_ctx` in the settings file, lower it too.
 
 **Tasks wait for their tools.** Each task names the tools it cannot do
-without (`required_tools` in `subcon_task_defs()`: weather needs `web_search`,
+without (`required_tools` in each task of `tasks.json`; the built-in set: weather needs `web_search`,
 conversations and notes need `rag_search`, lights need `check_presence`,
 timers need `list_timers`). A task whose tools aren't currently available
 - the same set the model would be offered, so a connected-but-write-only or
@@ -194,9 +202,13 @@ The task list, caps, minimum gaps, 24-hour-or-since-arrival window, finding
 gate and prompts are ported unchanged (`subcon_tasks.h` was copied from
 `source/subcon_tasks.h`, since removed; it is still header-only and unit-testable; the delivery gate,
 quiet hours and hold rules were removed from the copy because nothing uses them).
-To add, reword or retire a task, edit `subcon_task_defs()` and rebuild; on the
-next start saved state is merged by `key` and retired tasks go to
-`todo_items_retired.json`.
+**The task list is an editable file** (since 2026-11-06): `<profile>/subcon/tasks.json`.
+See "The task file" in [SUBCON.md](../../SUBCON.md#the-task-file-tasksjson). The built-in
+list in `subcon_tasks.h` (`subcon_builtin_task_defs()`) only seeds that file the first
+time subcon starts on a profile. To add, reword or retire a task, edit the file and
+restart subcon; on start saved state is merged by `key` and retired tasks go to
+`todo_items_retired.json`. Changing the built-ins in code does NOT change a profile
+that already has a `tasks.json`.
 
 ## Threads and state
 

@@ -113,7 +113,56 @@ void subcon_save_queue(const std::filesystem::path& path, const std::vector<SUBC
     }
 }
 
-std::vector<SUBCON_TODO_ITEM> subcon_load_todo_items(const std::filesystem::path& path, const std::filesystem::path& retired_path, const SUBCON_NOTE_FN& note)
+std::optional<std::vector<SUBCON_TASK_DEF>> subcon_load_task_defs(const std::filesystem::path& path, const SUBCON_NOTE_FN& note)
+{
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec))
+    {
+        // First start on this profile: write the built-in tasks out so there
+        // is a file to edit. Written once and never overwritten after that.
+        const std::vector<SUBCON_TASK_DEF>& seed = subcon_builtin_task_defs();
+        try
+        {
+            if (subcon_write_file_atomically(path, dump_safely(json(seed))))
+                note("wrote the built-in tasks to " + path.filename().string() + " - edit that file (then restart subcon) to change the tasks");
+            else
+                note("could not write " + path.filename().string() + " - using the built-in tasks for now");
+        }
+        catch (const std::exception& e)
+        {
+            note(std::string("could not write ") + path.filename().string() + ": " + e.what() + " - using the built-in tasks for now");
+        }
+        return seed;
+    }
+
+    std::ifstream file(path);
+    if (!file)
+    {
+        note("PROBLEM: " + path.filename().string() + " exists but could not be opened - keeping the tasks already saved");
+        return std::nullopt;
+    }
+
+    std::vector<SUBCON_TASK_DEF> defs;
+    std::string error;
+    try
+    {
+        json data;
+        file >> data;
+        if (!subcon_parse_task_defs(data, defs, error))
+        {
+            note("PROBLEM in " + path.filename().string() + ": " + error + " - keeping the tasks already saved; nothing was changed or retired. Fix the file and restart subcon.");
+            return std::nullopt;
+        }
+    }
+    catch (const std::exception& e)
+    {
+        note("PROBLEM in " + path.filename().string() + ": it is not valid JSON (" + e.what() + ") - keeping the tasks already saved; nothing was changed or retired. Fix the file and restart subcon.");
+        return std::nullopt;
+    }
+    return defs;
+}
+
+std::vector<SUBCON_TODO_ITEM> subcon_load_todo_items(const std::filesystem::path& path, const std::filesystem::path& retired_path, const std::vector<SUBCON_TASK_DEF>* defs, const SUBCON_NOTE_FN& note)
 {
     std::vector<SUBCON_TODO_ITEM> loaded;
     {
@@ -137,8 +186,18 @@ std::vector<SUBCON_TODO_ITEM> subcon_load_todo_items(const std::filesystem::path
         }
     }
 
+    // No usable task list (a mistake in tasks.json): keep exactly what was
+    // saved, retire nothing. Only when nothing was saved either does the
+    // built-in list stand in, so the reasoning loop never has nothing to do.
+    if (!defs)
+    {
+        if (!loaded.empty()) return loaded;
+        std::vector<SUBCON_TODO_ITEM> unused;
+        return reconcile_subcon_tasks(loaded, subcon_builtin_task_defs(), unused);
+    }
+
     std::vector<SUBCON_TODO_ITEM> retired;
-    std::vector<SUBCON_TODO_ITEM> items = reconcile_subcon_tasks(loaded, subcon_task_defs(), retired);
+    std::vector<SUBCON_TODO_ITEM> items = reconcile_subcon_tasks(loaded, *defs, retired);
     if (!retired.empty())
     {
         archive_retired_tasks(retired_path, retired, note);

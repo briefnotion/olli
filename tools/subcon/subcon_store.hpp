@@ -11,6 +11,7 @@
 
 #include <filesystem>
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -31,10 +32,19 @@ bool subcon_write_file_atomically(const std::filesystem::path& path, const std::
 std::vector<SUBCON_NOTE> subcon_load_queue(const std::filesystem::path& path, const SUBCON_NOTE_FN& note);
 void subcon_save_queue(const std::filesystem::path& path, const std::vector<SUBCON_NOTE>& queue, const SUBCON_NOTE_FN& note);
 
-// Loads the task list and merges it with the definitions in code
-// (subcon_task_defs()): state survives for tasks that still exist, tasks
-// removed from the definitions are appended to retired_path instead of being
-// lost. A missing or unreadable file starts from the definitions alone - an
-// empty list would leave the reasoning loop with nothing to prioritize.
-std::vector<SUBCON_TODO_ITEM> subcon_load_todo_items(const std::filesystem::path& path, const std::filesystem::path& retired_path, const SUBCON_NOTE_FN& note);
+// Loads the editable task list, <profile>/subcon/tasks.json. A missing file
+// (first start) is created from the built-in tasks and those are returned. A
+// file that exists but has a mistake (not JSON, or fails the checks in
+// subcon_parse_task_defs()) returns nullopt after logging what is wrong - the
+// caller must then keep the tasks it already has rather than guess.
+std::optional<std::vector<SUBCON_TASK_DEF>> subcon_load_task_defs(const std::filesystem::path& path, const SUBCON_NOTE_FN& note);
+
+// Loads the saved task state (todo_items.json) and merges it with 'defs':
+// state survives for tasks that still exist, tasks removed from the list are
+// appended to retired_path instead of being lost. defs == nullptr means the
+// task list could not be read: the saved tasks are returned untouched and
+// nothing is retired (and only if nothing was saved do the built-in tasks
+// stand in) - an empty list would leave the reasoning loop with nothing to
+// prioritize.
+std::vector<SUBCON_TODO_ITEM> subcon_load_todo_items(const std::filesystem::path& path, const std::filesystem::path& retired_path, const std::vector<SUBCON_TASK_DEF>* defs, const SUBCON_NOTE_FN& note);
 void subcon_save_todo_items(const std::filesystem::path& path, const std::vector<SUBCON_TODO_ITEM>& items, const SUBCON_NOTE_FN& note);

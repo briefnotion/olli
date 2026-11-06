@@ -180,7 +180,13 @@ void SUBCON_REASONER::load_state(const std::filesystem::path& state_dir)
 
     auto note = [this](const std::string& text) { log(text); };
     queue = subcon_load_queue(queue_path, note);
-    items = subcon_load_todo_items(items_path, retired_path, note);
+
+    // The editable task list. A mistake in it logs a PROBLEM line and leaves
+    // the saved tasks as they are (nullopt); the built-in definitions are
+    // then only used to look up required_tools for tasks that have one.
+    std::optional<std::vector<SUBCON_TASK_DEF>> loaded_defs = subcon_load_task_defs(state_dir / "tasks.json", note);
+    task_defs = loaded_defs ? *loaded_defs : subcon_builtin_task_defs();
+    items = subcon_load_todo_items(items_path, retired_path, loaded_defs ? &*loaded_defs : nullptr, note);
     // Persisted straight away so a retired task isn't archived a second time
     // on the next start (same as the old subcon).
     save_items();
@@ -308,6 +314,92 @@ size_t SUBCON_REASONER::count_notes()
     return subcon_count_pending(queue);
 }
 
+// "in 45 minutes" / "in 3 hours" / "now" for a moment in the future.
+static std::string describe_wait(int64_t seconds)
+{
+    if (seconds <= 0) return "now";
+    int64_t minutes = (seconds + 59) / 60;
+    if (minutes < 60) return "in " + std::to_string(minutes) + " minute(s)";
+    return "in " + std::to_string((minutes + 30) / 60) + " hour(s)";
+}
+
+static std::string describe_age(int64_t seconds)
+{
+    if (seconds < 60) return "moments ago";
+    int64_t minutes = seconds / 60;
+    if (minutes < 60) return std::to_string(minutes) + " minute(s) ago";
+    int64_t hours = minutes / 60;
+    if (hours < 48) return std::to_string(hours) + " hour(s) ago";
+    return std::to_string(hours / 24) + " day(s) ago";
+}
+
+std::string SUBCON_REASONER::describe_tasks(const std::string& task_query) const
+{
+    const int64_t now = unix_now();
+    const std::set<std::string> available = available_tool_names();
+
+    auto lower = [](std::string text) {
+        for (char& ch : text) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        return text;
+    };
+
+    // One task's limits and state, shared by both views.
+    auto limits_and_state = [&](const SUBCON_TODO_ITEM& item) {
+        SUBCON_ELIGIBILITY e = subcon_check_eligibility(item, now, presence_tracker.last_arrival_unix);
+        std::ostringstream out;
+        out << (item.max_runs_per_window > 0
+                    ? "up to " + std::to_string(item.max_runs_per_window) + " run(s) per period (24 hours, or since you last got home), "
+                    : std::string("no cap on runs, "))
+            << "at least " << item.min_gap_minutes << " minute(s) apart; "
+            << "used " << e.runs_in_window << " in this period; "
+            << (item.ever_checked ? "last checked " + describe_age(now - item.last_checked_unix_seconds) : std::string("never checked")) << "; ";
+        std::vector<std::string> missing = subcon_missing_tools(item.key, available, task_defs);
+        if (!missing.empty()) {
+            out << "WAITING for a tool that is not connected right now:";
+            for (const std::string& tool : missing) out << " " << tool;
+        } else if (e.eligible) {
+            out << "can run now";
+        } else {
+            out << "can run again " << describe_wait(e.next_eligible_unix - now);
+        }
+        return out.str();
+    };
+
+    if (items.empty()) return "No background tasks are set up.";
+
+    if (task_query.empty()) {
+        std::ostringstream out;
+        out << items.size() << " background task(s). Subcon works through these on its own while you are busy:\n";
+        for (const SUBCON_TODO_ITEM& item : items)
+            out << "- " << item.label << " (name: " << item.key << "): " << item.description << "\n    " << limits_and_state(item) << "\n";
+        return out.str();
+    }
+
+    const std::string wanted = lower(task_query);
+    for (const SUBCON_TODO_ITEM& item : items) {
+        if (lower(item.key) != wanted && lower(item.label) != wanted) continue;
+        std::ostringstream out;
+        out << item.label << " (name: " << item.key << ")\n" << item.description << "\n" << limits_and_state(item) << "\n";
+        if (item.history.empty()) {
+            out << "No results recorded yet.\n";
+        } else {
+            out << "Most recent results (newest first):\n";
+            int shown = 0;
+            for (auto it = item.history.rbegin(); it != item.history.rend() && shown < 3; ++it, ++shown) {
+                out << "- " << (it->at_unix > 0 ? describe_age(now - it->at_unix) : std::string("some time ago"))
+                    << (it->noteworthy ? " [worth telling]" : " [nothing noteworthy]") << ": "
+                    << truncate_utf8(it->finding, 300) << "\n";
+            }
+        }
+        return out.str();
+    }
+
+    std::ostringstream out;
+    out << "No background task matches \"" << task_query << "\". The tasks are:";
+    for (const SUBCON_TODO_ITEM& item : items) out << " " << item.key;
+    return out.str();
+}
+
 // ---------------------------------------------------------------------
 // Prompts (ported unchanged from the old subcon_worker.cpp - see there for
 // the dated findings behind each wording)
@@ -347,7 +439,7 @@ std::vector<size_t> SUBCON_REASONER::eligible_indices(int64_t now_unix, std::vec
         if (config.ignore_limits) eligibility.back().eligible = true;
         if (!eligibility.back().eligible) continue;
 
-        std::vector<std::string> missing = subcon_missing_tools(items[i].key, available);
+        std::vector<std::string> missing = subcon_missing_tools(items[i].key, available, task_defs);
         if (!missing.empty()) { missing_tools.insert(missing.begin(), missing.end()); continue; }
         indices.push_back(i);
     }

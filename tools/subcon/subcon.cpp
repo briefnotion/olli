@@ -351,6 +351,21 @@ namespace {
                                      "asked how many notes are waiting, or whether there are any at all. For \"any updates?\" or anything else where the "
                                      "user wants to hear the notes, call get_subcon_notes instead. It answers instantly."},
                     {"parameters", {{"type", "object"}, {"properties", json::object()}, {"required", json::array()}}}
+                },
+                {
+                    {"name", "list_subcon_tasks"},
+                    {"description", "What your subconscious is set up to keep an eye on for the user, and how it is going: each background task "
+                                     "with what it checks, how often it may run, when it last ran, and whether it is waiting for a tool that is not "
+                                     "connected. Call it when the user asks what you are monitoring, checking or watching for them in the background, "
+                                     "what your background tasks are, or how one of them works. It does not return the notes themselves (that is "
+                                     "get_subcon_notes) and it changes nothing. Give a task's name to also see its most recent results. It answers instantly."},
+                    {"parameters", {
+                        {"type", "object"},
+                        {"properties", {
+                            {"task", {{"type", "string"}, {"description", "Optional. A task's name or label, to see more about that one task. Leave out to list every task."}}}
+                        }},
+                        {"required", json::array()}
+                    }}
                 }
             })}
         };
@@ -510,6 +525,17 @@ int main(int argc, char* argv[])
                 size_t waiting = reasoner.state_loaded() ? reasoner.count_notes() : 0;
                 link.send_result(call_id, "There " + std::string(waiting == 1 ? "is 1 subcon note" : "are " + std::to_string(waiting) + " subcon notes") + " waiting.",
                                  "Tell the user that number briefly, in your own voice. Do not add or guess at anything else. Begin speaking now:");
+            } else if (name == "list_subcon_tasks") {
+                if (!reasoner.state_loaded()) {
+                    link.send_result(call_id, "The background tasks are not loaded yet.");
+                } else {
+                    // value() throws on a wrongly-typed field; read it with a type check.
+                    std::string task_query;
+                    if (msg.contains("arguments") && msg["arguments"].is_object() && msg["arguments"].contains("task") && msg["arguments"]["task"].is_string())
+                        task_query = msg["arguments"]["task"].get<std::string>();
+                    link.send_result(call_id, reasoner.describe_tasks(task_query),
+                                     "Tell the user this in your own voice, in plain sentences. Only mention the tasks listed here; do not add or guess at others.");
+                }
             } else {
                 link.send_error(call_id, "Unknown tool name: " + name);
             }

@@ -4862,3 +4862,41 @@ it can actually act under its persona's judgment, not just talk about it.
   - Model gaps seen, wording NOT changed on a single run: it skipped the third day (2026-11-08) and the Notes `rag_search`, yet
     the finding still said Notes had no urgent deadlines (an unchecked claim). If it recurs, tighten the notes `how_to`.
   - The claude profile still holds the fake reminders and an `Olli_Remembers` collection; its subcon state was restored.
+
+## 2026-11-06 - subcon tasks moved from code to an editable file (`<profile>/subcon/tasks.json`)
+
+- Asked for by the user (the tasks were hard-coded in `subcon_task_defs()`). Decisions agreed first: JSON file in the
+  profile's subcon folder; read at start only (restart to pick up edits - re-reading each cycle is a possible later step);
+  a mistake in the file logs a `PROBLEM in tasks.json: ...` line, keeps the saved tasks and changes/retires nothing.
+- Code: `subcon_tasks.h` - old `subcon_task_defs()` renamed `subcon_builtin_task_defs()` (now only the seed), new
+  `subcon_parse_task_defs()` (strict, names the task and field), `to_json(SUBCON_TASK_DEF)`, and
+  `subcon_find_task_def()` / `subcon_missing_tools()` now take the definition list as a parameter.
+  `subcon_store.cpp/.hpp` - new `subcon_load_task_defs()` (seeds the file on first start, never overwrites it) and
+  `subcon_load_todo_items()` takes the list (nullptr = file unusable: keep saved tasks, retire nothing; built-ins stand in only
+  if nothing was saved). `reasoner.cpp/.hpp` - `load_state()` loads the file and keeps `task_defs` for the required_tools lookup.
+- Effect to know about: editing the built-in list in code no longer changes a profile that already has a tasks.json (the
+  file wins). To pick up a new built-in task you must copy it into that profile's file by hand (or delete the file to be re-seeded
+  from the built-ins - saved history is kept, merged by key).
+- Tested: loader against a scratch folder - seed on first start; round trip incl. required_tools and a long how_to; edited file
+  (reworded task keeps history, new task starts fresh, 4 dropped tasks archived); 9 bad-file cases (not JSON, not an array, empty
+  array, missing key, duplicate key, number as text, negative gap, empty description, required_tools not a list) all refused with
+  the saved tasks and todo_items.json untouched; bad file + nothing saved -> built-ins. Real `./subcon --dir <scratch>` start
+  created tasks.json with the 5 tasks. NOT yet run against a real profile with the live model (no behaviour change expected:
+  the same task data reaches the reasoner).
+- Install: rebuild + reinstall + restart subcon. On ron's first start it will write `olli_files_ron/subcon/tasks.json` from the
+  built-ins (including the 2026-11-06 notes wording).
+
+## 2026-11-06 - `list_subcon_tasks` (read-only): olli can say what subcon is watching
+
+- New third subcon tool, answered in code like `count_subcon_notes`: `SUBCON_REASONER::describe_tasks(task_query)`
+  (reasoner.cpp/.hpp), registered and dispatched in subcon.cpp. No argument = every task (label, name, description, cap and minimum
+  gap, runs used this period, last checked, "can run now / again in N", or WAITING for a tool that isn't connected). `task` = one
+  task by name or label, plus its last three results (finding cut to 300 bytes, noteworthy or not). Unknown task -> a message that
+  lists the names; a non-text `task` is treated as no argument. Result carries a special_instruction so olli relays it in its own voice.
+- Decisions: read-only (editing stays in tasks.json so a model can't rewrite subcon by accident); the `how_to` prompt text is left out.
+  The main loop is single-threaded (select), same as count_notes, so no locking was needed.
+- Tested through the real wire protocol: a fake olli (python, scratchpad) connected to a real `./subcon` on scratch ports against a copy
+  of ron's todo_items.json: registered 3 tools; list, one task by label and by name, unknown name and a number argument all answered
+  sensibly; "WAITING for ... rag_search" showed correctly because no tools were connected in the test. NOT tested with the real
+  model deciding to call it from a user question.
+- Install: rebuild + reinstall + restart subcon (olli itself unchanged).

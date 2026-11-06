@@ -54,7 +54,7 @@ small context window.
 
 ## The tasks
 
-Defined in code, `subcon_task_defs()` in `tools/subcon/subcon_tasks.h`:
+Defined in the profile's `subcon/tasks.json` (see "The task file" below). This table is the built-in set that seeds a new profile's file, `subcon_builtin_task_defs()` in `tools/subcon/subcon_tasks.h`:
 
 | Task | What it checks | Max per period | Min gap |
 |---|---|---|---|
@@ -64,11 +64,43 @@ Defined in code, `subcon_task_defs()` in `tools/subcon/subcon_tasks.h`:
 | Lights | `check_presence`, and only if you're away, `list_hue_lights` | 4 | 2 h |
 | Timers | `list_timers` for finished timers nobody acknowledged | 2 | 6 h |
 
-**To add, reword or remove a task:** edit `subcon_task_defs()` and rebuild. On
-the next start the saved list is merged with the definitions by `key`: a task that
-still exists keeps its history and run record but takes the new wording and limits;
-a task that no longer exists is moved to `todo_items_retired.json` (with its history)
-instead of being deleted. A new `key` starts fresh. Nothing needs hand-editing.
+### The task file (`tasks.json`)
+
+The tasks live in `<profile>/subcon/tasks.json` (e.g. `~/olli_files_ron/subcon/tasks.json`).
+The first time subcon starts on a profile it writes the built-in tasks above into it;
+after that the file is yours and is never overwritten. **Edit it, then restart subcon**
+(it is read at start, not re-read each cycle). It is one JSON array, one object per task:
+
+```json
+{
+  "key": "notes",
+  "label": "Notes and reminders",
+  "description": "Check the user's reminders and notes for anything time-sensitive",
+  "how_to": "First get today's date with get_clock_time ... (the tool hints given to the model)",
+  "max_runs_per_window": 2,
+  "min_gap_minutes": 360,
+  "required_tools": ["rag_search"]
+}
+```
+
+- `key` - the task's identity; unique. Reword anything else freely, but changing a key
+  makes a new task (the old one is retired with its history).
+- `label`, `description` - required, not empty. `how_to` - text (may be empty).
+- `max_runs_per_window` - runs allowed per window (24 h, or since you last got home);
+  0 = no cap. `min_gap_minutes` - minimum spacing. Whole numbers, 0 or more.
+- `required_tools` - tools the task cannot do without (list may be empty or left out). A
+  task whose tools aren't connected right now is not offered and doesn't use up its allowance.
+  Remember subcon's model may only use read-only tools (`is_read_only_tool()` in `reasoner.cpp`).
+
+On start the saved list is merged with the file by `key`: a task that still exists keeps its
+history and run record but takes the new wording and limits; a task that no longer exists is
+moved to `todo_items_retired.json` (with its history) instead of being deleted. A new `key`
+starts fresh.
+
+**A mistake in the file never wipes your tasks.** If it isn't valid JSON, or a task fails
+the checks above (missing field, duplicate key, text where a number belongs), subcon logs a
+`PROBLEM in tasks.json: ...` line in `subcon_log.txt` naming the task and field, keeps the
+tasks it already had saved, and changes and retires nothing. Fix the file and restart.
 
 ## Limits (how often a task may run)
 

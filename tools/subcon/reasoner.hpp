@@ -111,6 +111,15 @@ class SUBCON_REASONER {
         // number is the same one a pull would then give.
         size_t count_notes();
 
+        // What a list_subcon_tasks call answers with. Read-only and built in
+        // code from the task list and its saved state - never touches the
+        // model or the worker, changes nothing, marks nothing delivered.
+        // task_query empty = every task, briefly; otherwise the one task whose
+        // key or label matches it (case-insensitive), with more detail
+        // including its last few results. Includes whether a task is blocked
+        // right now by a tool that isn't connected.
+        std::string describe_tasks(const std::string& task_query) const;
+
         // For the display.
         std::string stage_description() const;
         std::string presence() const { return presence_value; }
@@ -179,6 +188,7 @@ class SUBCON_REASONER {
 
         bool loaded = false;
         std::filesystem::path items_path, retired_path, queue_path;
+        std::vector<SUBCON_TASK_DEF> task_defs; // from tasks.json (or the built-ins) - needed for required_tools lookups
         std::vector<SUBCON_TODO_ITEM> items;
         std::vector<SUBCON_NOTE> queue;
 

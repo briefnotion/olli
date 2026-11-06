@@ -128,17 +128,24 @@ struct SUBCON_TODO_ITEM
     std::vector<SUBCON_TODO_RESULT> history;
 };
 
-// The tasks subcon works through. Authoritative here, not in the persisted
-// file: reconcile_subcon_tasks() merges these into whatever was saved, so
-// editing this list (and rebuilding) is how a task is added, reworded or
-// retired - no hand-editing todo_items.json.
+// The BUILT-IN task list. Since 2026-11-06 this is no longer what subcon
+// runs: it is only the seed. The first time subcon starts on a profile it
+// writes these into <profile>/subcon/tasks.json (subcon_load_task_defs() in
+// subcon_store.cpp) and from then on that file is the one source of truth -
+// edit it and restart subcon. Editing this list only changes what a profile
+// that has no tasks.json yet gets.
+//
+// Whichever list is in use, reconcile_subcon_tasks() merges it into the saved
+// todo_items.json by 'key': a task that still exists keeps its history and
+// run record but takes the new wording and limits; one that no longer exists
+// is moved to todo_items_retired.json; a new key starts fresh.
 //
 // Caps are per window (subcon_window_start()): at most max_runs_per_window
 // runs in the last 24 hours, or since the user last came home if that was
 // more recent. min_gap_minutes spaces them out so a 3-a-day task doesn't
 // spend its budget in the first ten minutes, and also bounds the damage
 // if presence flaps and hands out a fresh window.
-inline const std::vector<SUBCON_TASK_DEF>& subcon_task_defs()
+inline const std::vector<SUBCON_TASK_DEF>& subcon_builtin_task_defs()
 {
     static const std::vector<SUBCON_TASK_DEF> defs = {
         {"weather", "Weather",
@@ -186,13 +193,13 @@ inline const std::vector<SUBCON_TASK_DEF>& subcon_task_defs()
     return defs;
 }
 
-// The definition with this key, or nullptr (an item can only lack one if it
-// was built by hand - reconcile_subcon_tasks() retires anything that has no
-// definition). Items don't carry required_tools, so the reasoner looks the
-// definition up by key.
-inline const SUBCON_TASK_DEF* subcon_find_task_def(const std::string& key)
+// The definition with this key in 'defs', or nullptr (an item can only lack
+// one if it was built by hand - reconcile_subcon_tasks() retires anything
+// that has no definition). Items don't carry required_tools, so the reasoner
+// looks the definition up by key.
+inline const SUBCON_TASK_DEF* subcon_find_task_def(const std::string& key, const std::vector<SUBCON_TASK_DEF>& defs)
 {
-    for (const SUBCON_TASK_DEF& def : subcon_task_defs())
+    for (const SUBCON_TASK_DEF& def : defs)
         if (def.key == key) return &def;
     return nullptr;
 }
@@ -202,14 +209,88 @@ inline const SUBCON_TASK_DEF* subcon_find_task_def(const std::string& key)
 // the model right now - passed in, not looked up, so this stays pure and
 // unit testable like everything else in this file. A key with no
 // definition requires nothing.
-inline std::vector<std::string> subcon_missing_tools(const std::string& task_key, const std::set<std::string>& available)
+inline std::vector<std::string> subcon_missing_tools(const std::string& task_key, const std::set<std::string>& available, const std::vector<SUBCON_TASK_DEF>& defs)
 {
     std::vector<std::string> missing;
-    const SUBCON_TASK_DEF* def = subcon_find_task_def(task_key);
+    const SUBCON_TASK_DEF* def = subcon_find_task_def(task_key, defs);
     if (!def) return missing;
     for (const std::string& tool : def->required_tools)
         if (!available.count(tool)) missing.push_back(tool);
     return missing;
+}
+
+// ---- tasks.json (the editable task list) ----
+
+inline void to_json(json& j, const SUBCON_TASK_DEF& def)
+{
+    j = json{
+        {"key", def.key},
+        {"label", def.label},
+        {"description", def.description},
+        {"how_to", def.how_to},
+        {"max_runs_per_window", def.max_runs_per_window},
+        {"min_gap_minutes", def.min_gap_minutes},
+        {"required_tools", def.required_tools}
+    };
+}
+
+// Reads and CHECKS a task list written by a person. Strict on purpose:
+// a typo must produce a clear message, not a quietly different task list
+// (the caller then keeps the tasks it already has - see
+// subcon_load_task_defs()). Rules: a JSON array with at least one task;
+// each task an object with a non-empty unique "key", "label" and
+// "description" (strings), "how_to" a string (may be empty), whole numbers
+// "max_runs_per_window" >= 0 (0 = no cap) and "min_gap_minutes" >= 0, and
+// "required_tools" an array of strings (may be empty or left out). Fields
+// it does not know are ignored. On failure 'error' says which task and field.
+inline bool subcon_parse_task_defs(const json& data, std::vector<SUBCON_TASK_DEF>& out, std::string& error)
+{
+    out.clear();
+    if (!data.is_array()) { error = "the file must hold a JSON array of tasks, like [ {...}, {...} ]"; return false; }
+    if (data.empty()) { error = "the file holds no tasks - subcon would have nothing to do"; return false; }
+
+    std::set<std::string> seen_keys;
+    for (size_t i = 0; i < data.size(); ++i)
+    {
+        const json& t = data[i];
+        std::string where = "task #" + std::to_string(i + 1);
+        if (!t.is_object()) { error = where + " is not an object ({ ... })"; return false; }
+
+        auto need_text = [&](const char* field, bool allow_empty, std::string& dest) -> bool {
+            if (!t.contains(field) || !t[field].is_string()) { error = where + ": \"" + field + "\" is missing or is not text"; return false; }
+            dest = t[field].get<std::string>();
+            if (!allow_empty && dest.find_first_not_of(" \t\r\n") == std::string::npos) { error = where + ": \"" + field + "\" is empty"; return false; }
+            return true;
+        };
+        auto need_count = [&](const char* field, int& dest) -> bool {
+            if (!t.contains(field) || !t[field].is_number_integer()) { error = where + ": \"" + field + "\" is missing or is not a whole number"; return false; }
+            long long value = t[field].get<long long>();
+            if (value < 0 || value > 1000000) { error = where + ": \"" + field + "\" must be between 0 and 1000000"; return false; }
+            dest = static_cast<int>(value);
+            return true;
+        };
+
+        SUBCON_TASK_DEF def;
+        if (!need_text("key", false, def.key)) return false;
+        where = "task \"" + def.key + "\"";
+        if (!seen_keys.insert(def.key).second) { error = where + ": the key is used by more than one task"; return false; }
+        if (!need_text("label", false, def.label)) return false;
+        if (!need_text("description", false, def.description)) return false;
+        if (!need_text("how_to", true, def.how_to)) return false;
+        if (!need_count("max_runs_per_window", def.max_runs_per_window)) return false;
+        if (!need_count("min_gap_minutes", def.min_gap_minutes)) return false;
+        if (t.contains("required_tools"))
+        {
+            if (!t["required_tools"].is_array()) { error = where + ": \"required_tools\" must be a list of tool names"; return false; }
+            for (const json& name : t["required_tools"])
+            {
+                if (!name.is_string() || name.get<std::string>().empty()) { error = where + ": \"required_tools\" must hold only tool names (text)"; return false; }
+                def.required_tools.push_back(name.get<std::string>());
+            }
+        }
+        out.push_back(def);
+    }
+    return true;
 }
 
 inline void to_json(json& j, const SUBCON_TODO_RESULT& result)

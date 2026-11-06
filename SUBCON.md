@@ -60,7 +60,7 @@ Defined in code, `subcon_task_defs()` in `tools/subcon/subcon_tasks.h`:
 |---|---|---|---|
 | Weather | `web_search` for Lafayette, Louisiana; noteworthy only for alerts, storms, flooding, extreme heat/cold, or a big change | 3 | 4 h |
 | Past conversations | `rag_search` over the conversations collection for unanswered questions / unkept promises | 3 | 4 h |
-| Notes and reminders | `rag_search` over the `Olli_Remembers` collection (reminders saved with `remember_note`; only ones with an `About:` date count) and then `Notes`, for deadlines and appointments that are today or coming up (changed 2026-11-04; key `notes` unchanged, so history is kept) | 2 | 6 h |
+| Notes and reminders | gets today's date, then `rag_find_text` (exact text match, rag tool) on `Olli_Remembers` for `About: <date>` for today, tomorrow and the day after, plus a `rag_search` over `Notes` for deadlines and appointments (changed 2026-11-04 and again 2026-11-06; key `notes` unchanged, so history is kept) | 2 | 6 h |
 | Lights | `check_presence`, and only if you're away, `list_hue_lights` | 4 | 2 h |
 | Timers | `list_timers` for finished timers nobody acknowledged | 2 | 6 h |
 

@@ -4827,3 +4827,38 @@ it can actually act under its persona's judgment, not just talk about it.
   one. A malformed date/time (not YYYY-MM-DD / HH:MM) is still a hard error. The `about_date` description also now says to use
   it only for a note about a particular day. Live-checked on the claude profile: oil fact, cyan, and "sister's birthday is
   the 14th" all saved on the first try, none with an About line or an invented date; second-guess made no tool calls.
+
+## 2026-11-06 - `rag_find_text`: exact-match lookup so subcon can find reminders by date
+
+- Why: subcon's notes task used `rag_search` (similarity, fixed top 5), which cannot find "reminders dated tomorrow" among
+  hundreds - embeddings do not compare dates. The user wanted the LLM to stay in charge (not subcon reading the folder
+  itself), so the fix is a new call in the rag tool: `rag_find_text {collection, contains}` (tools/rag/rag_tool/rag_tool.cpp:
+  registration + `handle_find_text` + one dispatch branch). Literal, case-insensitive substring over each document's full
+  stored text; nothing in it knows what a reminder is. No change to rag_db (uses the existing `list_documents`).
+- Output sized for subcon's 8192-token context (its own cap is 6000 bytes per tool result): match count FIRST (so a
+  downstream cut-off keeps the warning), max 25 entries, max ~4500 bytes, "NOT ALL ARE SHOWN" when truncated.
+- Subcon notes task (`tools/subcon/subcon_tasks.h`, `how_to` only; `required_tools` deliberately unchanged so an old
+  rag_tool does not hide the task): get_clock_time, then `rag_find_text` on Olli_Remembers for `About: <YYYY-MM-DD>` for
+  today, tomorrow and the day after, plus `rag_search` on Notes; falls back to `rag_search` on Olli_Remembers if the new call
+  or the date is unavailable. Window is three days on purpose (each day is a tool call; subcon allows 4 per reply).
+- Tested: the real handler against a scratch database with 300 fake reminders plus a dentist note and a plain fact -
+  exact date finds exactly the one dentist note; case-insensitive; month prefix hits the 25 cap and says 25 of 25; the
+  whole-collection match says "301 ... showing 25. NOT ALL ARE SHOWN"; unknown collection, missing argument, newline,
+  and no-match are clear errors/messages. NOT tested: through the live olli link, or a real subcon cycle with the model
+  actually choosing these calls (the model has been unreliable at multi-call tasks before) - needs a live run.
+- Known limits: only today..+2 days are looked up (an overdue or far-off reminder is not surfaced); a reminder whose
+  `About:` date was dropped by the date check (see 2026-11-04) has no date to find; subcon still only speaks when asked.
+- To use it: rebuild + reinstall + restart BOTH `rag_tool` and `subcon`. Olli itself is unchanged.
+
+- Live test of `rag_find_text` on the claude profile (2026-11-06, olli + rag_tool + subcon, 71 fake reminders incl. a dentist
+  note and a dry-cleaning note dated tomorrow and a plumber note dated today, plus near-miss dates and plain facts):
+  - First run FAILED: subcon only lets its model use tools on a hard-coded read-only list (`is_read_only_tool()`,
+    tools/subcon/reasoner.cpp), and `rag_find_text` was not on it ("withheld (not read-only)" in subcon_log.txt), so the model
+    never saw it - and still reported "no time-sensitive reminders" after calling only the clock (a false all-clear; the clock
+    call made the cycle count as having used a tool). A unit test of the handler could not have caught this.
+  - Fix: `"rag_find_text"` added to that list (read-only call). Any NEW remote read-only tool subcon should use needs adding there too.
+  - Second run PASSED: clock -> `rag_find_text` "About: 2026-11-06" (plumber) -> `rag_find_text` "About: 2026-11-07" (dentist +
+    dry cleaning); finding "worth telling" listed all three, nothing from the near-miss dates, facts or fillers.
+  - Model gaps seen, wording NOT changed on a single run: it skipped the third day (2026-11-08) and the Notes `rag_search`, yet
+    the finding still said Notes had no urgent deadlines (an unchecked claim). If it recurs, tighten the notes `how_to`.
+  - The claude profile still holds the fake reminders and an `Olli_Remembers` collection; its subcon state was restored.

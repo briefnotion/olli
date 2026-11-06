@@ -159,14 +159,18 @@ inline const std::vector<SUBCON_TASK_DEF>& subcon_task_defs()
          3, 240, {"rag_search"}},
         {"notes", "Notes and reminders",
          "Check the user's reminders and notes for anything time-sensitive or coming up soon",
-         "Search two collections, one rag_search call each: first the Olli_Remembers collection "
-         "(reminders the user asked Olli to remember - each file has a \"Saved:\" line and, when "
-         "it is about a particular day, an \"About:\" line with that date), then the Notes "
-         "collection. Look for deadlines, appointments, or dates that are today or coming up soon; "
-         "if get_clock_time is available, use it to know today's date. A reminder is only "
-         "time-sensitive because of its \"About:\" date - a plain remembered fact with no \"About:\" "
-         "line (a favorite color, a preference) is not noteworthy, and neither is a date that is "
-         "far away or already long past. Nothing time-sensitive in either collection is not noteworthy.",
+         "First get today's date with get_clock_time (format %Y-%m-%d). Then look for reminders "
+         "the user asked Olli to remember in the Olli_Remembers collection (each file has a "
+         "\"Saved:\" line and, when it is about a particular day, an \"About:\" line with that "
+         "date). Use rag_find_text on Olli_Remembers once for each of three days - today, tomorrow "
+         "and the day after - with contains set to \"About: \" followed by that date written "
+         "YYYY-MM-DD (for example \"About: 2026-11-07\"). That is an exact match and finds every "
+         "reminder for that day. Also use rag_search on the Notes collection for deadlines or "
+         "appointments coming up soon. If rag_find_text or the date is not available, use "
+         "rag_search on Olli_Remembers instead. A reminder is only time-sensitive because of its "
+         "\"About:\" date - a plain remembered fact with no \"About:\" line (a favorite color, a "
+         "preference) is not noteworthy. Nothing found for those days, and nothing time-sensitive "
+         "in Notes, is not noteworthy.",
          2, 360, {"rag_search"}},
         {"lights", "Lights",
          "Check whether any lights were left on while the user is away",

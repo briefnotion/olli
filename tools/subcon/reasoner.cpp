@@ -37,7 +37,7 @@ namespace {
     {
         static const char* const allowed[] = {
             "web_search", "fetch_website_content", "rag_list_collections", "rag_search", "rag_search_documents",
-            "rag_get_document", "list_hue_lights", "check_presence", "list_timers", "check_timer", "get_clock_time"
+            "rag_get_document", "rag_find_text", "list_hue_lights", "check_presence", "list_timers", "check_timer", "get_clock_time"
         };
         for (const char* a : allowed)
             if (name == a) return true;

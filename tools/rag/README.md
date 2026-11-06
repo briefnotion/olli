@@ -22,7 +22,7 @@ each). Adding a new "type" of content is just creating a new collection
 through `rag_admin` - no schema change, no code change.
 
 **Name matching is deliberately lenient**: collection names (`WHERE
-collection ...` on any of the four tools below) and document titles
+collection ...` on any of the collection-taking tools below) and document titles
 (`rag_get_document`) both match case-insensitively; a title also tolerates
 a missing/wrong file extension and treats `_`/`-` as interchangeable with
 a space (`normalize_title()` in `rag_db.cpp` - "misc notes" and
@@ -252,6 +252,7 @@ per-file printing.
 | `rag_list_collections` | Lists every collection with its description - lets the model discover what's actually in the database before guessing a name. |
 | `rag_search` | `{query, collection?}` - embeds the query, searches (optionally scoped to one named collection), returns the top 5 *chunks* with their source document/collection - "find the specific passage." Several results can come from the same document. |
 | `rag_search_documents` | `{query, collection?}` - same search, but deduplicated to one result per *document* (its single best-scoring chunk) instead of up to 5 chunks that might pile up from the same one - "what do I have on this topic," a broader survey (top 10) across documents rather than passages within them. |
+| `rag_find_text` | `{collection, contains}` (both required) - an exact, literal, case-insensitive text match over every document in ONE collection, not a search by meaning. Exists because the two searches above return only the nearest 5 or 10 results: with hundreds of small documents (reminders) an exact date can sit outside them. Returns the match count first, then up to 25 short entries (title, first line, matching line; at most about 4500 bytes), and says plainly when not all matches are shown. Added 2026-11-06; subcon's notes task uses it to look up `About: <date>` in `Olli_Remembers`. |
 | `rag_get_document` | `{title, collection}` (both required) - fetches one document's complete original content verbatim, once something's been identified by title/collection from either search above. Neither search tool returns full documents on its own; this is the only way to get one. |
 
 `rag_get_document` also sets `special_instruction` on its result (see

@@ -187,6 +187,7 @@ void Settings::load_settings() {
         //volume = j.value("volume", volume);
 
         tool_web_search_apiKey = j.value("tool_web_search_apiKey", tool_web_search_apiKey);
+        ai_backend = j.value("ai_backend", ai_backend);
 
         std::cout << "Settings loaded successfully from: " << config_path << std::endl;
     } catch (const std::exception& e) {
@@ -206,6 +207,7 @@ void Settings::save_settings() {
     //j["volume"] = volume;
 
     j["tool_web_search_apiKey"] = tool_web_search_apiKey;
+    j["ai_backend"] = ai_backend;
 
     std::ofstream file(config_path);
     if (file.is_open()) {

@@ -129,6 +129,12 @@ class Settings {
 
         std::string tool_web_search_apiKey = "Enter_API_key_for_serpapi.com";
 
+        // Which AI answers: "ollama" (a local Ollama server, the default) or
+        // "gemini" (Google's Gemini API - needs gemini_key.txt in the profile
+        // folder, see gemini_system.h). Read once at startup (main.cpp, via
+        // make_ai_system() in ai_factory.h); changing it needs a restart.
+        std::string ai_backend = "ollama";
+
         // Set from the command line (e.g. `./olli ron`) so each person gets
         // their own settings/history/scenes under ~/olli_files_<profile_name>
         // instead of the shared ~/olli_files. Empty means the shared default.

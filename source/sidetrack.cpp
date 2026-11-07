@@ -255,11 +255,11 @@ void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ai_root& main
         // like other sub-agent instances) so it's actually capable of doing
         // something about what it decides needs doing, not just talking
         // about it.
-        SIDETRACK_CHAT_INSTANCE.PROPS.model = main_instance.PROPS.model;
-        SIDETRACK_CHAT_INSTANCE.PROPS.host = main_instance.PROPS.host;
-        SIDETRACK_CHAT_INSTANCE.PROPS.port = main_instance.PROPS.port;
-        SIDETRACK_CHAT_INSTANCE.PROPS.use_thinking = true;
-        SIDETRACK_CHAT_INSTANCE.PROPS.LOAD_SAVE_HISTORY_ON_DISK = false;
+        SIDETRACK_CHAT_INSTANCE->PROPS.model = main_instance.PROPS.model;
+        SIDETRACK_CHAT_INSTANCE->PROPS.host = main_instance.PROPS.host;
+        SIDETRACK_CHAT_INSTANCE->PROPS.port = main_instance.PROPS.port;
+        SIDETRACK_CHAT_INSTANCE->PROPS.use_thinking = true;
+        SIDETRACK_CHAT_INSTANCE->PROPS.LOAD_SAVE_HISTORY_ON_DISK = false;
 
         // stream_output/stream_thinking are independent gates on
         // comms.INPUT_FROM_LLM/THINKING (olla.h/olla.cpp) - Ollama's
@@ -270,18 +270,18 @@ void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ai_root& main
         // that WAS written to comms has already reached the screen live -
         // see the standalone discussion on this). last_received.response
         // still gets the full answer regardless, for the DONE check below.
-        SIDETRACK_CHAT_INSTANCE.PROPS.stream_output = false;
-        SIDETRACK_CHAT_INSTANCE.PROPS.stream_thinking = true;
+        SIDETRACK_CHAT_INSTANCE->PROPS.stream_output = false;
+        SIDETRACK_CHAT_INSTANCE->PROPS.stream_thinking = true;
 
         // Distinguishes this instance's own send()-logged messages
         // (DEBUG_LOG_CLASS::log_message(), called unconditionally inside send(),
         // olla.cpp) from consolidation's use of the same
         // SIDETRACK_CHAT_INSTANCE in debug_full_history.txt - both used to
         // log under one generic "sidetrack" label, impossible to tell apart.
-        SIDETRACK_CHAT_INSTANCE.debug_label = "sidetrack-second-guess";
+        SIDETRACK_CHAT_INSTANCE->debug_label = "sidetrack-second-guess";
         DEBUG_LOG_CLASS::instance().log_event("sidetrack-second-guess", "review started");
 
-        SIDETRACK_CHAT_INSTANCE.clear_history();
+        SIDETRACK_CHAT_INSTANCE->clear_history();
         Message task_note;
         task_note.role = "system";
         task_note.content = "You are reviewing your own last response to the user, given fast without "
@@ -293,7 +293,7 @@ void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ai_root& main
                              "has already explicitly made - their own most recent instruction always "
                              "wins, even if you think a different one would have been better.";
         task_note.consolidation_level = -1;
-        SIDETRACK_CHAT_INSTANCE.history.push_back(task_note);
+        SIDETRACK_CHAT_INSTANCE->history.push_back(task_note);
 
         // task_note above only describes what to do, not what's actually
         // being reviewed - without the real exchange, this call was judging
@@ -311,14 +311,14 @@ void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ai_root& main
             size_t start = main_instance.history.size();
             while (start > 0 && main_instance.history[start - 1].role != "user") --start;
             for (size_t i = start; i < main_instance.history.size(); ++i) {
-                SIDETRACK_CHAT_INSTANCE.history.push_back(main_instance.history[i]);
+                SIDETRACK_CHAT_INSTANCE->history.push_back(main_instance.history[i]);
             }
         }
 
         comms.INPUT_FROM_USER.set("Was your last reply accurate, and did you really do anything you said "
                                  "you did? Set needs_correction to true only if something was wrong or "
                                  "left unfinished; false if it was fine as-is.");
-        start_second_guess_call(SIDETRACK_CHAT_INSTANCE, comms, tool_worker, SECOND_GUESS_RESULT_FORMAT);
+        start_second_guess_call(*SIDETRACK_CHAT_INSTANCE, comms, tool_worker, SECOND_GUESS_RESULT_FORMAT);
 
         second_guess_stage = 3;
     }
@@ -338,12 +338,12 @@ void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ai_root& main
         // runs - during that narrow gap this would otherwise re-capture
         // the same names on every tick that lands in it, since neither
         // is_processing nor tool_calls has changed yet.
-        if (!SIDETRACK_CHAT_INSTANCE.is_processing && SIDETRACK_CHAT_INSTANCE.last_received.complete && !SIDETRACK_CHAT_INSTANCE.last_received.tool_calls.empty())
+        if (!SIDETRACK_CHAT_INSTANCE->is_processing && SIDETRACK_CHAT_INSTANCE->last_received.complete && !SIDETRACK_CHAT_INSTANCE->last_received.tool_calls.empty())
         {
-            for (const ToolCall& tc : SIDETRACK_CHAT_INSTANCE.last_received.tool_calls)
+            for (const ToolCall& tc : SIDETRACK_CHAT_INSTANCE->last_received.tool_calls)
                 second_guess_actions_taken.push_back(tc.name);
         }
-        if (!poll_second_guess_call(io_worker, SIDETRACK_CHAT_INSTANCE, comms, tools_list, tool_worker, system))
+        if (!poll_second_guess_call(io_worker, *SIDETRACK_CHAT_INSTANCE, comms, tools_list, tool_worker, system))
         {
             return; // still working - try again next tick, do nothing else this one
         }
@@ -365,7 +365,7 @@ void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ai_root& main
         bool needs_correction = true;
         try
         {
-            json parsed = json::parse(SIDETRACK_CHAT_INSTANCE.last_received.response);
+            json parsed = json::parse(SIDETRACK_CHAT_INSTANCE->last_received.response);
             needs_correction = parsed.at("needs_correction").get<bool>();
         }
         catch (const std::exception& e)
@@ -378,7 +378,7 @@ void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ai_root& main
         // - e.g. checking a timer before deciding "DONE" - see stage 3's
         // own comment) - same "a real action is never silent" rule stage 6
         // applies, just inlined here since there's no later stage to reach.
-        if (!SIDETRACK_CHAT_INSTANCE.last_received.complete)
+        if (!SIDETRACK_CHAT_INSTANCE->last_received.complete)
         {
             DEBUG_LOG_CLASS::instance().log_event("sidetrack-second-guess", "interrupted during the DONE check - nothing to add");
             commit_action_only_note(main_instance, second_guess_actions_taken);
@@ -397,7 +397,7 @@ void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ai_root& main
             DEBUG_LOG_CLASS::instance().log_event("sidetrack-second-guess", "not done - asking it to say/do what's needed");
             // Streaming back on for this one - this is the real content the
             // user should actually see/hear, unlike the DONE-check above.
-            SIDETRACK_CHAT_INSTANCE.PROPS.stream_output = true;
+            SIDETRACK_CHAT_INSTANCE->PROPS.stream_output = true;
             // This prompt follows stage 4's structured-output DONE-check
             // reply (SECOND_GUESS_RESULT_FORMAT, above) in the same
             // conversation and streams straight into the real, shared comms,
@@ -421,9 +421,9 @@ void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ai_root& main
             // private history only, with a plain sentence saying the same.
             // The instance isn't processing (poll_second_guess_call() joined
             // its thread), so no lock is needed, same as stage 2's pushes.
-            if (!SIDETRACK_CHAT_INSTANCE.history.empty())
+            if (!SIDETRACK_CHAT_INSTANCE->history.empty())
             {
-                Message& verdict = SIDETRACK_CHAT_INSTANCE.history.back();
+                Message& verdict = SIDETRACK_CHAT_INSTANCE->history.back();
                 if (verdict.role == "assistant" && verdict.tool_calls.empty())
                 {
                     verdict.content = "Review result: this reply needs correction.";
@@ -433,7 +433,7 @@ void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ai_root& main
             comms.INPUT_FROM_USER.set("Go ahead - correct what was wrong, or actually follow through on "
                                      "what you already claimed. Nothing beyond that. If it needs an "
                                      "action, use your tools; otherwise reply in plain text.");
-            start_second_guess_call(SIDETRACK_CHAT_INSTANCE, comms, tool_worker);
+            start_second_guess_call(*SIDETRACK_CHAT_INSTANCE, comms, tool_worker);
             second_guess_stage = 5;
         }
     }
@@ -442,12 +442,12 @@ void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ai_root& main
         // Waiting on the second ("say/do it") call - same shape as stage 3,
         // including the same action-capture step (see its own comment,
         // including why !is_processing has to be checked too).
-        if (!SIDETRACK_CHAT_INSTANCE.is_processing && SIDETRACK_CHAT_INSTANCE.last_received.complete && !SIDETRACK_CHAT_INSTANCE.last_received.tool_calls.empty())
+        if (!SIDETRACK_CHAT_INSTANCE->is_processing && SIDETRACK_CHAT_INSTANCE->last_received.complete && !SIDETRACK_CHAT_INSTANCE->last_received.tool_calls.empty())
         {
-            for (const ToolCall& tc : SIDETRACK_CHAT_INSTANCE.last_received.tool_calls)
+            for (const ToolCall& tc : SIDETRACK_CHAT_INSTANCE->last_received.tool_calls)
                 second_guess_actions_taken.push_back(tc.name);
         }
-        if (!poll_second_guess_call(io_worker, SIDETRACK_CHAT_INSTANCE, comms, tools_list, tool_worker, system))
+        if (!poll_second_guess_call(io_worker, *SIDETRACK_CHAT_INSTANCE, comms, tools_list, tool_worker, system))
         {
             return;
         }
@@ -458,8 +458,8 @@ void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ai_root& main
         // Commit whatever came back onto the real conversation. An
         // interrupted/incomplete answer still gets kept, marked with "..."
         // to show it was cut short, rather than discarded outright.
-        std::string answer = SIDETRACK_CHAT_INSTANCE.last_received.response;
-        if (!SIDETRACK_CHAT_INSTANCE.last_received.complete)
+        std::string answer = SIDETRACK_CHAT_INSTANCE->last_received.response;
+        if (!SIDETRACK_CHAT_INSTANCE->last_received.complete)
         {
             answer += "...";
             DEBUG_LOG_CLASS::instance().log_event("sidetrack-second-guess", "interrupted mid-answer - keeping partial response");
@@ -501,7 +501,7 @@ void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ai_root& main
         second_guess_stage = 100;
     }
 
-    // Thinking is never saved anywhere - SIDETRACK_CHAT_INSTANCE.last_received.
+    // Thinking is never saved anywhere - SIDETRACK_CHAT_INSTANCE->last_received.
     // thinking never reaches main_instance.history. It does still reach the
     // screen: comms.INPUT_FROM_THINKING is the same field IO_WORKER_CLASS
     // already drains for the main chat (exchange()/thread_main(),
@@ -587,19 +587,19 @@ void SIDETRACK_CLASS::run_consolidation(ai_root& main_instance)
         // exact bug documented in the old create()'s comment above (the #if
         // 0 block). SIDETRACK_CHAT_INSTANCE stays in its dumbest form here:
         // no thinking, no streaming, no disk saves, no tools.
-        SIDETRACK_CHAT_INSTANCE.PROPS.model = main_instance.PROPS.model;
-        SIDETRACK_CHAT_INSTANCE.PROPS.host = main_instance.PROPS.host;
-        SIDETRACK_CHAT_INSTANCE.PROPS.port = main_instance.PROPS.port;
-        SIDETRACK_CHAT_INSTANCE.PROPS.use_thinking = false;
-        SIDETRACK_CHAT_INSTANCE.PROPS.stream_output = false;
-        SIDETRACK_CHAT_INSTANCE.PROPS.LOAD_SAVE_HISTORY_ON_DISK = false;
+        SIDETRACK_CHAT_INSTANCE->PROPS.model = main_instance.PROPS.model;
+        SIDETRACK_CHAT_INSTANCE->PROPS.host = main_instance.PROPS.host;
+        SIDETRACK_CHAT_INSTANCE->PROPS.port = main_instance.PROPS.port;
+        SIDETRACK_CHAT_INSTANCE->PROPS.use_thinking = false;
+        SIDETRACK_CHAT_INSTANCE->PROPS.stream_output = false;
+        SIDETRACK_CHAT_INSTANCE->PROPS.LOAD_SAVE_HISTORY_ON_DISK = false;
 
         // Distinguishes this instance's own send()-logged messages
         // (DEBUG_LOG_CLASS::log_message(), called unconditionally inside send(),
         // olla.cpp) from second-guess's use of the same
         // SIDETRACK_CHAT_INSTANCE in debug_full_history.txt - both used to
         // log under one generic "sidetrack" label, impossible to tell apart.
-        SIDETRACK_CHAT_INSTANCE.debug_label = "sidetrack-consolidate";
+        SIDETRACK_CHAT_INSTANCE->debug_label = "sidetrack-consolidate";
         DEBUG_LOG_CLASS::instance().log_event("sidetrack-consolidate", "pass started");
 
         // Fresh scratch history, seeded with one protected (level -1)
@@ -607,7 +607,7 @@ void SIDETRACK_CLASS::run_consolidation(ai_root& main_instance)
         // survives every clear_history_keep_protected() call below so each
         // level's consolidation pass starts from the same instructions
         // without re-stating them.
-        SIDETRACK_CHAT_INSTANCE.clear_history();
+        SIDETRACK_CHAT_INSTANCE->clear_history();
         {
             Message consolidation_instructions;
             consolidation_instructions.role = "system";
@@ -618,7 +618,7 @@ void SIDETRACK_CLASS::run_consolidation(ai_root& main_instance)
                 "user's overall intent. Respond with only the summary - no "
                 "preamble, no meta-commentary.";
             consolidation_instructions.consolidation_level = -1;
-            SIDETRACK_CHAT_INSTANCE.history.push_back(consolidation_instructions);
+            SIDETRACK_CHAT_INSTANCE->history.push_back(consolidation_instructions);
         }
 
         // 1. Bucket every message by consolidation_level - protected
@@ -706,18 +706,18 @@ void SIDETRACK_CLASS::run_consolidation(ai_root& main_instance)
             // no concurrent writer - everything in this stage runs
             // synchronously on the main thread (see the still-open
             // sync-vs-threaded question).
-            SIDETRACK_CHAT_INSTANCE.clear_history_keep_protected();
+            SIDETRACK_CHAT_INSTANCE->clear_history_keep_protected();
             for (size_t i = 0; i < overflow_count; ++i) {
                 const Message& msg = levels[level][i];
                 if (msg.role == "tool") {
                     Message flattened;
                     flattened.role = "user";
                     flattened.content = "[Tool result]: " + msg.content;
-                    SIDETRACK_CHAT_INSTANCE.history.push_back(flattened);
+                    SIDETRACK_CHAT_INSTANCE->history.push_back(flattened);
                 } else if (msg.role == "system" && starts_with(msg.content, "[DIRECTOR_NOTE]")) {
                     continue; // redundant with the "tool" message right before it
                 } else {
-                    SIDETRACK_CHAT_INSTANCE.history.push_back(msg);
+                    SIDETRACK_CHAT_INSTANCE->history.push_back(msg);
                 }
             }
 
@@ -725,10 +725,10 @@ void SIDETRACK_CLASS::run_consolidation(ai_root& main_instance)
                 "squashing " + std::to_string(overflow_count) + " messages at level " + std::to_string(level));
 
             blank_comms.INPUT_FROM_USER.set("What happened in all your memory? Summarize it.");
-            SIDETRACK_CHAT_INSTANCE.send(nullptr, blank_comms, "system");
+            SIDETRACK_CHAT_INSTANCE->send(nullptr, blank_comms, "system");
 
-            std::string summary_text = SIDETRACK_CHAT_INSTANCE.last_received.response;
-            if (SIDETRACK_CHAT_INSTANCE.last_received.complete && !summary_text.empty())
+            std::string summary_text = SIDETRACK_CHAT_INSTANCE->last_received.response;
+            if (SIDETRACK_CHAT_INSTANCE->last_received.complete && !summary_text.empty())
             {
                 levels[level].erase(levels[level].begin(), levels[level].begin() + static_cast<std::ptrdiff_t>(overflow_count));
 
@@ -805,8 +805,12 @@ void SIDETRACK_CLASS::run_clear_context(ai_root& main_instance)
 
 
 
-void SIDETRACK_CLASS::create(OLLAMA_SYSTEM_PROPERTIES Properties)
+void SIDETRACK_CLASS::create(const ai_root& main_instance)
 {
+    // Same backend as the main chat, with a copy of its properties (open()
+    // below installs them).
+    SIDETRACK_CHAT_INSTANCE = main_instance.make_sibling();
+
     // Only needed transiently here, for open()'s own tool->configure(*this)
     // pass - not stored as a member (see SIDETRACK_CHAT_INSTANCE's own
     // comment in sidetrack.h). Whatever later calls .send()/.process() on
@@ -815,8 +819,8 @@ void SIDETRACK_CLASS::create(OLLAMA_SYSTEM_PROPERTIES Properties)
     // comment for why.
     std::vector<std::unique_ptr<TOOL_BASE>> tools_list;
     populate_default_tools(tools_list);
-    SIDETRACK_CHAT_INSTANCE.debug_label = "sidetrack";
-    SIDETRACK_CHAT_INSTANCE.open(tools_list, Properties);
+    SIDETRACK_CHAT_INSTANCE->debug_label = "sidetrack";
+    SIDETRACK_CHAT_INSTANCE->open(tools_list, main_instance.PROPS);
 
     IDLE_WAIT_TIMER_FOR_CONTEXT_CLEAR.set(IDLE_WAIT_TIME_FOR_CONTEXT_CLEAR);
     PERSISTENT_CHECK_TIMER.set(PERSISTENT_CHECK_INTERVAL);
@@ -824,7 +828,7 @@ void SIDETRACK_CLASS::create(OLLAMA_SYSTEM_PROPERTIES Properties)
 
 void SIDETRACK_CLASS::shutdown()
 {
-    SIDETRACK_CHAT_INSTANCE.request_exit();
+    if (SIDETRACK_CHAT_INSTANCE) SIDETRACK_CHAT_INSTANCE->request_exit();
 }
 
 void SIDETRACK_CLASS::check(IO_WORKER_CLASS& io_worker, ai_root& main_instance, COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, CLASS_SYSTEM* system)

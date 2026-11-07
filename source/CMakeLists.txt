@@ -146,6 +146,7 @@ add_executable(olli
     ../source/ai_root.cpp
     ../source/ollama_system.cpp
     ../source/gemini_system.cpp
+    ../source/ai_factory.cpp
     ../source/comms.cpp
     ../source/io_worker.cpp
     ../source/tool_worker.cpp

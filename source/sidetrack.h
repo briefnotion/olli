@@ -1,7 +1,7 @@
 #ifndef SIDETRACK_H
 #define SIDETRACK_H
 
-#include "ollama_system.h"
+#include "ai_root.h"
 #include "fled_time.h"
 
 /**
@@ -29,7 +29,11 @@ class SIDETRACK_CLASS
         // gets the real tools_list and tool_worker (both passed through
         // from main.cpp, not a throwaway/nullptr) - see run_second_guess()'s
         // own comment (sidetrack.cpp) for why.
-        ollama_system SIDETRACK_CHAT_INSTANCE;
+        // A pointer, not a member object, because which backend it is (ollama,
+        // gemini...) is only known once main.cpp has chosen one: create() makes
+        // it with main_instance.make_sibling(), so sidetrack always follows the
+        // main chat's backend.
+        std::unique_ptr<ai_root> SIDETRACK_CHAT_INSTANCE;
 
         int consolidation_stage = 0;
         int context_clear_stage = 0;
@@ -101,12 +105,13 @@ class SIDETRACK_CLASS
         void run_clear_context(ai_root& main_instance);
 
     public:
-        // Properties: copied from the main chat instance's own PROPS (model,
-        // host, port, etc.) so sidetrack's LLM calls hit the same Ollama
-        // server/model - see ai_root::open()'s two-argument overload,
+        // main_instance: sidetrack's own instance is made from it with
+        // make_sibling() (same backend - ollama, gemini...) and given a copy
+        // of its PROPS (model, host, port, etc.) so sidetrack's LLM calls hit
+        // the same server/model - see ai_root::open()'s two-argument overload,
         // which this uses and which forces LOAD_SAVE_HISTORY_ON_DISK off
         // (this instance's history is scratch, never the real history.json).
-        void create(OLLAMA_SYSTEM_PROPERTIES Properties);
+        void create(const ai_root& main_instance);
         void check(IO_WORKER_CLASS& io_worker, ai_root& main_instance, COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, CLASS_SYSTEM* system);
 
         // Same crash ai_root::request_exit()/shutdown_background_tasks()

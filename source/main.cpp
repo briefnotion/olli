@@ -2,7 +2,7 @@
 #define main_cpp
 
 #include "main.h"
-#include "ollama_system.h"
+#include "ai_factory.h"
 #include "remote_tools.h"
 #include <atomic>
 #include <thread>
@@ -274,7 +274,11 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
 
         CLASS_SYSTEM system;
         COMMS comms;
-        ollama_system chat; // concrete backend; the rest of olli only sees it as ai_root (see ai_root.h)
+        // Owns the main chat. Created below, once the profile's settings say
+        // which AI backend to use (ai_backend, see make_ai_system()); declared
+        // here, at the old 'chat' position, so it is still destroyed after
+        // sidetrack, io_worker and tool_worker, exactly as before.
+        std::unique_ptr<ai_root> chat_owner;
         SIDETRACK_CLASS sidetrack;
         IO_WORKER_CLASS io_worker; // keyboard input + screen display - see io_worker.h
         TOOL_WORKER_CLASS tool_worker; // remote-tool communications - see tool_worker.h
@@ -305,10 +309,13 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         DEBUG_LOG_CLASS::instance().reset(settings_path / "debug_full_history.txt");
 
         // --- chat ---
+        chat_owner = make_ai_system(system.setings_vars.ai_backend);
+        ai_root& chat = *chat_owner; // every later chat.xxx in this function is unchanged
         chat.PROPS.OLLI_DIRECTORY = settings_path;
         chat.PROPS.web_search_api_key = system.setings_vars.tool_web_search_apiKey;
         chat.PROPS.use_thinking = false;
-        chat.PROPS.model = "qwen3:8b";
+        // PROPS.model is left at the chosen backend's own default (qwen3:8b for
+        // ollama, gemini-3.5-flash-lite for gemini) - see each backend's constructor.
         chat.debug_label = "chat";
 
         // Wiped fresh on every startup too, same reasoning as
@@ -331,7 +338,7 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         }
 
         // --- sidetrack ---
-        sidetrack.create(chat.PROPS);
+        sidetrack.create(chat);
 
         // --- io_worker: keyboard input + screen display ---
 

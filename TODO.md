@@ -4900,3 +4900,23 @@ it can actually act under its persona's judgment, not just talk about it.
   sensibly; "WAITING for ... rag_search" showed correctly because no tools were connected in the test. NOT tested with the real
   model deciding to call it from a user question.
 - Install: rebuild + reinstall + restart subcon (olli itself unchanged).
+
+## 2026-11-07 - AI backends: `ai_root` + `ollama_system` + `gemini_system`, chosen by `ai_backend`
+
+- `olla.h/.cpp` split. `ai_systems.h` = shared types; `ai_root` = all shared state/logic plus the head and tail of `send()`;
+  `ollama_system` and `gemini_system` provide only `backend_generate()`, `make_sibling()` (and Ollama's `unload_model()`).
+  `make_ai_system()` (ai_factory.cpp) picks one from the profile's `ai_backend` ("ollama" default, or "gemini"). Sidetrack's
+  instance is now a `unique_ptr` made with `make_sibling()` (so ~50 `SIDETRACK_CHAT_INSTANCE.` became `->`); background task
+  instances follow their parent's backend. Full write-up, setup and how to add another backend: [`AI_BACKENDS.md`](AI_BACKENDS.md).
+- The Ollama code was moved, not changed: every line of the old `olla.cpp` is still present in `ai_root.cpp` + `ollama_system.cpp`
+  (compared mechanically), and the `claude` profile was run live on both backends. `ron` has been run on Gemini.
+- **Open: second-guess loops on Gemini lite** (23 of 43 reviews flagged, follow-up calls `get_clock_time`, each re-triggers a
+  review up to the chain limit, burning the 15 req/min free quota; see AI_BACKENDS.md). Left as is on purpose.
+- **Open: stale comments.** Many comments still say "see olla.cpp" / "olla.h" / `ollama_system`; the code is right, the pointers
+  are not (ai_root.h/.cpp, ollama_system.cpp). `OLLAMA_SYSTEM_PROPERTIES`, `ollama_system_status` and `OLLAMA_OPENING` keep
+  their old names but are shared by every backend.
+- **Open: Ollama-only settings** (`host`, `port`, `num_ctx`, `keep_alive_seconds`, `repeat_penalty`) sit in the shared PROPS and
+  are ignored by Gemini. The unused `fallback_model` option from the olli_gemi experiment was dropped.
+- Not done / not tested: switching backend while running (design leaves room: the seam is `backend_generate()`); a task-runner or
+  delegation script on Ollama after the split; interrupting mid-reply and long-history consolidation on Gemini.
+- Install: rebuild + reinstall + restart olli. Profiles without `ai_backend` stay on Ollama.

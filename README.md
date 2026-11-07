@@ -4,7 +4,9 @@
 drives a [Ollama](https://ollama.com) language model, calls real tools (clock,
 timers, web search, Philips Hue lights, scripted automations), and both speaks
 and listens in-process via local TTS/STT engines. Nothing leaves your machine
-except optional web searches and calls to your own Hue bridge.
+except optional web searches and calls to your own Hue bridge - unless you
+choose the optional Google Gemini backend, which sends the conversation to
+Google (see [AI_BACKENDS.md](AI_BACKENDS.md)).
 
 ```
         speech ──►  VOCA (ears, in-process)  ──┐
@@ -125,6 +127,10 @@ Edit it to enable the optional tools:
 }
 ```
 
+- **AI backend** (`"ai_backend"`): `"ollama"` (default, local) or `"gemini"`
+  (Google's API - needs `gemini_key.txt` in the profile folder). Read once at
+  startup. See [AI_BACKENDS.md](AI_BACKENDS.md) before using Gemini - it sends
+  your conversation to Google.
 - **Web search** uses [SerpAPI](https://serpapi.com). Without a key the
   `web_search` / `fetch_website_content` tools will return errors, but the rest
   of the assistant works fine.
@@ -362,7 +368,12 @@ conversation is considered "over."
 ```
 source/
 ├── main.cpp / main.h          Entry point and the main event loop.
-├── olla.{h,cpp}               ollama_system: chat engine, streaming, history, tool dispatch.
+├── ai_systems.h               Shared chat data types (ToolCall, Message, ChatResult, ...).
+├── ai_root.{h,cpp}            ai_root: the chat engine - history, tool dispatch, send()'s shared
+│                               head and tail. Everything else in olli holds an ai_root.
+├── ollama_system.{h,cpp}      ai_root backend for a local Ollama server (default).
+├── gemini_system.{h,cpp}      ai_root backend for Google's Gemini API (see AI_BACKENDS.md).
+├── ai_factory.{h,cpp}         make_ai_system(): picks the backend from the "ai_backend" setting.
 ├── comms.{h,cpp}               COMMS: the three output buffers + input-direction signals every
 │                               ollama_system carries - the one thing that crosses the
 │                               IO_WORKER_CLASS thread boundary (see Display below).

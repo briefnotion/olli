@@ -2,6 +2,7 @@
 #define main_cpp
 
 #include "main.h"
+#include "ollama_system.h"
 #include "remote_tools.h"
 #include <atomic>
 #include <thread>
@@ -198,8 +199,8 @@ namespace {
  * supervised at all.
  *
  * Three moving pieces, each running on its own background thread:
- *   - chat (ollama_system)       the conversation itself; a chat_thread is
- *                                 spawned per turn (see ollama_system::input)
+ *   - chat (ai_root)       the conversation itself; a chat_thread is
+ *                                 spawned per turn (see ai_root::input)
  *   - sidetrack (SIDETRACK_CLASS) history consolidation + the post-turn
  *                                 "second guess" review - see sidetrack.h
  *                                 for the two-thread design
@@ -273,7 +274,7 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
 
         CLASS_SYSTEM system;
         COMMS comms;
-        ollama_system chat;
+        ollama_system chat; // concrete backend; the rest of olli only sees it as ai_root (see ai_root.h)
         SIDETRACK_CLASS sidetrack;
         IO_WORKER_CLASS io_worker; // keyboard input + screen display - see io_worker.h
         TOOL_WORKER_CLASS tool_worker; // remote-tool communications - see tool_worker.h
@@ -281,7 +282,7 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         // The main chat's real tools_list - the 4 built-ins. Declared here,
         // not owned by 'chat' itself - see process()'s comment in olla.h for
         // why this is a reference parameter rather than living on
-        // ollama_system. Remote tools live in tool_worker's own separate
+        // ai_root. Remote tools live in tool_worker's own separate
         // tools_list instead (tool_worker.cpp) - this one never holds one.
         std::vector<std::unique_ptr<TOOL_BASE>> tools_list;
         populate_default_tools(tools_list);
@@ -293,7 +294,7 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         system.setings_vars.load_settings();
         std::filesystem::path settings_path = system.setings_vars.get_settings_path();
 
-        // Raw, unfiltered debug log of every message any ollama_system
+        // Raw, unfiltered debug log of every message any ai_root
         // instance ever creates (main chat, sidetrack, task-runner
         // background tasks) - review only, wiped fresh on every startup.
         // See DEBUG_LOG_CLASS::log_message()'s declaration in helper_olli.h for why
@@ -441,7 +442,7 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
 
             // Dispatches any pending tool calls, flushes new text to TTS
             // (write_to_tts), periodically writes history to disk if it
-            // changed. See ollama_system::process in olla.cpp.
+            // changed. See ai_root::process in olla.cpp.
             chat.process(io_worker, &system, tools_list, &tool_worker, comms);
 
             // Runs sidetrack's main-thread half of both routines' state

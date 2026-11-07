@@ -8,7 +8,7 @@
 #include <utility>
 #include <vector>
 
-#include "olla.h" // ToolCall
+#include "ai_root.h" // ToolCall
 #include "remote_tools.h" // TOOL_RESULT, TOOL_REMOTE
 #include "threading.h"
 
@@ -161,7 +161,7 @@ class TOOL_WORKER_CLASS
         // duplicating any schema here - same trick add_manual_tool_def()'s
         // caller used to do inline in main.cpp. Called once, before
         // thread_start(), same as a manual add_manual_tool_def() call would be.
-        void register_local_tools(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, ollama_system& chat);
+        void register_local_tools(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, ai_root& chat);
 
         // Sets what a newly-registered remote tool is told via
         // send_identity() (tools/PROTOCOL.md) - see identity's own comment
@@ -174,7 +174,7 @@ class TOOL_WORKER_CLASS
         void put_pending_call(const ToolCall& call);
 
         // Claims one specific call's result, if it's ready - false (and
-        // 'out' untouched) otherwise. Every ollama_system instance sharing
+        // 'out' untouched) otherwise. Every ai_root instance sharing
         // this one worker (main chat, a task-runner's own instance, a
         // delegate's own instance) needs to ask by id, not just take
         // whatever's oldest: dispatching a call and blindly popping
@@ -189,7 +189,7 @@ class TOOL_WORKER_CLASS
         // Marks one call's eventual result (whether a real answer or a
         // CALL_TIMEOUT_SECONDS-triggered synthesized error) to be silently
         // dropped by thread_main() instead of kept in pending_results
-        // forever - for when the ollama_system instance that dispatched
+        // forever - for when the ai_root instance that dispatched
         // the call is being destroyed with that call still outstanding
         // (see olla.cpp PART 2's own call site: a background task/delegate
         // instance can finish without ever waiting for every call it

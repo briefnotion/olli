@@ -14,7 +14,7 @@
 // list: everything below only ever takes these by reference, never needing
 // a complete type in this header (the .cpp does, to actually call methods
 // on them).
-class ollama_system;
+class ai_root;
 class COMMS;
 class TOOL_BASE;
 class TOOL_WORKER_CLASS;
@@ -104,7 +104,7 @@ void command_print(size_t& i, COMMS& instance_comms, const std::string& command)
 // handle_tool() stops the script with an error when that goes too deep.
 void command_run(SCRIPT_STATE& state, COMMS& instance_comms, const std::string& command);
 void command_file_in(SCRIPT_STATE& state, std::string& current_input, COMMS& instance_comms, const std::string& command, const std::filesystem::path& files_dir, bool& keyboard_was_enabled);
-void command_file_append(size_t& i, ollama_system& instance, const std::string& command, const std::filesystem::path& files_dir);
+void command_file_append(size_t& i, ai_root& instance, const std::string& command, const std::filesystem::path& files_dir);
 // [KEYBOARD_INPUT:on/off] / [TTS_OUTPUT:on/off] - the general boolean-toggle
 // convention for this scripting language: marker names the subject, value
 // is "on"/"off" (not true/false or 1/0 - reads as plain English). Instant,
@@ -171,7 +171,7 @@ void command_skip_to_endif(SCRIPT_STATE& state, size_t& i, const TASK_SIMPLE& fo
 // a plain line in the chosen branch ("React to what the player just did.")
 // decides where it does. Called by advance_script_state()'s WAIT_ASK case, only
 // when the next line is an [IF]; i is still on the [ASK] line.
-void command_wait_ask_for_if(SCRIPT_STATE& state, size_t& i, std::string& current_input, const TASK_SIMPLE& found_task, ollama_system& instance, COMMS& instance_comms, bool& keyboard_was_enabled);
+void command_wait_ask_for_if(SCRIPT_STATE& state, size_t& i, std::string& current_input, const TASK_SIMPLE& found_task, ai_root& instance, COMMS& instance_comms, bool& keyboard_was_enabled);
 
 // Called every tick while WAIT_ASK is waiting (advance_script_state()). Does
 // nothing unless the [ASK:...] line has a time limit, no answer has come in,
@@ -187,14 +187,14 @@ void command_ask_timed_out(SCRIPT_STATE& state, size_t& i, const TASK_SIMPLE& fo
 // Free functions, not TOOL_TASK_RUNNER methods, deliberately: none of them
 // can reach chat/comms/tc_id/io_worker/task_manager/OLLI_DIRECTORY even by
 // accident, only exactly what's passed in below.
-void command_get_command(SCRIPT_STATE& state, size_t& i, std::string& current_input, const TASK_SIMPLE& found_task, ollama_system& instance, COMMS& instance_comms, const std::filesystem::path& files_dir, bool& keyboard_was_enabled, std::vector<size_t>& call_stack, std::chrono::steady_clock::time_point& ask_deadline);
+void command_get_command(SCRIPT_STATE& state, size_t& i, std::string& current_input, const TASK_SIMPLE& found_task, ai_root& instance, COMMS& instance_comms, const std::filesystem::path& files_dir, bool& keyboard_was_enabled, std::vector<size_t>& call_stack, std::chrono::steady_clock::time_point& ask_deadline);
 void command_wait_enter(SCRIPT_STATE& state, size_t& i, COMMS& instance_comms, bool& keyboard_was_enabled);
 void command_wait_ask(SCRIPT_STATE& state, std::string& current_input, COMMS& instance_comms, bool& keyboard_was_enabled);
-void command_execute_command(SCRIPT_STATE& state, const std::string& current_input, ollama_system& instance, COMMS& instance_comms, TOOL_WORKER_CLASS* tool_worker);
-void command_wait_response(SCRIPT_STATE& state, size_t& i, ollama_system& instance);
+void command_execute_command(SCRIPT_STATE& state, const std::string& current_input, ai_root& instance, COMMS& instance_comms, TOOL_WORKER_CLASS* tool_worker);
+void command_wait_response(SCRIPT_STATE& state, size_t& i, ai_root& instance);
 // WAIT_IF_RESPONSE - when the answer arrives, show it and set i to the start
 // of the matching branch.
-void command_wait_if_response(SCRIPT_STATE& state, size_t& i, ollama_system& instance, const TASK_SIMPLE& found_task, COMMS& instance_comms);
+void command_wait_if_response(SCRIPT_STATE& state, size_t& i, ai_root& instance, const TASK_SIMPLE& found_task, COMMS& instance_comms);
 
 // Drives the state machine one tick - called once per iteration of
 // TOOL_TASK_RUNNER::handle_tool()'s while loop (tools.cpp). Just dispatch -
@@ -205,6 +205,6 @@ void command_wait_if_response(SCRIPT_STATE& state, size_t& i, ollama_system& ins
 // tool_worker is the caller's own (nullable) - only EXECUTE_COMMAND
 // actually needs it (forwarded to command_execute_command()'s own send()
 // call), but every state gets it passed down for a uniform signature.
-void advance_script_state(SCRIPT_STATE& state, size_t& i, std::string& current_input, const TASK_SIMPLE& found_task, ollama_system& instance, COMMS& instance_comms, TOOL_WORKER_CLASS* tool_worker, const std::filesystem::path& files_dir, bool& keyboard_was_enabled, std::vector<size_t>& call_stack, std::chrono::steady_clock::time_point& ask_deadline);
+void advance_script_state(SCRIPT_STATE& state, size_t& i, std::string& current_input, const TASK_SIMPLE& found_task, ai_root& instance, COMMS& instance_comms, TOOL_WORKER_CLASS* tool_worker, const std::filesystem::path& files_dir, bool& keyboard_was_enabled, std::vector<size_t>& call_stack, std::chrono::steady_clock::time_point& ask_deadline);
 
 #endif

@@ -1,5 +1,5 @@
-#ifndef olla_h
-#define olla_h
+#ifndef ai_root_h
+#define ai_root_h
 
 #include <string>
 #include <vector>
@@ -24,7 +24,7 @@ using json = nlohmann::json;
 
 // --- FORWARD DECLARATION ---
 
-class ollama_system;
+class ai_root;
 class CLASS_SYSTEM; // see the CLASS_SYSTEM* parameter's comment on TOOL_BASE::check() (tools.h)
 class OUTPUT_CLASS; // for pull_background_output() below - see user_io.h (now reached via IO_WORKER_CLASS, not CLASS_SYSTEM)
 class TOOL_WORKER_CLASS; // nullable pointer, same reasoning as CLASS_SYSTEM* above - see process()'s own comment below
@@ -107,7 +107,7 @@ class OLLAMA_SYSTEM_PROPERTIES
         bool LOAD_SAVE_HISTORY_ON_DISK = true;
 
         // Hard ceiling on how many tool calls handle_instance_tools() will
-        // actually execute within one turn (see ollama_system::
+        // actually execute within one turn (see ai_root::
         // tool_calls_this_turn's comment for what a "turn" means and why
         // this exists). A real multi-step request ("set a timer AND tell me
         // the time") legitimately needs more than one - this just bounds
@@ -116,7 +116,45 @@ class OLLAMA_SYSTEM_PROPERTIES
         int max_tool_calls_per_turn = 4;
 };
 
-class ollama_system {
+// ai_root: everything about a conversation that doesn't depend on WHICH AI
+// is answering - history, consolidation hooks, tool dispatch, result
+// claiming, threads, saving/loading, and the head and tail of send().
+// A concrete backend (ollama_system in ollama_system.h/.cpp; others to
+// follow) derives from this and provides only the parts that talk to its own
+// API. The rest of olli holds and passes around ai_root, never a backend.
+//
+// WHAT A BACKEND MUST PROVIDE
+//   backend_generate()  - the middle of send(): turn history + tool defs into
+//                         its API's request, make the call (streaming or
+//                         not), and report the result. See its comment below.
+//   make_sibling()      - a fresh, empty instance of the same backend (used
+//                         for background task-runner/delegate instances).
+//   unload_model()      - optional; the default does nothing.
+// A backend must NOT contain history, consolidation, tool-dispatch or
+// result-claiming code - if it starts to, that code belongs here instead.
+class ai_root {
+    protected:
+
+        // Rebuilt by the backend on every call - see ollama_system.cpp.
+        // Protected (not private) only so a backend can reach it.
+        json tools = json::array();
+
+        // The backend step of send(), called between its shared head (state
+        // reset, user message pushed to history) and shared tail (history
+        // push, confidence, yes/no/maybe, debug log). It must:
+        //  - read history (under history_mutex) and tool defs, build and send
+        //    its API's request, honouring PROPS and 'response_format';
+        //  - stream text/thinking into comms.INPUT_FROM_LLM/INPUT_FROM_THINKING
+        //    while PROPS.stream_output/stream_thinking allow it;
+        //  - poll status.interrupt_signal and stop early if set;
+        //  - fill last_received.tool_calls / .response_tokens / .thinking_tokens
+        //    / .complete (leave .response/.thinking alone - send() sets those);
+        //  - return the full reply text in accumulated_content and the full
+        //    thinking text in accumulated_thinking.
+        // Leave response_tokens empty if the API has no per-token
+        // probabilities - confidence then simply stays absent.
+        virtual void backend_generate(TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const json& response_format, std::string& accumulated_content, std::string& accumulated_thinking) = 0;
+
     private:
 
         // Each background task gets its own real, persistent COMMS - paired
@@ -131,9 +169,8 @@ class ollama_system {
         // address stable across reallocation - spawn_background_task()
         // hands out a COMMS& into this vector, which a by-value COMMS
         // would leave dangling the next time the vector grows.
-        std::vector<std::pair<std::unique_ptr<ollama_system>, std::unique_ptr<COMMS>>> background_tasks;
-        
-        json tools = json::array();
+        std::vector<std::pair<std::unique_ptr<ai_root>, std::unique_ptr<COMMS>>> background_tasks;
+
         std::chrono::steady_clock::time_point last_consolidation = std::chrono::steady_clock::now();
 
         size_t PREVIOUS_HISTORY_SIZE = 0;
@@ -158,7 +195,13 @@ class ollama_system {
 
     public:
 
-        ollama_system();
+        ai_root();
+        virtual ~ai_root() = default;
+
+        // A fresh, empty instance of the same backend as this one - used by
+        // spawn_background_task() so a background instance talks to the same
+        // AI its parent does, without ai_root needing to know any backend.
+        virtual std::unique_ptr<ai_root> make_sibling() const = 0;
 
         // Short human-readable tag identifying this instance in
         // debug_full_history.txt (DEBUG_LOG_CLASS::log_message()/log_event(),
@@ -203,12 +246,13 @@ class ollama_system {
         // clear_history_keep_protected() don't support.
         void replace_history(std::vector<Message> new_history);
 
-        // Tells Ollama to unload PROPS.model from memory immediately
-        // (sends keep_alive: 0). Ollama tracks loaded models by name, not
-        // by connection, so one call covers every ollama_system instance
-        // in the process that shares this model - no need to call it per
-        // instance. Meant for shutdown, alongside save_history().
-        void unload_model();
+        // Asks the backend to free PROPS.model from memory immediately, for
+        // a backend that holds one locally (Ollama - see ollama_system.cpp;
+        // it tracks loaded models by name, not by connection, so one call
+        // covers every instance sharing the model). The default does
+        // nothing, which is right for a hosted API. Meant for shutdown,
+        // alongside save_history().
+        virtual void unload_model() {}
 
         std::string OLLAMA_OPENING =
                 //"You are a but helpful assistant with access to tools. "
@@ -278,7 +322,7 @@ class ollama_system {
         // not yet claimed a result for - pushed in dispatch_tool_call()
         // right before put_pending_call() (tools.cpp), erased once
         // process()'s own PART 5 (olla.cpp) successfully claims that id's
-        // result. Every ollama_system instance shares the same tool_worker
+        // result. Every ai_root instance shares the same tool_worker
         // (main chat, a task-runner's own instance, a delegate's own
         // instance), so without this, whichever instance's process() tick
         // happens to run next would blindly claim whatever result is
@@ -345,7 +389,7 @@ class ollama_system {
         // any) isn't recursed into, matching process()'s own iteration below.
         void pull_background_output(OUTPUT_CLASS& output);
 
-        // Creates a new background ollama_system instance, owned by this one
+        // Creates a new background ai_root instance, owned by this one
         // (added to background_tasks so it's picked up by process()'s own
         // background-task loop and pull_background_output() same as any
         // other), and returns a reference to it plus its own newly-created
@@ -354,7 +398,7 @@ class ollama_system {
         // sub-conversation without needing direct access to the private
         // background_tasks vector - currently only TOOL_TASK_RUNNER does
         // this, to run an automation sequence without blocking chat.
-        std::pair<ollama_system&, COMMS&> spawn_background_task();
+        std::pair<ai_root&, COMMS&> spawn_background_task();
 
         // 'tools_list' is the caller's own built-ins - each one's
         // configure() runs here, once, before anything else touches it. A
@@ -384,7 +428,7 @@ class ollama_system {
         void stop();
 
         // Safe shutdown: stops any in-flight response and joins chat_thread
-        // before setting running = false, so main()'s ollama_system chat;
+        // before setting running = false, so main()'s ai_root chat;
         // never gets destroyed with chat_thread still joinable (that's a
         // std::terminate crash). Same body jump_input()'s "bye"/"quit"
         // handling already used inline - factored out here so
@@ -448,14 +492,14 @@ class ollama_system {
 };
 
 // Pushes one instance of every built-in TOOL_* class onto tools_list - the
-// same 3 tools every ollama_system instance used to get for free from its
+// same 3 tools every ai_root instance used to get for free from its
 // own constructor before tools_list moved off this class (see process()'s
 // comment above). Call once per real tools_list that needs them: main.cpp's
 // real one, SIDETRACK_CLASS's own, each task-runner automation instance's
 // own local one.
 void populate_default_tools(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list);
 
-// A single shared mutex protecting every ollama_system::history vector.
+// A single shared mutex protecting every ai_root::history vector.
 //
 // This MUST be an 'inline' variable (C++17), not 'static'. A 'static'
 // definition in a header gives every translation unit that includes olla.h

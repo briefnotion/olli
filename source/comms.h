@@ -11,7 +11,7 @@
 
 #include "helper_olli.h" // USER_IDENTITY
 
-// A single shared mutex guarding every ollama_system instance's COMMS.
+// A single shared mutex guarding every ai_root instance's COMMS.
 //
 // This MUST be an 'inline' variable (C++17), not 'static' - same reasoning
 // as history_mutex (olla.h): a 'static' definition in a header gives every
@@ -192,12 +192,12 @@ class COMMS_STRING
 
 /**
  * COMMS
- * Bundles what an ollama_system instance uses to hand output to whatever's
+ * Bundles what an ai_root instance uses to hand output to whatever's
  * consuming it (the screen, a log) - moved out of olla.h so it can be
  * included/passed around on its own instead of needing the rest of
- * ollama_system along with it.
+ * ai_root along with it.
  *
- * Each ollama_system instance (the main chat, background tasks,
+ * Each ai_root instance (the main chat, background tasks,
  * sidetrack's own SIDETRACK_CHAT_INSTANCE) owns its OWN COMMS - the text
  * buffers are per-instance. output_buffer_mutex above is the one
  * exception: it's deliberately shared across every instance's COMMS rather
@@ -257,7 +257,7 @@ class COMMS
         // --------------------------------------------------------------
         // Input-direction signals - set by IO_WORKER_CLASS (io_worker.h/
         // .cpp), relayed here via its exchange(), consumed by
-        // ollama_system::input() (olla.cpp) and main.cpp's own loop. Not
+        // ai_root::input() (olla.cpp) and main.cpp's own loop. Not
         // protected by output_buffer_mutex above - IO_WORKER_CLASS's own
         // INTERUPTED/PROCESSING lock covers the handoff into these
         // fields instead (see its class comment). Once a field lands

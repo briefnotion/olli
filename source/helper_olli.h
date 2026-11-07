@@ -41,7 +41,7 @@ bool write_file(const std::filesystem::path& path, const std::string& text, bool
 // ----
 
 // Raw, unfiltered, append-only debug log of every message ever added to any
-// ollama_system's history - main chat, sidetrack (consolidation/second-guess),
+// ai_root's history - main chat, sidetrack (consolidation/second-guess),
 // task-runner background instances, all of it, in the order it happened.
 // Review only: nothing in the program ever reads this back. 'tool' and
 // DIRECTOR_NOTE 'system' messages now stay in live history too (see
@@ -86,8 +86,8 @@ class DEBUG_LOG_CLASS {
         // the same way no matter which of the two wrote it, and the closing
         // rule line unambiguously bounds a record even when its own content
         // spans many lines or contains bracket-looking text of its own.
-        // Thread-safe - any ollama_system instance, from any thread, can
-        // call this. instance_label is ollama_system::debug_label (olla.h)
+        // Thread-safe - any ai_root instance, from any thread, can
+        // call this. instance_label is ai_root::debug_label (olla.h)
         // - a short human-readable tag ("chat", "sidetrack-review",
         // "task-runner:water the plants", ...) set once per instance at
         // creation, distinguishing which instance produced this record,

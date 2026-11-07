@@ -10,7 +10,7 @@
 #include <curl/curl.h>
 
 #include "tools.h"
-#include "olla.h"
+#include "ai_root.h"
 #include "user_io.h"
 #include "io_worker.h"
 #include "tool_worker.h"
@@ -29,9 +29,9 @@ void add_tool(json& tools, const std::string& name, const std::string& descripti
 }
 
 // No per-instance setup needed - part of the common tool interface (see the note in tools.h).
-void TOOL_SET_THINKING_MODE::configure(ollama_system&) {}
+void TOOL_SET_THINKING_MODE::configure(ai_root&) {}
 
-void TOOL_SET_THINKING_MODE::register_tool(ollama_system&, json& tools) {
+void TOOL_SET_THINKING_MODE::register_tool(ai_root&, json& tools) {
     tool_functions.clear();
 
     json set_thinking_params = {
@@ -49,7 +49,7 @@ void TOOL_SET_THINKING_MODE::register_tool(ollama_system&, json& tools) {
     add_tool(tools, "set_thinking_mode", "Enables or disables the internal reasoning/thinking process for the model", set_thinking_params);
 }
 
-void TOOL_SET_THINKING_MODE::handle_tool(ollama_system& chat, COMMS&, const std::string& name, const json& args, const std::string& tc_id) {
+void TOOL_SET_THINKING_MODE::handle_tool(ai_root& chat, COMMS&, const std::string& name, const json& args, const std::string& tc_id) {
     if (name == "set_thinking_mode") {
         if (args.contains("enabled") && args["enabled"].is_boolean()) {
             chat.PROPS.use_thinking = args["enabled"].get<bool>();
@@ -72,7 +72,7 @@ void TOOL_SET_THINKING_MODE::handle_tool(ollama_system& chat, COMMS&, const std:
     }
 }
 
-bool TOOL_SET_THINKING_MODE::check(IO_WORKER_CLASS&, ollama_system& chat, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>&, TOOL_WORKER_CLASS*, COMMS& comms, const ToolCall& tc) {
+bool TOOL_SET_THINKING_MODE::check(IO_WORKER_CLASS&, ai_root& chat, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>&, TOOL_WORKER_CLASS*, COMMS& comms, const ToolCall& tc) {
     if (tc.name != "set_thinking_mode")
         return false;
 
@@ -84,7 +84,7 @@ bool TOOL_SET_THINKING_MODE::check(IO_WORKER_CLASS&, ollama_system& chat, CLASS_
 }
 
 // No periodic work needed - part of the common tool interface (see the note in tools.h).
-void TOOL_SET_THINKING_MODE::monitor_tool(ollama_system&, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>&, TOOL_WORKER_CLASS*, COMMS&) {}
+void TOOL_SET_THINKING_MODE::monitor_tool(ai_root&, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>&, TOOL_WORKER_CLASS*, COMMS&) {}
 
 // ---
 
@@ -104,7 +104,7 @@ void TOOL_SET_THINKING_MODE::monitor_tool(ollama_system&, CLASS_SYSTEM*, std::ve
 
 
 // No per-instance setup needed - part of the common tool interface (see the note in tools.h).
-void TOOL_WEB_SEARCH::configure(ollama_system& chat) {
+void TOOL_WEB_SEARCH::configure(ai_root& chat) {
     apiKey = chat.PROPS.web_search_api_key;
 }
 
@@ -221,7 +221,7 @@ std::pair<bool, std::string> TOOL_WEB_SEARCH::fetch_url_content(const std::strin
     return {true, cleanText};
 }
 
-void TOOL_WEB_SEARCH::register_tool(ollama_system&, json& tools) {
+void TOOL_WEB_SEARCH::register_tool(ai_root&, json& tools) {
     tool_functions.clear();
 
     // Told to the model via each tool's description so its final answer
@@ -252,7 +252,7 @@ void TOOL_WEB_SEARCH::register_tool(ollama_system&, json& tools) {
     add_tool(tools, "fetch_website_content", "Reads the text from a specific URL for deep research. Use this to summarize an article.", fetch_params);
 }
 
-void TOOL_WEB_SEARCH::handle_tool(ollama_system& chat, std::vector<std::unique_ptr<TOOL_BASE>>&, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const std::string& name, const json& args, const std::string& tc_id) {
+void TOOL_WEB_SEARCH::handle_tool(ai_root& chat, std::vector<std::unique_ptr<TOOL_BASE>>&, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const std::string& name, const json& args, const std::string& tc_id) {
     // integrate_tool_result()'s default framing ("report this real result...
     // without changing the facts") reads the same whether the tool
     // succeeded or not, so a plain curl/API error used to get relayed as if
@@ -302,7 +302,7 @@ void TOOL_WEB_SEARCH::handle_tool(ollama_system& chat, std::vector<std::unique_p
     }
 }
 
-bool TOOL_WEB_SEARCH::check(IO_WORKER_CLASS&, ollama_system& chat, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const ToolCall& tc) {
+bool TOOL_WEB_SEARCH::check(IO_WORKER_CLASS&, ai_root& chat, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const ToolCall& tc) {
     if (tc.name != "web_search" && tc.name != "fetch_website_content")
         return false;
 
@@ -314,7 +314,7 @@ bool TOOL_WEB_SEARCH::check(IO_WORKER_CLASS&, ollama_system& chat, CLASS_SYSTEM*
 }
 
 // No periodic work needed - part of the common tool interface (see the note in tools.h).
-void TOOL_WEB_SEARCH::monitor_tool(ollama_system&, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>&, TOOL_WORKER_CLASS*, COMMS&) {}
+void TOOL_WEB_SEARCH::monitor_tool(ai_root&, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>&, TOOL_WORKER_CLASS*, COMMS&) {}
 
 // ---- TOOL_REMEMBER ----
 
@@ -427,11 +427,11 @@ static bool note_date_backed_by(const std::string& words, const std::tm& date)
 }
 
 // No per-instance setup beyond finding the folder.
-void TOOL_REMEMBER::configure(ollama_system& chat) {
+void TOOL_REMEMBER::configure(ai_root& chat) {
     notes_dir = chat.PROPS.OLLI_DIRECTORY / "collection" / "Olli_Remembers";
 }
 
-void TOOL_REMEMBER::register_tool(ollama_system&, json& tools) {
+void TOOL_REMEMBER::register_tool(ai_root&, json& tools) {
     tool_functions.clear();
 
     json params = {
@@ -562,7 +562,7 @@ std::pair<bool, std::string> TOOL_REMEMBER::save_note(const std::string& text, c
                   ". It will turn up in knowledge-base searches within about 10 minutes." + dropped_date_note};
 }
 
-void TOOL_REMEMBER::handle_tool(ollama_system& chat, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const json& args, const std::string& tc_id) {
+void TOOL_REMEMBER::handle_tool(ai_root& chat, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const json& args, const std::string& tc_id) {
     // Same plain "this did not work" framing TOOL_WEB_SEARCH uses, so a
     // failed save is never told to the user as if it had been saved.
     static const std::string failure_instruction =
@@ -590,7 +590,7 @@ void TOOL_REMEMBER::handle_tool(ollama_system& chat, TOOL_WORKER_CLASS* tool_wor
     chat.integrate_tool_result(tool_worker, comms, ok ? "" : failure_instruction, result);
 }
 
-bool TOOL_REMEMBER::check(IO_WORKER_CLASS&, ollama_system& chat, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>&, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const ToolCall& tc) {
+bool TOOL_REMEMBER::check(IO_WORKER_CLASS&, ai_root& chat, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>&, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const ToolCall& tc) {
     if (tc.name != "remember_note")
         return false;
 
@@ -602,12 +602,12 @@ bool TOOL_REMEMBER::check(IO_WORKER_CLASS&, ollama_system& chat, CLASS_SYSTEM*, 
 }
 
 // No periodic work needed - part of the common tool interface (see the note in tools.h).
-void TOOL_REMEMBER::monitor_tool(ollama_system&, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>&, TOOL_WORKER_CLASS*, COMMS&) {}
+void TOOL_REMEMBER::monitor_tool(ai_root&, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>&, TOOL_WORKER_CLASS*, COMMS&) {}
 
 
-void TOOL_DELEGATOR::configure(ollama_system&) {}
+void TOOL_DELEGATOR::configure(ai_root&) {}
 
-void TOOL_DELEGATOR::register_tool(ollama_system&, json& tools)
+void TOOL_DELEGATOR::register_tool(ai_root&, json& tools)
 {
     tool_functions.clear();
 
@@ -638,7 +638,7 @@ void TOOL_DELEGATOR::register_tool(ollama_system&, json& tools)
 // degenerate loop quickly rather than after 6+ wasted round-trips.
 static constexpr int MAX_DELEGATION_DEPTH = 3;
 
-void TOOL_DELEGATOR::handle_tool(IO_WORKER_CLASS& io_worker, ollama_system& chat, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const std::string& name, const json& args, const std::string& tc_id)
+void TOOL_DELEGATOR::handle_tool(IO_WORKER_CLASS& io_worker, ai_root& chat, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const std::string& name, const json& args, const std::string& tc_id)
 {
     if (name != "consult_expert") return;
 
@@ -668,7 +668,7 @@ void TOOL_DELEGATOR::handle_tool(IO_WORKER_CLASS& io_worker, ollama_system& chat
     io_worker.exchange(comms, tool_worker);
 
     // The sub-agent runs on its own background instance so it doesn't block
-    // the main chat loop - see ollama_system::spawn_background_task().
+    // the main chat loop - see ai_root::spawn_background_task().
     // Shares the caller's own tools_list (not an empty one) - same
     // reasoning as TOOL_TASK_RUNNER's own handle_tool(): the specialist can
     // actually go do something under its persona's judgment, not just talk
@@ -704,7 +704,7 @@ void TOOL_DELEGATOR::handle_tool(IO_WORKER_CLASS& io_worker, ollama_system& chat
                         "Provide your expert response now. Do not include introductory pleasantries.";
 
     // Seeds the persona as the sub-agent's protected opening message - same
-    // mechanism ollama_system::open() (olla.cpp) already uses for every
+    // mechanism ai_root::open() (olla.cpp) already uses for every
     // instance, rather than hand-pushing a system Message onto history
     // directly (the old pre-open() approach).
     instance.OLLAMA_OPENING = system_prompt;
@@ -779,7 +779,7 @@ void TOOL_DELEGATOR::handle_tool(IO_WORKER_CLASS& io_worker, ollama_system& chat
     chat.integrate_tool_result(tool_worker, comms, "", "The " + specialty + " expert has finished their analysis. Here is the report: " + result);
 
     // Cleared here, same reasoning as TOOL_TASK_RUNNER's own handle_tool():
-    // ollama_system::process()'s PART 2 (olla.cpp) checks this same
+    // ai_root::process()'s PART 2 (olla.cpp) checks this same
     // last_received.response, once per tick, to decide whether to relay a
     // background task's output to the main chat before erasing it from
     // chat.background_tasks - leaving it set would fire a second, redundant
@@ -792,7 +792,7 @@ void TOOL_DELEGATOR::handle_tool(IO_WORKER_CLASS& io_worker, ollama_system& chat
     --delegation_depth;
 }
 
-bool TOOL_DELEGATOR::check(IO_WORKER_CLASS& io_worker, ollama_system& chat, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const ToolCall& tc) {
+bool TOOL_DELEGATOR::check(IO_WORKER_CLASS& io_worker, ai_root& chat, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const ToolCall& tc) {
     if (tc.name != "consult_expert")
         return false;
 
@@ -802,7 +802,7 @@ bool TOOL_DELEGATOR::check(IO_WORKER_CLASS& io_worker, ollama_system& chat, CLAS
 }
 
 // No periodic work needed - part of the common tool interface (see the note in tools.h).
-void TOOL_DELEGATOR::monitor_tool(ollama_system&, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>&, TOOL_WORKER_CLASS*, COMMS&) {}
+void TOOL_DELEGATOR::monitor_tool(ai_root&, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>&, TOOL_WORKER_CLASS*, COMMS&) {}
 
 // ----
 // TOOL_TASK_RUNNER's script-driving state machine (SCRIPT_STATE,
@@ -811,7 +811,7 @@ void TOOL_DELEGATOR::monitor_tool(ollama_system&, CLASS_SYSTEM*, std::vector<std
 // switch this class's handle_tool() (below) drives every tick.
 
 // No per-instance setup needed - part of the common tool interface (see the note in tools.h).
-void TOOL_TASK_RUNNER::configure(ollama_system& chat) {
+void TOOL_TASK_RUNNER::configure(ai_root& chat) {
     OLLI_DIRECTORY = chat.PROPS.OLLI_DIRECTORY;
     task_manager.load_all_task(OLLI_DIRECTORY / "scripts");
 }
@@ -824,7 +824,7 @@ bool TOOL_TASK_RUNNER::iequals(const std::string& a, const std::string& b) {
                         });
 }
 
-void TOOL_TASK_RUNNER::register_tool(ollama_system&, json& tools)
+void TOOL_TASK_RUNNER::register_tool(ai_root&, json& tools)
 {
     tool_functions.clear();
 
@@ -866,7 +866,7 @@ void TOOL_TASK_RUNNER::register_tool(ollama_system&, json& tools)
         task_params);
 }
 
-void TOOL_TASK_RUNNER::handle_tool(IO_WORKER_CLASS& io_worker, ollama_system& chat, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const std::string& name, const json& args, const std::string& tc_id)
+void TOOL_TASK_RUNNER::handle_tool(IO_WORKER_CLASS& io_worker, ai_root& chat, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const std::string& name, const json& args, const std::string& tc_id)
 {
     if (name != "run_automation_task")
     {
@@ -909,7 +909,7 @@ void TOOL_TASK_RUNNER::handle_tool(IO_WORKER_CLASS& io_worker, ollama_system& ch
         const TASK_SIMPLE found_task = *task_it;
 
         // The automation runs on its own background instance so it doesn't
-        // block the main chat loop - see ollama_system::spawn_background_task().
+        // block the main chat loop - see ai_root::spawn_background_task().
         // instance_comms is that instance's own real, persistent COMMS -
         // paired with it in chat's own background_tasks, not a throwaway.
         auto [instance, instance_comms] = chat.spawn_background_task();
@@ -1302,7 +1302,7 @@ void TOOL_TASK_RUNNER::handle_tool(IO_WORKER_CLASS& io_worker, ollama_system& ch
         // (including the last one) so it can tell a finished command from
         // a still-in-flight one - see its own comment. Setting it back to
         // true here, once the whole script is done, is what lets
-        // ollama_system::process()'s PART 2 (olla.cpp) recognize this
+        // ai_root::process()'s PART 2 (olla.cpp) recognize this
         // instance as finished and erase it from chat.background_tasks;
         // without this it would never be freed.
         //
@@ -1349,7 +1349,7 @@ void TOOL_TASK_RUNNER::handle_tool(IO_WORKER_CLASS& io_worker, ollama_system& ch
     }
 }
 
-bool TOOL_TASK_RUNNER::check(IO_WORKER_CLASS& io_worker, ollama_system& chat, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const ToolCall& tc) {
+bool TOOL_TASK_RUNNER::check(IO_WORKER_CLASS& io_worker, ai_root& chat, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const ToolCall& tc) {
     if (tc.name != "run_automation_task")
         return false;
 
@@ -1361,14 +1361,14 @@ bool TOOL_TASK_RUNNER::check(IO_WORKER_CLASS& io_worker, ollama_system& chat, CL
 }
 
 // No periodic work needed - part of the common tool interface (see the note in tools.h).
-void TOOL_TASK_RUNNER::monitor_tool(ollama_system&, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>&, TOOL_WORKER_CLASS*, COMMS&) {}
+void TOOL_TASK_RUNNER::monitor_tool(ai_root&, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>&, TOOL_WORKER_CLASS*, COMMS&) {}
 
 // Shared by both call sources handle_instance_tools() drains - see its own
 // comment in olla.h. Applies the tool_calls_this_turn cap (see olla.h),
 // then routes to whichever tool's check() claims tc.name (see the
 // TOOL_BASE comment in tools.h) - an unrecognized name gets an error
 // result back instead of ever reaching a tool.
-void ollama_system::dispatch_tool_call(IO_WORKER_CLASS& io_worker, const ToolCall& tc, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms)
+void ai_root::dispatch_tool_call(IO_WORKER_CLASS& io_worker, const ToolCall& tc, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms)
 {
     // Guard against a runaway chain - see tool_calls_this_turn's comment in
     // olla.h. Deliberately calls send_tool_result() only, not
@@ -1408,7 +1408,7 @@ void ollama_system::dispatch_tool_call(IO_WORKER_CLASS& io_worker, const ToolCal
     }
 }
 
-void ollama_system::handle_instance_tools(IO_WORKER_CLASS& io_worker, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms)
+void ai_root::handle_instance_tools(IO_WORKER_CLASS& io_worker, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms)
 {
     // System-injected calls (e.g. a timer's on_expire action - see
     // TOOL_REMOTE::monitor_tool()) - drained independently of the model's

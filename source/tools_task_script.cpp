@@ -2,7 +2,7 @@
 
 #include "comms.h"
 #include "helper_olli.h"
-#include "olla.h"
+#include "ai_root.h"
 #include "stringthings.h"
 #include "tools.h"
 
@@ -161,7 +161,7 @@ void command_file_in(SCRIPT_STATE& state, std::string& current_input, COMMS& ins
     }
 }
 
-void command_file_append(size_t& i, ollama_system& instance, const std::string& command, const std::filesystem::path& files_dir)
+void command_file_append(size_t& i, ai_root& instance, const std::string& command, const std::filesystem::path& files_dir)
 {
     // "[FILE_APPEND:" is 13 chars; the trailing "]" is 1 more.
     std::string raw_name = command.substr(13, command.size() - 13 - 1);
@@ -436,7 +436,7 @@ void command_ask_timed_out(SCRIPT_STATE& state, size_t& i, const TASK_SIMPLE& fo
 
 // Prefix-matching dispatch only - each [MARKER]'s actual logic lives in its
 // own command_*() function above.
-void command_get_command(SCRIPT_STATE& state, size_t& i, std::string& current_input, const TASK_SIMPLE& found_task, ollama_system& instance, COMMS& instance_comms, const std::filesystem::path& files_dir, bool& keyboard_was_enabled, std::vector<size_t>& call_stack, std::chrono::steady_clock::time_point& ask_deadline)
+void command_get_command(SCRIPT_STATE& state, size_t& i, std::string& current_input, const TASK_SIMPLE& found_task, ai_root& instance, COMMS& instance_comms, const std::filesystem::path& files_dir, bool& keyboard_was_enabled, std::vector<size_t>& call_stack, std::chrono::steady_clock::time_point& ask_deadline)
 {
     if (i >= found_task.COMMANDS.size())
     {
@@ -622,7 +622,7 @@ void command_get_command(SCRIPT_STATE& state, size_t& i, std::string& current_in
     //      struct PENDING_INTERRUPT { std::string narration;
     //      bool has_action; ToolCall action; }; plus a
     //      std::queue<PENDING_INTERRUPT>. Where exactly it lives
-    //      (ollama_system itself vs. threaded through as a new
+    //      (ai_root itself vs. threaded through as a new
     //      advance_script_state() parameter) is still open.
     //   2. remote_tools.cpp's event handler (~line 339-356)
     //      redirecting into that queue instead of calling
@@ -677,7 +677,7 @@ void command_wait_ask(SCRIPT_STATE& state, std::string& current_input, COMMS& in
     }
 }
 
-void command_execute_command(SCRIPT_STATE& state, const std::string& current_input, ollama_system& instance, COMMS& instance_comms, TOOL_WORKER_CLASS* tool_worker)
+void command_execute_command(SCRIPT_STATE& state, const std::string& current_input, ai_root& instance, COMMS& instance_comms, TOOL_WORKER_CLASS* tool_worker)
 {
     if (instance_comms.ENABLE_ECHO_INPUT)
     {
@@ -690,7 +690,7 @@ void command_execute_command(SCRIPT_STATE& state, const std::string& current_inp
     // it inline would freeze this loop's own
     // io_worker.exchange() below for the whole request,
     // preventing anything from streaming to screen until it
-    // returned. Same pattern as ollama_system::input()
+    // returned. Same pattern as ai_root::input()
     // (olla.cpp) and sidetrack.cpp's own
     // start_second_guess_call().
     // An [IF] question (EXECUTE_IF) goes out exactly like a normal line, with
@@ -721,7 +721,7 @@ void command_execute_command(SCRIPT_STATE& state, const std::string& current_inp
     state = is_question ? SCRIPT_STATE::WAIT_IF_RESPONSE : SCRIPT_STATE::WAIT_RESPONSE;
 }
 
-void command_wait_ask_for_if(SCRIPT_STATE& state, size_t& i, std::string& current_input, const TASK_SIMPLE& found_task, ollama_system& instance, COMMS& instance_comms, bool& keyboard_was_enabled)
+void command_wait_ask_for_if(SCRIPT_STATE& state, size_t& i, std::string& current_input, const TASK_SIMPLE& found_task, ai_root& instance, COMMS& instance_comms, bool& keyboard_was_enabled)
 {
     if (!instance_comms.ENTER_PRESSED)
     {
@@ -766,7 +766,7 @@ void command_wait_ask_for_if(SCRIPT_STATE& state, size_t& i, std::string& curren
     DEBUG_LOG_CLASS::instance().log_message(instance.debug_label, "user", answer);
 }
 
-void command_wait_response(SCRIPT_STATE& state, size_t& i, ollama_system& instance)
+void command_wait_response(SCRIPT_STATE& state, size_t& i, ai_root& instance)
 {
     if (!instance.is_processing && instance.chat_thread.joinable())
     {
@@ -785,7 +785,7 @@ void command_wait_response(SCRIPT_STATE& state, size_t& i, ollama_system& instan
     }
 }
 
-void command_wait_if_response(SCRIPT_STATE& state, size_t& i, ollama_system& instance, const TASK_SIMPLE& found_task, COMMS& instance_comms)
+void command_wait_if_response(SCRIPT_STATE& state, size_t& i, ai_root& instance, const TASK_SIMPLE& found_task, COMMS& instance_comms)
 {
     if (!instance.is_processing && instance.chat_thread.joinable())
     {
@@ -836,7 +836,7 @@ void command_wait_if_response(SCRIPT_STATE& state, size_t& i, ollama_system& ins
     state = SCRIPT_STATE::GET_COMMAND;
 }
 
-void advance_script_state(SCRIPT_STATE& state, size_t& i, std::string& current_input, const TASK_SIMPLE& found_task, ollama_system& instance, COMMS& instance_comms, TOOL_WORKER_CLASS* tool_worker, const std::filesystem::path& files_dir, bool& keyboard_was_enabled, std::vector<size_t>& call_stack, std::chrono::steady_clock::time_point& ask_deadline)
+void advance_script_state(SCRIPT_STATE& state, size_t& i, std::string& current_input, const TASK_SIMPLE& found_task, ai_root& instance, COMMS& instance_comms, TOOL_WORKER_CLASS* tool_worker, const std::filesystem::path& files_dir, bool& keyboard_was_enabled, std::vector<size_t>& call_stack, std::chrono::steady_clock::time_point& ask_deadline)
 {
     switch (state)
     {

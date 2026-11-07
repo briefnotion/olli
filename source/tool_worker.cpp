@@ -77,7 +77,7 @@ void TOOL_WORKER_CLASS::thread_main()
                 tools_list.push_back(std::move(remote_tool));
             }
 
-            // Takes over ollama_system::process()'s PART 5 (olla.cpp,
+            // Takes over ai_root::process()'s PART 5 (olla.cpp,
             // flagged there) for TOOL_REMOTE specifically - serviced
             // through its new poll_communications() (remote_tools.h/.cpp):
             // non-blocking, driven by pending_calls/pending_results, no
@@ -189,7 +189,7 @@ void TOOL_WORKER_CLASS::add_manual_tool_def(const json& def)
     manual_tool_defs.push_back(def);
 }
 
-void TOOL_WORKER_CLASS::register_local_tools(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, ollama_system& chat)
+void TOOL_WORKER_CLASS::register_local_tools(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, ai_root& chat)
 {
     json scratch = json::array();
     for (auto& tool : tools_list)

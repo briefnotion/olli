@@ -1,7 +1,7 @@
 #ifndef SIDETRACK_H
 #define SIDETRACK_H
 
-#include "olla.h"
+#include "ollama_system.h"
 #include "fled_time.h"
 
 /**
@@ -15,11 +15,11 @@
 class SIDETRACK_CLASS
 {
     private:
-        // Dedicated ollama_system used for sidetrack's own LLM calls
+        // Dedicated ai_root used for sidetrack's own LLM calls
         // (consolidation, second-guess review, etc.) - fully separate from
         // main_instance so this work never blocks, streams into, or
         // otherwise interferes with the real conversation. Its COMMS
-        // (comms is no longer a member of ollama_system - see the
+        // (comms is no longer a member of ai_root - see the
         // COMMS-ownership move in olla.h) is built locally, on the fly,
         // wherever it's actually needed (create(), and later whatever
         // function actually calls .send()/.process()) - same pattern
@@ -95,21 +95,21 @@ class SIDETRACK_CLASS
         TIMED_IS_READY_SIMPLE PERSISTENT_CHECK_TIMER;
         size_t MAX_CONTEXT_SIZE = 200; // messages - tune as needed
 
-        void run_second_guess(IO_WORKER_CLASS& io_worker, ollama_system& main_instance, COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, CLASS_SYSTEM* system);
-        void persistent_time_checks(ollama_system& main_instance);
-        void run_consolidation(ollama_system& main_instance);
-        void run_clear_context(ollama_system& main_instance);
+        void run_second_guess(IO_WORKER_CLASS& io_worker, ai_root& main_instance, COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, CLASS_SYSTEM* system);
+        void persistent_time_checks(ai_root& main_instance);
+        void run_consolidation(ai_root& main_instance);
+        void run_clear_context(ai_root& main_instance);
 
     public:
         // Properties: copied from the main chat instance's own PROPS (model,
         // host, port, etc.) so sidetrack's LLM calls hit the same Ollama
-        // server/model - see ollama_system::open()'s two-argument overload,
+        // server/model - see ai_root::open()'s two-argument overload,
         // which this uses and which forces LOAD_SAVE_HISTORY_ON_DISK off
         // (this instance's history is scratch, never the real history.json).
         void create(OLLAMA_SYSTEM_PROPERTIES Properties);
-        void check(IO_WORKER_CLASS& io_worker, ollama_system& main_instance, COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, CLASS_SYSTEM* system);
+        void check(IO_WORKER_CLASS& io_worker, ai_root& main_instance, COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, CLASS_SYSTEM* system);
 
-        // Same crash ollama_system::request_exit()/shutdown_background_tasks()
+        // Same crash ai_root::request_exit()/shutdown_background_tasks()
         // guard against, for SIDETRACK_CHAT_INSTANCE - if a second-guess/
         // consolidate pass is still mid-response when the whole program
         // exits, its own chat_thread was left joinable with nothing left to
@@ -121,7 +121,7 @@ class SIDETRACK_CLASS
         // the consolidation pass immediately. The real check()-driven path
         // (main.cpp) never needs this; it always gets to stage 2 eventually
         // via the timer. See test_consolidation.cpp.
-        void force_consolidation(ollama_system& main_instance);
+        void force_consolidation(ai_root& main_instance);
 };
 
 #endif

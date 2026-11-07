@@ -16,11 +16,11 @@ using json = nlohmann::json;
 
 // Forward declarations only - TOOL_BASE and every TOOL_* method below just
 // takes/returns a reference (or, for CLASS_SYSTEM, a pointer), never needs
-// the complete type. ollama_system/ToolCall's complete types live in olla.h,
+// the complete type. ai_root/ToolCall's complete types live in olla.h,
 // which includes this header; CLASS_SYSTEM's lives in system.h, deliberately
 // not included here - see the CLASS_SYSTEM* parameter's own comment on
 // TOOL_BASE::check() below.
-class ollama_system;
+class ai_root;
 class CLASS_SYSTEM;
 class COMMS;
 class IO_WORKER_CLASS;
@@ -64,8 +64,8 @@ class TOOL_BASE
         // every call, same as the json tools array it fills alongside it.
         std::vector<std::string> tool_functions;
 
-        virtual void configure(ollama_system& chat) = 0;
-        virtual void register_tool(ollama_system& chat, json& tools) = 0;
+        virtual void configure(ai_root& chat) = 0;
+        virtual void register_tool(ai_root& chat, json& tools) = 0;
 
         // 'system' is the one real CLASS_SYSTEM for the whole process
         // (constructed once in main.cpp) - reachable here, unlike chat.PROPS,
@@ -84,7 +84,7 @@ class TOOL_BASE
         //
         // 'tools_list' is the caller's own (see process()'s comment in
         // olla.h for why it's a reference parameter, not owned by
-        // ollama_system) - passed down here so a tool whose handle_tool()
+        // ai_root) - passed down here so a tool whose handle_tool()
         // calls chat.send()/chat.integrate_tool_result() (which now both
         // need it too) has something to forward. Always valid, never null.
         //
@@ -100,8 +100,8 @@ class TOOL_BASE
         // process()/send() calls too - otherwise a remote-tool call made
         // from inside a running script or delegation would have nothing to
         // route to and silently fail.
-        virtual bool check(IO_WORKER_CLASS& io_worker, ollama_system& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const ToolCall& tc) = 0;
-        virtual void monitor_tool(ollama_system& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms) = 0;
+        virtual bool check(IO_WORKER_CLASS& io_worker, ai_root& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const ToolCall& tc) = 0;
+        virtual void monitor_tool(ai_root& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms) = 0;
 
         // Unlike the four above, not something each tool author has to
         // consciously decide - it's a connection-lifecycle question that's
@@ -109,7 +109,7 @@ class TOOL_BASE
         // TOOL_REMOTE (remote_tools.h) overrides it, once its socket
         // closes; every hardcoded tool just inherits this default rather
         // than needing a meaningless override. Checked once per
-        // process() tick - see ollama_system::process() in olla.cpp - to
+        // process() tick - see ai_root::process() in olla.cpp - to
         // drop a dead tool from tools_list.
         virtual bool is_alive() const { return true; }
 };
@@ -117,13 +117,13 @@ class TOOL_BASE
 class TOOL_SET_THINKING_MODE : public TOOL_BASE
 {
     private:
-        void handle_tool(ollama_system& chat, COMMS& comms, const std::string& name, const json& args, const std::string& tc_id);
+        void handle_tool(ai_root& chat, COMMS& comms, const std::string& name, const json& args, const std::string& tc_id);
 
     public:
-        void configure(ollama_system& chat) override;
-        void register_tool(ollama_system& chat, json& tools) override;
-        bool check(IO_WORKER_CLASS& io_worker, ollama_system& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const ToolCall& tc) override;
-        void monitor_tool(ollama_system& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms) override;
+        void configure(ai_root& chat) override;
+        void register_tool(ai_root& chat, json& tools) override;
+        bool check(IO_WORKER_CLASS& io_worker, ai_root& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const ToolCall& tc) override;
+        void monitor_tool(ai_root& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms) override;
 };
 
 class TOOL_WEB_SEARCH : public TOOL_BASE
@@ -139,7 +139,7 @@ class TOOL_WEB_SEARCH : public TOOL_BASE
         std::pair<bool, std::string> perform_actual_search(const std::string& query, COMMS& comms);
         std::pair<bool, std::string> fetch_url_content(const std::string& url, COMMS& comms);
 
-        void handle_tool(ollama_system& chat, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const std::string& name, const json& args, const std::string& tc_id);
+        void handle_tool(ai_root& chat, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const std::string& name, const json& args, const std::string& tc_id);
 
         static size_t WriteCallback(void* contents, size_t size, size_t nmemb, void* userp) {
             static_cast<std::string*>(userp)->append(static_cast<const char*>(contents), size * nmemb);
@@ -167,10 +167,10 @@ class TOOL_WEB_SEARCH : public TOOL_BASE
         std::string apiKey = "Enter_API_key_for_serpapi.com";
 
     public:
-        void configure(ollama_system& chat) override;
-        void register_tool(ollama_system& chat, json& tools) override;
-        bool check(IO_WORKER_CLASS& io_worker, ollama_system& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const ToolCall& tc) override;
-        void monitor_tool(ollama_system& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms) override;
+        void configure(ai_root& chat) override;
+        void register_tool(ai_root& chat, json& tools) override;
+        bool check(IO_WORKER_CLASS& io_worker, ai_root& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const ToolCall& tc) override;
+        void monitor_tool(ai_root& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms) override;
 };
 
 // "remember_note" - the model saves something the user wants remembered
@@ -191,18 +191,18 @@ class TOOL_REMEMBER : public TOOL_BASE
         // TOOL_WEB_SEARCH's pair-returning helpers (tools.cpp).
         std::pair<bool, std::string> save_note(const std::string& text, const std::string& context, const std::string& title, const std::string& about_date, const std::string& about_time, const std::string& user_words);
 
-        void handle_tool(ollama_system& chat, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const json& args, const std::string& tc_id);
+        void handle_tool(ai_root& chat, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const json& args, const std::string& tc_id);
 
     public:
-        void configure(ollama_system& chat) override;
-        void register_tool(ollama_system& chat, json& tools) override;
-        bool check(IO_WORKER_CLASS& io_worker, ollama_system& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const ToolCall& tc) override;
-        void monitor_tool(ollama_system& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms) override;
+        void configure(ai_root& chat) override;
+        void register_tool(ai_root& chat, json& tools) override;
+        bool check(IO_WORKER_CLASS& io_worker, ai_root& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const ToolCall& tc) override;
+        void monitor_tool(ai_root& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms) override;
 };
 
 // Recursive sub-agent delegation - the model can hand a sub-question to a
 // specialist persona ("consult_expert"), which spawns an isolated
-// ollama_system sub-agent (chat.spawn_background_task(), same as
+// ai_root sub-agent (chat.spawn_background_task(), same as
 // TOOL_TASK_RUNNER) to answer it, and relays the answer back as the tool
 // result. Was a design-reference sketch left out of the TOOL_BASE hierarchy
 // (predating the COMMS refactor - its old handle_tool()/register_tool()
@@ -231,20 +231,20 @@ class TOOL_DELEGATOR : public TOOL_BASE
         // object concurrently while that's in progress).
         int delegation_depth = 0;
 
-        // Spawns a background ollama_system (chat.spawn_background_task())
+        // Spawns a background ai_root (chat.spawn_background_task())
         // seeded with the requested persona as its system prompt, drives it
         // to completion synchronously (same shape as TOOL_TASK_RUNNER's own
         // handle_tool()), and relays its answer back as the tool result.
-        void handle_tool(IO_WORKER_CLASS& io_worker, ollama_system& chat, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const std::string& name, const json& args, const std::string& tc_id);
+        void handle_tool(IO_WORKER_CLASS& io_worker, ai_root& chat, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const std::string& name, const json& args, const std::string& tc_id);
 
     public:
-        void configure(ollama_system& chat) override;
-        void register_tool(ollama_system& chat, json& tools) override;
-        bool check(IO_WORKER_CLASS& io_worker, ollama_system& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const ToolCall& tc) override;
+        void configure(ai_root& chat) override;
+        void register_tool(ai_root& chat, json& tools) override;
+        bool check(IO_WORKER_CLASS& io_worker, ai_root& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const ToolCall& tc) override;
 
         // No periodic work needed - same reasoning as TOOL_TASK_RUNNER's own
         // no-op override.
-        void monitor_tool(ollama_system& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms) override;
+        void monitor_tool(ai_root& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms) override;
 };
 
 class TOOL_TASK_RUNNER : public TOOL_BASE
@@ -255,10 +255,10 @@ class TOOL_TASK_RUNNER : public TOOL_BASE
         bool iequals(const std::string& a, const std::string& b);
 
         // Matches args["intent_phrase"] against task_manager's list, then spawns
-        // a background ollama_system (chat.spawn_background_task()) and drives
+        // a background ai_root (chat.spawn_background_task()) and drives
         // it through the matched task's whole command sequence synchronously -
         // not a single instruction handed back to the model.
-        void handle_tool(IO_WORKER_CLASS& io_worker, ollama_system& chat, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const std::string& name, const json& args, const std::string& tc_id);
+        void handle_tool(IO_WORKER_CLASS& io_worker, ai_root& chat, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const std::string& name, const json& args, const std::string& tc_id);
 
         std::filesystem::path OLLI_DIRECTORY;
 
@@ -268,15 +268,15 @@ class TOOL_TASK_RUNNER : public TOOL_BASE
         int run_depth = 0;
 
     public:
-        void configure(ollama_system& chat) override;
-        void register_tool(ollama_system& chat, json& tools) override;
-        bool check(IO_WORKER_CLASS& io_worker, ollama_system& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const ToolCall& tc) override;
+        void configure(ai_root& chat) override;
+        void register_tool(ai_root& chat, json& tools) override;
+        bool check(IO_WORKER_CLASS& io_worker, ai_root& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const ToolCall& tc) override;
 
         // No periodic work needed - no automation-loop equivalent of a
         // permission-gated background poll (e.g. TOOL_WEB_SEARCH, if it
         // ever grew one) exists here (yet). A no-op, but still called
         // every process() tick like every other tool's.
-        void monitor_tool(ollama_system& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms) override;
+        void monitor_tool(ai_root& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms) override;
 };
 
 #endif

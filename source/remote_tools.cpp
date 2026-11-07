@@ -2,7 +2,7 @@
 #define remote_tools_cpp
 
 #include "remote_tools.h"
-#include "olla.h"
+#include "ai_root.h"
 
 #include <cerrno>
 #include <cstring>
@@ -212,9 +212,9 @@ void TOOL_REMOTE::send_identity(const std::string& name, const std::string& full
 }
 
 // No per-instance setup needed - part of the common tool interface (see the note in tools.h).
-void TOOL_REMOTE::configure(ollama_system&) {}
+void TOOL_REMOTE::configure(ai_root&) {}
 
-void TOOL_REMOTE::register_tool(ollama_system&, json& tools)
+void TOOL_REMOTE::register_tool(ai_root&, json& tools)
 {
     tool_functions.clear();
 
@@ -265,7 +265,7 @@ bool TOOL_REMOTE::read_line_blocking(std::string& out, int timeout_ms)
     }
 }
 
-bool TOOL_REMOTE::check(IO_WORKER_CLASS&, ollama_system& chat, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>&, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const ToolCall& tc)
+bool TOOL_REMOTE::check(IO_WORKER_CLASS&, ai_root& chat, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>&, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const ToolCall& tc)
 {
     bool is_mine = false;
     for (auto& def : tool_defs) {
@@ -422,9 +422,9 @@ bool TOOL_REMOTE::check(IO_WORKER_CLASS&, ollama_system& chat, CLASS_SYSTEM*, st
 // nothing's been received at all in DEAD_TIMEOUT_SECONDS - see the class
 // comment and tools/PROTOCOL.md for why. mark_dead() also runs here on a
 // cleanly closed connection, same as before the heartbeat existed - either
-// way, is_alive() flips to false, which ollama_system::process() (olla.cpp)
+// way, is_alive() flips to false, which ai_root::process() (olla.cpp)
 // checks every tick to actually drop this instance from tools_list.
-void TOOL_REMOTE::monitor_tool(ollama_system& chat, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>&, TOOL_WORKER_CLASS* tool_worker, COMMS& comms)
+void TOOL_REMOTE::monitor_tool(ai_root& chat, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>&, TOOL_WORKER_CLASS* tool_worker, COMMS& comms)
 {
     if (fd < 0) return;
 
@@ -498,7 +498,7 @@ void TOOL_REMOTE::monitor_tool(ollama_system& chat, CLASS_SYSTEM*, std::vector<s
                 // message's narration above - see tools/PROTOCOL.md's
                 // `event` shape. Queued via pending_tool_calls (olla.h) for
                 // real execution through the normal tools_list dispatch
-                // (ollama_system::handle_instance_tools()), same as any
+                // (ai_root::handle_instance_tools()), same as any
                 // model-issued call - this class has no idea what the
                 // named tool actually is, same as everywhere else here.
                 if (msg.contains("action") && msg["action"].is_object()) {

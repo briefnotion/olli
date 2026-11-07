@@ -17,7 +17,7 @@
 #include "user_io.h" // KEYBOARD_INPUT, OUTPUT_CLASS, COMMS (via comms.h)
 #include "web_server.h" // WEB_SERVER_CLASS
 
-class ollama_system;
+class ai_root;
 class TOOL_BASE;
 class TOOL_WORKER_CLASS;
 

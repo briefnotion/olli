@@ -143,7 +143,8 @@ add_custom_target(olli_version ALL
 # 3. Define the executable
 add_executable(olli
     ../source/main.cpp
-    ../source/olla.cpp
+    ../source/ai_root.cpp
+    ../source/ollama_system.cpp
     ../source/comms.cpp
     ../source/io_worker.cpp
     ../source/tool_worker.cpp

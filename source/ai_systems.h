@@ -1,7 +1,7 @@
 #ifndef ai_systems_h
 #define ai_systems_h
 
-// Shared data types for every AI backend (ollama_system today, gemini_system
+// Shared data types for every AI backend (ai_root today, gemini_system
 // next, whatever comes after). Nothing in here knows or cares which backend
 // produced or will consume it - history entries, tool calls, the result of one
 // send(), and the status summary. Moved here verbatim from olla.h; no
@@ -102,7 +102,7 @@ struct Message {
     Confidence confidence;
 
     // The assistant's own tool_calls request for this message, if any -
-    // see ollama_system::send()'s comment on why this is recorded now
+    // see ai_root::send()'s comment on why this is recorded now
     // (it used to not exist anywhere, even transiently: only the tool's
     // *result* and a persona-narrated version of it ever made it into
     // history, never the actual structured call the model itself made).

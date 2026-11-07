@@ -55,7 +55,7 @@ struct TOOL_RESULT
 // produced this event (e.g. the call_id of the set_timer call a timer
 // expiry traces back to), or EVENT_NO_ORIGIN_ID below for an event with no
 // such call at all (a purely ambient one, like presence). Lets whichever
-// ollama_system instance drains this (olla.cpp PART 5) tell its own
+// ai_root instance drains this (olla.cpp PART 5) tell its own
 // dispatched work apart from someone else's/nothing's, instead of
 // narrating every event as if it just answered whatever's currently being
 // discussed - it's still not a call_id in TOOL_RESULT's sense (nothing
@@ -99,7 +99,7 @@ inline const std::string EVENT_NO_ORIGIN_ID = "no_origin_call";
  * Its only job is the initial registration handshake: once a connection
  * sends a well-formed "register" line, poll() hands the fd and its declared
  * tools off to the caller (main.cpp constructs a TOOL_REMOTE from it and
- * registers that with chat - see ollama_system::register_remote_tool) and
+ * registers that with chat - see ai_root::register_remote_tool) and
  * this class forgets about that connection entirely, free to accept the
  * next one. Anything that isn't a well-formed register message on a fresh
  * connection is silently dropped - register is always the first message per
@@ -226,10 +226,10 @@ class TOOL_REMOTE : public TOOL_BASE
         // write just marks the connection dead, same as any other.
         void send_identity(const std::string& name, const std::string& full_name, const std::string& about);
 
-        void configure(ollama_system& chat) override;
-        void register_tool(ollama_system& chat, json& tools) override;
-        bool check(IO_WORKER_CLASS& io_worker, ollama_system& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const ToolCall& tc) override;
-        void monitor_tool(ollama_system& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms) override;
+        void configure(ai_root& chat) override;
+        void register_tool(ai_root& chat, json& tools) override;
+        bool check(IO_WORKER_CLASS& io_worker, ai_root& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const ToolCall& tc) override;
+        void monitor_tool(ai_root& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms) override;
 
         // New, alongside check()/monitor_tool() above - neither is touched.
         // Not part of TOOL_BASE's virtual interface, so callers need this
@@ -263,7 +263,7 @@ class TOOL_REMOTE : public TOOL_BASE
         const json& get_tool_defs() const { return tool_defs; }
 
         // False once the connection's closed (monitor_tool() or check()
-        // noticing a dead fd resets it to -1) - ollama_system::process()
+        // noticing a dead fd resets it to -1) - ai_root::process()
         // checks this every tick to drop this instance from tools_list.
         bool is_alive() const override { return fd >= 0; }
 };

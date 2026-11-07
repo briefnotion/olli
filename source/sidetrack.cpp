@@ -24,7 +24,7 @@ static std::string join_strings(const std::vector<std::string>& items, const std
 // 4 need this (the DONE-check call itself can still have dispatched a real
 // tool call while forming its answer), same rule stage 6 applies to its
 // own, richer commit path.
-static void commit_action_only_note(ollama_system& main_instance, const std::vector<std::string>& actions)
+static void commit_action_only_note(ai_root& main_instance, const std::vector<std::string>& actions)
 {
     if (actions.empty()) return;
 
@@ -41,15 +41,15 @@ static void commit_action_only_note(ollama_system& main_instance, const std::vec
 
 // Starts SIDETRACK_CHAT_INSTANCE generating a reply to whatever's currently
 // sitting in comms.INPUT_FROM_USER, using its own chat_thread - same
-// mechanism ollama_system::input() uses for the main chat (olla.cpp) - so
+// mechanism ai_root::input() uses for the main chat (olla.cpp) - so
 // run_second_guess() can poll for completion instead of blocking. Only
 // entered from a stage that already set INPUT_FROM_USER. comms here is the
 // real main chat's own COMMS (passed through from check()), not a separate
 // one - see run_second_guess()'s own comment for the tradeoff that implies.
-// response_format forwards straight to ollama_system::send() - default-
+// response_format forwards straight to ai_root::send() - default-
 // empty (plain text) for the stage 4 "go ahead" call, set for the stage 2
 // DONE-check call (see SECOND_GUESS_RESULT_FORMAT below).
-static void start_second_guess_call(ollama_system& instance, COMMS& comms,
+static void start_second_guess_call(ai_root& instance, COMMS& comms,
                                      TOOL_WORKER_CLASS* tool_worker,
                                      const json& response_format = json())
 {
@@ -83,7 +83,7 @@ static const json SECOND_GUESS_RESULT_FORMAT = {
 // Collects the results of any remote tool calls instance has dispatched.
 // handle_instance_tools() only queues a remote call (outstanding_tool_call_ids
 // plus tool_worker->put_pending_call()); the answer comes back through
-// get_pending_result(), which ollama_system::process() drains in its PART 5
+// get_pending_result(), which ai_root::process() drains in its PART 5
 // (olla.cpp). Nothing runs process() on SIDETRACK_CHAT_INSTANCE, so without
 // this a remote call's result was never collected - it never reached the
 // instance's history or the debug log, and sat in tool_worker's queue for good.
@@ -93,7 +93,7 @@ static const json SECOND_GUESS_RESULT_FORMAT = {
 // synchronous send() that would block the main thread and overwrite
 // last_received - the DONE-check's structured reply, or the answer stage 6
 // commits - so it is left out on purpose.
-static void collect_second_guess_results(ollama_system& instance, TOOL_WORKER_CLASS* tool_worker)
+static void collect_second_guess_results(ai_root& instance, TOOL_WORKER_CLASS* tool_worker)
 {
     if (!tool_worker) return;
 
@@ -113,18 +113,18 @@ static void collect_second_guess_results(ollama_system& instance, TOOL_WORKER_CL
 }
 
 // Dispatches any tool calls the last call produced - same shape
-// ollama_system::process()'s own background_tasks handling uses for
+// ai_root::process()'s own background_tasks handling uses for
 // exactly this kind of tick-spanning secondary instance (olla.cpp, PART 2)
 // - joins the thread once it's done, and reports whether this round is
 // truly finished: not just "the network call returned," but also "no tool
 // call is still waiting to be dispatched, and every remote one dispatched
 // has had its result collected."
-static bool poll_second_guess_call(IO_WORKER_CLASS& io_worker, ollama_system& instance, COMMS& comms,
+static bool poll_second_guess_call(IO_WORKER_CLASS& io_worker, ai_root& instance, COMMS& comms,
                                     std::vector<std::unique_ptr<TOOL_BASE>>& tools_list,
                                     TOOL_WORKER_CLASS* tool_worker,
                                     CLASS_SYSTEM* system)
 {
-    // comms is the real main chat's own. ollama_system::input() (olla.cpp)
+    // comms is the real main chat's own. ai_root::input() (olla.cpp)
     // only clears INTERRUPTED when it's the one consuming it - gated on its
     // own is_processing, which is false the whole time second-guess is
     // running (it only starts once the main turn has already finished). So
@@ -166,7 +166,7 @@ static bool poll_second_guess_call(IO_WORKER_CLASS& io_worker, ollama_system& in
            instance.outstanding_tool_call_ids.empty();
 }
 
-void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ollama_system& main_instance, COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, CLASS_SYSTEM* system)
+void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ai_root& main_instance, COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, CLASS_SYSTEM* system)
 {
     // A finished review (stage 100) otherwise has no way back to 0 - a new
     // ASSISTANT REPLY completing is what should make that happen, same idea
@@ -216,7 +216,7 @@ void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ollama_system
 
     // comms.INTERRUPTED means "abort in-flight generation/speech" (comms.h).
     // Cleared here once consumed, same reasoning as poll_second_guess_call()'s
-    // own comment above: ollama_system::input() (olla.cpp) only clears it
+    // own comment above: ai_root::input() (olla.cpp) only clears it
     // when gated on main's own is_processing, which is false throughout this
     // whole pre-start window, so a bare interrupt (no ENTER_PRESSED) would
     // otherwise dangle true indefinitely. This is the same comms the real
@@ -515,7 +515,7 @@ void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ollama_system
 // machine, just a periodic safety check. If history has grown too large
 // (e.g. because consolidation isn't keeping up), wipe it the same way
 // run_clear_context() does.
-void SIDETRACK_CLASS::persistent_time_checks(ollama_system& main_instance)
+void SIDETRACK_CLASS::persistent_time_checks(ai_root& main_instance)
 {
     if (PERSISTENT_CHECK_TIMER.is_ready())
     {
@@ -537,7 +537,7 @@ void SIDETRACK_CLASS::persistent_time_checks(ollama_system& main_instance)
     }
 }
 
-void SIDETRACK_CLASS::run_consolidation(ollama_system& main_instance)
+void SIDETRACK_CLASS::run_consolidation(ai_root& main_instance)
 {
     if (consolidation_stage == 0)
     {
@@ -767,13 +767,13 @@ void SIDETRACK_CLASS::run_consolidation(ollama_system& main_instance)
     }
 }
 
-void SIDETRACK_CLASS::force_consolidation(ollama_system& main_instance)
+void SIDETRACK_CLASS::force_consolidation(ai_root& main_instance)
 {
     consolidation_stage = 2;
     run_consolidation(main_instance);
 }
 
-void SIDETRACK_CLASS::run_clear_context(ollama_system& main_instance)
+void SIDETRACK_CLASS::run_clear_context(ai_root& main_instance)
 {
     if (context_clear_stage == 0)
     {
@@ -827,7 +827,7 @@ void SIDETRACK_CLASS::shutdown()
     SIDETRACK_CHAT_INSTANCE.request_exit();
 }
 
-void SIDETRACK_CLASS::check(IO_WORKER_CLASS& io_worker, ollama_system& main_instance, COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, CLASS_SYSTEM* system)
+void SIDETRACK_CLASS::check(IO_WORKER_CLASS& io_worker, ai_root& main_instance, COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, CLASS_SYSTEM* system)
 {
     // I'm trying to keep this function non blocking.
 

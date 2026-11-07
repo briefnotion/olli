@@ -33,7 +33,7 @@ class KEYBOARD_INPUT_PROPERTIES
 {
     public:
 
-    // atomic, not plain bool: toggled from ollama_system::dispatch_tool_call()
+    // atomic, not plain bool: toggled from ai_root::dispatch_tool_call()
     // (main thread, during run_automation_task) to stop IO_WORKER_CLASS's
     // background thread from also reading stdin while that tool's own
     // separate blocking keyboard loop (tools.cpp) is - two real threads
@@ -80,7 +80,7 @@ class KEYBOARD_INPUT
         // Ctrl+C into a real SIGINT on its own - it just arrives as a plain
         // byte here like any other keystroke, so it needs its own explicit
         // handling. main.cpp checks this each tick and calls
-        // ollama_system::request_exit(), the same safe shutdown path typed
+        // ai_root::request_exit(), the same safe shutdown path typed
         // "bye"/"quit" already uses (stop any in-flight response, join
         // chat_thread, then set running = false) - important with ncurses
         // active, since without a working way to quit, breaking the display
@@ -239,14 +239,14 @@ struct NCURSES_TEXT_PANEL
  * populated by get_response(), which pulls (and clears) a passed-in
  * COMMS's own response_buffer/thinking_buffer (see comms.h). That's a
  * separate cross-thread hop, since that COMMS lives on whichever
- * ollama_system's chat_thread is streaming a reply; system_message/
+ * ai_root's chat_thread is streaming a reply; system_message/
  * user_input are plain public strings any same-thread caller can append
  * to directly.
  *
  * display() is meant to be called once per main-loop tick (see main.cpp),
  * right before the loop goes back around - it prints whatever's accumulated
  * in all four buckets and clears them, the same check-act-clear shape
- * ollama_system::write_to_tts() already uses for tts_buffer.
+ * ai_root::write_to_tts() already uses for tts_buffer.
  */
 
 // Which OUTPUT_CLASS display path this run uses, chosen once here rather
@@ -265,7 +265,7 @@ class OUTPUT_CLASS
         // Tracks whether an opening "<thinking>" tag is currently open, so
         // display() only prints it once per thinking block instead of once
         // per tick - mirrors the old in_thinking_block bookkeeping that used
-        // to live inline in ollama_system::send() before this class existed.
+        // to live inline in ai_root::send() before this class existed.
         // Also drives display_with_ncurses()'s thinking window showing/hiding
         // - both display paths share this one flag as "is a thinking block
         // currently open," even though only one path runs in a given session.
@@ -290,7 +290,7 @@ class OUTPUT_CLASS
         // display() and display_with_ncurses() at the same points
         // user_input/chat_response get shown, so the log always matches
         // exactly what the user actually saw - not threaded through
-        // ollama_system's own response_buffer cross-thread plumbing.
+        // ai_root's own response_buffer cross-thread plumbing.
         void append_to_chat_log(bool is_user, const std::string& text);
 
         // ---- ncurses state - see display_with_ncurses() in user_io.cpp ----
@@ -441,7 +441,7 @@ class OUTPUT_CLASS
         std::vector<TOOL_ATTACHMENT> web_links;
         size_t web_links_shown_count = 0;
 
-        // Set once by main.cpp (alongside ollama_system::PROPS.OLLI_DIRECTORY
+        // Set once by main.cpp (alongside ai_root::PROPS.OLLI_DIRECTORY
         // - same profile directory, see Settings::get_settings_path()) right
         // after settings load. Left empty (the default) disables the chat
         // log entirely - append_to_chat_log() no-ops on an empty path.
@@ -485,8 +485,8 @@ class OUTPUT_CLASS
         // comms.log_buffer into this instance's own chat_response/
         // chat_thinking/system_message, under output_buffer_mutex
         // (comms.h). Only ever touches the passed-in COMMS, not the rest
-        // of whatever ollama_system instance it belongs to - hence taking
-        // COMMS& directly rather than ollama_system&. Safe to call every
+        // of whatever ai_root instance it belongs to - hence taking
+        // COMMS& directly rather than ai_root&. Safe to call every
         // tick even if comms hasn't picked up anything new since the last
         // call.
         void get_response(COMMS& comms);

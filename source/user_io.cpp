@@ -13,7 +13,7 @@
 #include <algorithm>
 
 // get_response() takes COMMS& directly (comms.h, included via user_io.h)
-// rather than ollama_system& - no need for olla.h here at all, which
+// rather than ai_root& - no need for olla.h here at all, which
 // sidesteps what would otherwise be a circular include (olla.h -> system.h
 // -> user_io.h). timestamp_prefix() below used to come in transitively
 // through olla.h -> helper_olli.h; needs its own include now that path's

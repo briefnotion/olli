@@ -25,6 +25,22 @@ struct ToolCall {
     std::string name;
     json arguments;
 
+    // Opaque, backend-owned data to be echoed back unchanged next time this
+    // call is sent in history. Today only the Gemini backend uses it: Gemini 3
+    // models attach a "thoughtSignature" to a tool call and REJECT the next
+    // request (HTTP 400) if that call comes back without it. Empty for every
+    // other backend, for calls from older history, and for system-injected
+    // calls (the Gemini backend then uses Google's documented placeholder).
+    // Appended after the three original fields on purpose, so the existing
+    // {id, name, arguments} brace-initializers keep working via the
+    // constructor below - an aggregate with an unset fourth member would trip
+    // -Werror=missing-field-initializers at every one of those call sites.
+    std::string signature;
+
+    ToolCall() = default;
+    ToolCall(std::string call_id, std::string call_name, json call_arguments, std::string call_signature = "")
+        : id(std::move(call_id)), name(std::move(call_name)), arguments(std::move(call_arguments)), signature(std::move(call_signature)) {}
+
     // .value() throughout, not .at() - unlike Message's own to_json/
     // from_json below, there's no legacy history.json to stay compatible
     // with here (this type is new), but a malformed/unexpected entry
@@ -37,12 +53,15 @@ struct ToolCall {
             {"name", tc.name},
             {"arguments", tc.arguments}
         };
+        // Only written when there is one, so history stays unchanged otherwise.
+        if (!tc.signature.empty()) j["signature"] = tc.signature;
     }
 
     friend void from_json(const json& j, ToolCall& tc) {
         tc.id = j.value("id", "");
         tc.name = j.value("name", "");
         tc.arguments = j.value("arguments", json::object());
+        tc.signature = j.value("signature", "");
     }
 };
 

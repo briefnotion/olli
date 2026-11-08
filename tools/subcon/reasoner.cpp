@@ -280,7 +280,7 @@ SUBCON_PULL_RESULT SUBCON_REASONER::pull_notes()
         out.text = subcon_build_digest(queue); // marks every included note delivered
         // The wording olli narrates this in is its own persona's. Same
         // faithful-relay intent as the old DIRECTOR_NOTE announcement
-        // (source/olla.cpp integrate_tool_result): report the real facts,
+        // (source/ai_root.cpp integrate_tool_result): report the real facts,
         // change none of them.
         out.special_instruction =
             "These are things your own background thinking noticed earlier, while the user was busy - findings "

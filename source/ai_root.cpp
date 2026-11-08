@@ -10,7 +10,7 @@
 #include <cstdio>
 
 // One instance of every TOOL_* class - callers populate their own tools_list
-// with this (see process()'s comment in olla.h for why tools_list is a
+// with this (see process()'s comment in ai_root.h for why tools_list is a
 // reference parameter rather than living on this class). Add a new tool
 // here, nowhere else.
 void populate_default_tools(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list)
@@ -33,7 +33,7 @@ void ai_root::log(const std::string& text)
     // move) and every chat.log(...) call site still expects this old
     // no-argument signature. Revisit properly when working on system
     // messages - needs a COMMS& parameter threaded through here and every
-    // caller (tools.cpp, remote_tools.cpp, main.cpp, olla.cpp), same
+    // caller (tools.cpp, remote_tools.cpp, main.cpp, ai_root.cpp), same
     // pattern as integrate_tool_result(). See TODO.md.
     (void)text;
 }
@@ -99,13 +99,13 @@ void ai_root::open(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list)
     {
         Message opening_msg;
         opening_msg.role = "system";
-        opening_msg.content = OLLAMA_OPENING;
+        opening_msg.content = AI_OPENING;
         opening_msg.consolidation_level = -1;
         history.insert(history.begin(), opening_msg);
     }
 }
 
-void ai_root::open(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, OLLAMA_SYSTEM_PROPERTIES Properties)
+void ai_root::open(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, AI_PROPERTIES Properties)
 {
     PROPS = Properties;
 
@@ -243,7 +243,7 @@ static std::string summarize_tool_calls(const std::vector<ToolCall>& calls)
 
 
 // Boils a list of token probabilities down to the small summary stored on
-// Message (olla.h's Confidence). Empty input stays present == false, which is
+// Message (ai_root.h's Confidence). Empty input stays present == false, which is
 // how "no data" is told apart from "0% sure".
 static Confidence summarize_confidence(const std::vector<TokenProb>& tokens)
 {
@@ -266,7 +266,7 @@ static Confidence summarize_confidence(const std::vector<TokenProb>& tokens)
 }
 
 // Asks for a reply shaped like {"answer":"yes"}, "no" or "maybe" - send()
-// turns it into last_received.answer (olla.h's YesNoMaybe).
+// turns it into last_received.answer (ai_root.h's YesNoMaybe).
 const json YES_NO_MAYBE_FORMAT = {
     {"type", "object"},
     {"properties", {
@@ -291,7 +291,7 @@ void ai_root::send(TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const std::stri
 
     // A real user message (or a background task-runner's next scripted
     // command - also sent with role "user") starts a fresh turn - see
-    // tool_calls_this_turn's comment in olla.h. A "system"-role send()
+    // tool_calls_this_turn's comment in ai_root.h. A "system"-role send()
     // (DIRECTOR_NOTE follow-ups) deliberately does NOT reset this; those
     // are still part of the same turn the guard is bounding.
     if (role == "user")
@@ -878,7 +878,7 @@ void ai_root::process(IO_WORKER_CLASS& io_worker, CLASS_SYSTEM* system, std::vec
     if (tool_worker)
     {
         // Only ever claims results for calls THIS instance dispatched
-        // (outstanding_tool_call_ids, olla.h) - tool_worker's queue is
+        // (outstanding_tool_call_ids, ai_root.h) - tool_worker's queue is
         // shared by every ai_root instance (main chat, a
         // task-runner's own instance, a delegate's own instance), so
         // blindly popping "whatever's oldest" here would sometimes hand
@@ -913,12 +913,12 @@ void ai_root::process(IO_WORKER_CLASS& io_worker, CLASS_SYSTEM* system, std::vec
         // rightful owner elsewhere (a bigger, still-open question, see
         // TODO.md). What origin_id (remote_tools.h) does let this instance
         // do is tell honestly whether the event is actually its own -
-        // owned_tool_call_ids (olla.h) is this instance's own record of
+        // owned_tool_call_ids (ai_root.h) is this instance's own record of
         // every call it's ever dispatched - and frame the narration
         // accordingly instead of always implying it just answered whatever
         // the current conversation happens to be about.
         //
-        // Gated on drains_events (olla.h's own comment on it) - unlike the
+        // Gated on drains_events (ai_root.h's own comment on it) - unlike the
         // result-claiming loop just above, which is safe for any instance
         // to share (id-based), this one has no way to tell "mine" from
         // "someone else's" at all, so an instance that shouldn't compete
@@ -947,7 +947,7 @@ void ai_root::process(IO_WORKER_CLASS& io_worker, CLASS_SYSTEM* system, std::vec
                     log("[RemoteTools] Event from remote tool: " + event.message + "\n");
 
                     // origin_id (remote_tools.h) and owned_tool_call_ids
-                    // (olla.h) are fully wired end-to-end and verified correct -
+                    // (ai_root.h) are fully wired end-to-end and verified correct -
                     // DELIBERATELY not yet acted on here. An is_own-based
                     // "this wasn't triggered by anything you asked" framing
                     // reliably provoked the model into issuing its own follow-up
@@ -958,7 +958,7 @@ void ai_root::process(IO_WORKER_CLASS& io_worker, CLASS_SYSTEM* system, std::vec
                     // through the separate pending_tool_calls queue
                     // (handle_instance_tools(), tools.cpp). integrate_tool_result()
                     // -> send() below is a fully synchronous, blocking call on
-                    // whichever thread is running process() - olla.h's own
+                    // whichever thread is running process() - ai_root.h's own
                     // comment on pending_tool_calls already documents the
                     // underlying gap ("last_received gets reset at the top of
                     // every send() call, so anything sitting in it could be

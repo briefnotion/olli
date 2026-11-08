@@ -60,7 +60,7 @@ std::string timestamp_prefix() {
 // ----
 
 namespace {
-    // Matches history_write()'s own rule-line convention (olla.cpp) rather
+    // Matches history_write()'s own rule-line convention (ai_root.cpp) rather
     // than inventing a second style for a second debug file.
     constexpr const char* DEBUG_LOG_RULE = "------------------------------------";
 }

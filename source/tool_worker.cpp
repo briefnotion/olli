@@ -22,7 +22,7 @@ void TOOL_WORKER_CLASS::thread_stop()
 void TOOL_WORKER_CLASS::thread_main()
 {
     // Local, not a class member - same guarding main.cpp's own tools_list
-    // relies on (olla.h's process() comment). Only this thread ever
+    // relies on (ai_root.h's process() comment). Only this thread ever
     // touches it; nothing crosses out of thread_main() but through
     // exchange(), so there's no other code path that could reach in.
     //
@@ -77,7 +77,7 @@ void TOOL_WORKER_CLASS::thread_main()
                 tools_list.push_back(std::move(remote_tool));
             }
 
-            // Takes over ai_root::process()'s PART 5 (olla.cpp,
+            // Takes over ai_root::process()'s PART 5 (ai_root.cpp,
             // flagged there) for TOOL_REMOTE specifically - serviced
             // through its new poll_communications() (remote_tools.h/.cpp):
             // non-blocking, driven by pending_calls/pending_results, no
@@ -163,7 +163,7 @@ void TOOL_WORKER_CLASS::thread_main()
 
             // Rebuilt fresh every tick from whatever's actually connected
             // right now (same reasoning send()'s own tools rebuild has,
-            // olla.cpp) rather than patched incrementally - tools_list is
+            // ai_root.cpp) rather than patched incrementally - tools_list is
             // small, so this is cheap, and it's simpler than tracking
             // per-tool add/remove deltas separately. manual_tool_defs isn't
             // tied to a connection at all, so it's just copied in fresh

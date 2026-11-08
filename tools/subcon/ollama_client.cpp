@@ -104,7 +104,7 @@ OLLAMA_REPLY ollama_chat(const OLLAMA_SETTINGS& settings, const json& messages, 
         reply.content = reply.message.value("content", "");
         reply.thinking = reply.message.value("thinking", "");
 
-        // Same lenient shape as olli's parse_tool_calls() (olla.cpp): a
+        // Same lenient shape as olli's parse_tool_calls() (ollama_system.cpp): a
         // malformed entry is skipped, never allowed to take the rest down.
         if (reply.message.contains("tool_calls") && reply.message["tool_calls"].is_array()) {
             for (const json& tc : reply.message["tool_calls"]) {

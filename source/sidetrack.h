@@ -20,7 +20,7 @@ class SIDETRACK_CLASS
         // main_instance so this work never blocks, streams into, or
         // otherwise interferes with the real conversation. Its COMMS
         // (comms is no longer a member of ai_root - see the
-        // COMMS-ownership move in olla.h) is built locally, on the fly,
+        // COMMS-ownership move in ai_root.h) is built locally, on the fly,
         // wherever it's actually needed (create(), and later whatever
         // function actually calls .send()/.process()) - same pattern
         // tools.cpp's task-runner automation instance uses - rather than

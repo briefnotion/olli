@@ -343,7 +343,7 @@ Six message types, distinguished by `"type"`.
 ```
 
 - `call_id` echoes the tool_call id Ollama assigned (`ToolCall::id`,
-  `source/olla.h`), so the eventual `result` can be matched back to the
+  `source/ai_systems.h`), so the eventual `result` can be matched back to the
   right pending call.
 
 ### `result` (tool -> olli, in response to a `call`)
@@ -365,8 +365,8 @@ or, on failure:
   convention, it just receives the string over a socket instead of computing
   it in-process.
 - Optional `special_instruction` (2026-09-10) - replaces the generic
-  "be concise, no jargon" framing `ollama_system::integrate_tool_result()`
-  (`source/olla.cpp`) uses when narrating a result back to the user, with a
+  "be concise, no jargon" framing `ai_root::integrate_tool_result()`
+  (`source/ai_root.cpp`) uses when narrating a result back to the user, with a
   custom instruction for this one result instead - e.g.
   `tools/rag/rag_tool/rag_tool.cpp`'s `rag_get_document` sets one asking
   the model to relay a full document's content verbatim rather than
@@ -423,7 +423,7 @@ or, on failure:
   it. Reusing the id of whatever call originally created the standing
   state behind it (e.g. the `set_timer` call a timer's later expiry traces
   back to - see `tools/clock/clock.cpp`'s `ActiveTimer::origin_call_id`)
-  lets whichever instance drains this event (`source/olla.cpp`'s
+  lets whichever instance drains this event (`source/ai_root.cpp`'s
   `process()`, PART 5) recognize "this is mine" from "this is a leftover
   from somewhere else" and narrate it honestly either way, instead of
   always implying it just answered whatever the current conversation
@@ -454,7 +454,7 @@ or, on failure:
   `ollama_system::handle_instance_tools()` uses for a call the model issued
   itself (matched against `tools_list` by name) - so this works for *any*
   registered tool, built-in or remote, with no tool-specific code anywhere
-  in this path. Queued via `pending_tool_calls` (`source/olla.h`) rather
+  in this path. Queued via `pending_tool_calls` (`source/ai_root.h`) rather
   than injected into the model's own `last_received.tool_calls`, since the
   latter gets reset at the top of every `send()` call and could silently
   drop a queued action if a new turn started first.
@@ -466,7 +466,7 @@ or, on failure:
   `set_timer`'s `on_expire_tool`/`on_expire_arguments` params (see
   `tools/clock/clock.cpp`) are what let the model pre-author this action
   once, up front, instead. Still subject to the same
-  `PROPS.max_tool_calls_per_turn` cap every tool call is (see olla.h) - one
+  `PROPS.max_tool_calls_per_turn` cap every tool call is (see ai_root.h) - one
   action barely dents that budget, and one uniform rule for every
   execution, regardless of origin, is simpler to reason about than a
   separate exemption.
@@ -481,7 +481,7 @@ or, on failure:
   A plain `{name, value}` pair, both plain strings - `name` isn't an enum
   or a fixed list on the wire (same "no header-wide change for a new kind"
   reasoning `attachment`'s own `type` field above uses); it's just up to
-  whichever olli-side code reads a given name (`source/olla.cpp`'s own
+  whichever olli-side code reads a given name (`source/ai_root.cpp`'s own
   event-draining loop, PART 5) whether it does anything with it. Deliberately
   its own field rather than reusing `action`'s slot - a presence transition
   already legitimately uses `action` for that person's own configured
@@ -490,7 +490,7 @@ or, on failure:
 
   Right now the one real producer is `tools/presence/presence.cpp`, sending
   `{"name": "user.presence", "value": "near"}` or `"away"` on every
-  transition, read by `source/olla.cpp` into `COMMS::user.presence`
+  transition, read by `source/ai_root.cpp` into `COMMS::user.presence`
   (`source/comms.h`/`source/helper_olli.h`'s `USER_IDENTITY`). Assumes
   exactly one tracked person per olli profile - a profile with more than
   one configured person in `presence_settings.json` would have whichever

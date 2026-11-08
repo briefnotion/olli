@@ -704,10 +704,10 @@ void TOOL_DELEGATOR::handle_tool(IO_WORKER_CLASS& io_worker, ai_root& chat, std:
                         "Provide your expert response now. Do not include introductory pleasantries.";
 
     // Seeds the persona as the sub-agent's protected opening message - same
-    // mechanism ai_root::open() (olla.cpp) already uses for every
+    // mechanism ai_root::open() (ai_root.cpp) already uses for every
     // instance, rather than hand-pushing a system Message onto history
     // directly (the old pre-open() approach).
-    instance.OLLAMA_OPENING = system_prompt;
+    instance.AI_OPENING = system_prompt;
     instance.open(tools_list, chat.PROPS);
 
     // Set after open(), not before - the open(tools_list, Properties)
@@ -779,7 +779,7 @@ void TOOL_DELEGATOR::handle_tool(IO_WORKER_CLASS& io_worker, ai_root& chat, std:
     chat.integrate_tool_result(tool_worker, comms, "", "The " + specialty + " expert has finished their analysis. Here is the report: " + result);
 
     // Cleared here, same reasoning as TOOL_TASK_RUNNER's own handle_tool():
-    // ai_root::process()'s PART 2 (olla.cpp) checks this same
+    // ai_root::process()'s PART 2 (ai_root.cpp) checks this same
     // last_received.response, once per tick, to decide whether to relay a
     // background task's output to the main chat before erasing it from
     // chat.background_tasks - leaving it set would fire a second, redundant
@@ -928,10 +928,10 @@ void TOOL_TASK_RUNNER::handle_tool(IO_WORKER_CLASS& io_worker, ai_root& chat, st
         DEBUG_LOG_CLASS::instance().log_event(instance.debug_label, "instance created");
 
         // Give the spawned instance the task's own purpose as its opening
-        // persona instead of the generic default (olla.h) - OLLAMA_OPENING
+        // persona instead of the generic default (ai_root.h) - AI_OPENING
         // is never empty at this point (it always starts at that default),
         // so this always applies for a task-runner automation instance.
-        instance.OLLAMA_OPENING = found_task.TASK_PURPOSE;
+        instance.AI_OPENING = found_task.TASK_PURPOSE;
 
         instance.PROPS.stream_output = true;
 
@@ -1057,7 +1057,7 @@ void TOOL_TASK_RUNNER::handle_tool(IO_WORKER_CLASS& io_worker, ai_root& chat, st
                 pre_command_result_baseline = held_results.size();
             }
 
-            // Taken out from under instance.process()'s own PART 5 (olla.cpp)
+            // Taken out from under instance.process()'s own PART 5 (ai_root.cpp)
             // before it runs, so there's nothing left for it to drain/narrate
             // live this tick - held_results/held_events above just accumulate
             // whatever shows up, tool_worker's own buffering unaffected
@@ -1068,7 +1068,7 @@ void TOOL_TASK_RUNNER::handle_tool(IO_WORKER_CLASS& io_worker, ai_root& chat, st
             if (found_task.delay_tool_returns && tool_worker)
             {
                 // Only claims results for calls this instance itself
-                // dispatched (instance.outstanding_tool_call_ids, olla.h) -
+                // dispatched (instance.outstanding_tool_call_ids, ai_root.h) -
                 // the old blind get_pending_result(out) drained whatever
                 // was oldest in tool_worker's shared queue regardless of
                 // which instance it actually belonged to, which could (and
@@ -1153,7 +1153,7 @@ void TOOL_TASK_RUNNER::handle_tool(IO_WORKER_CLASS& io_worker, ai_root& chat, st
                     // indefinitely. A synthetic call_id (no real call ever
                     // answered) - same "descriptive, not a real id" pattern
                     // pending_tool_calls' own action follow-ups already use
-                    // (olla.cpp's "system_action_" + timestamp) - narrated
+                    // (ai_root.cpp's "system_action_" + timestamp) - narrated
                     // the same honest way a real timeout error already is,
                     // so the script's own next line (and whoever's reading
                     // the transcript) knows this one didn't come back, not
@@ -1245,7 +1245,7 @@ void TOOL_TASK_RUNNER::handle_tool(IO_WORKER_CLASS& io_worker, ai_root& chat, st
         }
 
         // Replay whatever got held above, on instance/instance_comms - same
-        // treatment instance.process()'s own PART 5 (olla.cpp) would have
+        // treatment instance.process()'s own PART 5 (ai_root.cpp) would have
         // given each one live, just deferred to here so it happens in the
         // script's own voice/context instead of interleaved with whatever
         // command was running when it actually arrived. send()/
@@ -1263,10 +1263,10 @@ void TOOL_TASK_RUNNER::handle_tool(IO_WORKER_CLASS& io_worker, ai_root& chat, st
             if (!event.message.empty())
             {
                 // Same is_own framing distinction instance.process()'s own
-                // PART 5 (olla.cpp) would apply - DELIBERATELY not acted on
+                // PART 5 (ai_root.cpp) would apply - DELIBERATELY not acted on
                 // right now, for the same reason: it reliably provoked a
                 // follow-up tool call that then collided with a live,
-                // reproduced full-program hang. See olla.cpp's PART 5
+                // reproduced full-program hang. See ai_root.cpp's PART 5
                 // comment (same event-narration code, just here for the
                 // task-runner's own end-of-script replay) for the full
                 // writeup - not repeated here.
@@ -1278,7 +1278,7 @@ void TOOL_TASK_RUNNER::handle_tool(IO_WORKER_CLASS& io_worker, ai_root& chat, st
             // NOT instance.pending_tool_calls - instance is a background_
             // tasks entry (chat.spawn_background_task()) that gets erased
             // once this function marks it complete below, and process()'s
-            // own PART 2 (olla.cpp) explicitly passes nullptr for tool_worker
+            // own PART 2 (ai_root.cpp) explicitly passes nullptr for tool_worker
             // on every tick after that (by design - a background task is
             // assumed fully drained by the time handle_tool() returns), so
             // anything still sitting in instance's own queue by then could
@@ -1302,13 +1302,13 @@ void TOOL_TASK_RUNNER::handle_tool(IO_WORKER_CLASS& io_worker, ai_root& chat, st
         // (including the last one) so it can tell a finished command from
         // a still-in-flight one - see its own comment. Setting it back to
         // true here, once the whole script is done, is what lets
-        // ai_root::process()'s PART 2 (olla.cpp) recognize this
+        // ai_root::process()'s PART 2 (ai_root.cpp) recognize this
         // instance as finished and erase it from chat.background_tasks;
         // without this it would never be freed.
         //
         // last_received.response still holds the final command's reply -
         // cleared here too, otherwise PART 2's own "if the task produced a
-        // response, relay it" check (olla.cpp) would fire a second,
+        // response, relay it" check (ai_root.cpp) would fire a second,
         // redundant narration of the same completion chat.integrate_tool_
         // result() below already reports.
         instance.last_received.complete = true;
@@ -1364,14 +1364,14 @@ bool TOOL_TASK_RUNNER::check(IO_WORKER_CLASS& io_worker, ai_root& chat, CLASS_SY
 void TOOL_TASK_RUNNER::monitor_tool(ai_root&, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>&, TOOL_WORKER_CLASS*, COMMS&) {}
 
 // Shared by both call sources handle_instance_tools() drains - see its own
-// comment in olla.h. Applies the tool_calls_this_turn cap (see olla.h),
+// comment in ai_root.h. Applies the tool_calls_this_turn cap (see ai_root.h),
 // then routes to whichever tool's check() claims tc.name (see the
 // TOOL_BASE comment in tools.h) - an unrecognized name gets an error
 // result back instead of ever reaching a tool.
 void ai_root::dispatch_tool_call(IO_WORKER_CLASS& io_worker, const ToolCall& tc, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms)
 {
     // Guard against a runaway chain - see tool_calls_this_turn's comment in
-    // olla.h. Deliberately calls send_tool_result() only, not
+    // ai_root.h. Deliberately calls send_tool_result() only, not
     // integrate_tool_result() - the latter is what would start another
     // DIRECTOR_NOTE round-trip and keep a chain going. This just logs the
     // refusal and stops dead; the model gets a real chance to reply in
@@ -1388,7 +1388,7 @@ void ai_root::dispatch_tool_call(IO_WORKER_CLASS& io_worker, const ToolCall& tc,
     // claims it does this fall through to tool_worker: queued via
     // put_pending_call(), with a real answer (or a timeout error,
     // tool_worker.h's own CALL_TIMEOUT_SECONDS) arriving later via
-    // get_pending_result(), drained in process()'s own PART 5 (olla.cpp) -
+    // get_pending_result(), drained in process()'s own PART 5 (ai_root.cpp) -
     // not synchronously here, unlike the check()-based path built-ins use.
     bool handled = false;
     for (auto& tool : tools_list) {
@@ -1413,7 +1413,7 @@ void ai_root::handle_instance_tools(IO_WORKER_CLASS& io_worker, CLASS_SYSTEM* sy
     // System-injected calls (e.g. a timer's on_expire action - see
     // TOOL_REMOTE::monitor_tool()) - drained independently of the model's
     // own last_received.tool_calls below, see pending_tool_calls' comment
-    // in olla.h for why. Held back while a response is actively streaming,
+    // in ai_root.h for why. Held back while a response is actively streaming,
     // same as the model-issued path below, so it never interleaves with
     // in-flight generation.
     if (!is_processing) {

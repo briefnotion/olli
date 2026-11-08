@@ -30,7 +30,7 @@ class OUTPUT_CLASS; // for pull_background_output() below - see user_io.h (now r
 class TOOL_WORKER_CLASS; // nullable pointer, same reasoning as CLASS_SYSTEM* above - see process()'s own comment below
 
 // ToolCall, Confidence, TokenProb, Message, YesNoMaybe, YES_NO_MAYBE_FORMAT,
-// ChatResult and ollama_system_status live in ai_systems.h - shared by every
+// ChatResult and ai_status live in ai_systems.h - shared by every
 // AI backend, not specific to this one.
 #include "ai_systems.h"
 
@@ -39,7 +39,7 @@ class TOOL_WORKER_CLASS; // nullable pointer, same reasoning as CLASS_SYSTEM* ab
 // lives in tools.h/tools.cpp, kept separate from the chat engine itself.
 #include "tools.h"
 
-class OLLAMA_SYSTEM_PROPERTIES
+class AI_PROPERTIES
 {
     public:
         std::filesystem::path OLLI_DIRECTORY = "";
@@ -51,7 +51,7 @@ class OLLAMA_SYSTEM_PROPERTIES
         int port = 11434;
         int num_ctx = 8192; // size
         // Independent per-channel gates on what a streamed response is
-        // allowed to write into comms (send(), olla.cpp) - stream_output
+        // allowed to write into comms (send(), ai_root.cpp) - stream_output
         // for comms.INPUT_FROM_LLM (content), stream_thinking for
         // comms.INPUT_FROM_THINKING. Either one alone is enough to make
         // send() use Ollama's streaming API (chunks needed for either
@@ -254,7 +254,7 @@ class ai_root {
         // alongside save_history().
         virtual void unload_model() {}
 
-        std::string OLLAMA_OPENING =
+        std::string AI_OPENING =
                 //"You are a but helpful assistant with access to tools. "
                 //"1. For delayed requests, use set_timer. Always summarize the "
                 //"user's intent in the 'reminder' field (e.g., 'Turn off "
@@ -271,7 +271,7 @@ class ai_root {
                 "No need to be polite.";
 
 
-        OLLAMA_SYSTEM_PROPERTIES PROPS;
+        AI_PROPERTIES PROPS;
 
         // Use Atomics for thread safety to avoid data races
         std::thread chat_thread;
@@ -321,7 +321,7 @@ class ai_root {
         // Ids of tool calls this instance has dispatched to tool_worker but
         // not yet claimed a result for - pushed in dispatch_tool_call()
         // right before put_pending_call() (tools.cpp), erased once
-        // process()'s own PART 5 (olla.cpp) successfully claims that id's
+        // process()'s own PART 5 (ai_root.cpp) successfully claims that id's
         // result. Every ai_root instance shares the same tool_worker
         // (main chat, a task-runner's own instance, a delegate's own
         // instance), so without this, whichever instance's process() tick
@@ -338,7 +338,7 @@ class ai_root {
         // created it by a long time, and stamps that call's own id back
         // onto whatever unsolicited TOOL_EVENT it eventually produces
         // (origin_id, remote_tools.h) - checked against this list in
-        // process()'s own PART 5 (olla.cpp) so an instance can tell "this
+        // process()'s own PART 5 (ai_root.cpp) so an instance can tell "this
         // event traces back to something I asked for" from "this is a
         // leftover from somewhere else, or purely ambient", instead of
         // narrating every event as if it just answered whatever's
@@ -355,13 +355,13 @@ class ai_root {
         // 2026-10-31 - subcon is the standalone tools/subcon now), and is
         // kept as an opt-out for any future instance that shares
         // tool_worker but shouldn't compete for events. Guards process()'s
-        // own PART 5 event-draining loop (olla.cpp) specifically, not the
+        // own PART 5 event-draining loop (ai_root.cpp) specifically, not the
         // result-claiming loop right above it in the same PART 5 - results are already safe to share
         // (outstanding_tool_call_ids above, id-based, live-verified 2026-
         // 09-22), but pending_events has no call_id to correlate against at
         // all, so it's drained blindly by whichever instance's process()
         // tick happens to run next (see the PART 5 comment on this in
-        // olla.cpp). The old subcon sharing tool_worker (2026-09-27, for full
+        // ai_root.cpp). The old subcon sharing tool_worker (2026-09-27, for full
         // tool access) would otherwise have been put in that same blind
         // competition, meaning it could silently absorb a real
         // presence/timer event that was meant to reach the real chat, into
@@ -371,7 +371,7 @@ class ai_root {
         // genuinely unsafe for multiple consumers.
         bool drains_events = true;
 
-        ollama_system_status status;
+        ai_status status;
 
         std::vector<Message> history;
         ChatResult last_received;
@@ -405,7 +405,7 @@ class ai_root {
         // remote tool's own registration (tool_worker.h/.cpp) doesn't route
         // through open() at all, so this never needed tool_worker.
         void open(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list);
-        void open(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, OLLAMA_SYSTEM_PROPERTIES Properties);
+        void open(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, AI_PROPERTIES Properties);
 
         string gather_history();
         void integrate_tool_result(TOOL_WORKER_CLASS* tool_worker, COMMS& comms, std::string Special_Instruction, const std::string& raw_result);
@@ -502,7 +502,7 @@ void populate_default_tools(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list)
 // A single shared mutex protecting every ai_root::history vector.
 //
 // This MUST be an 'inline' variable (C++17), not 'static'. A 'static'
-// definition in a header gives every translation unit that includes olla.h
+// definition in a header gives every translation unit that includes ai_root.h
 // its OWN private mutex, so the main/chat thread and the sidetrack thread
 // would lock unrelated mutexes and never actually exclude one another —
 // a silent data race on the history while consolidation runs. 'inline'
@@ -517,8 +517,8 @@ inline std::mutex history_mutex;
 // the other.
 
 // A mutex used to live here (tools_list_mutex) guarding main.cpp's one real
-// tools_list against a live crash: send() (olla.cpp) rebuilding the tools
-// schema by iterating tools_list on one thread, while process() (olla.cpp)
+// tools_list against a live crash: send() (ai_root.cpp) rebuilding the tools
+// schema by iterating tools_list on one thread, while process() (ai_root.cpp)
 // concurrently erased a disconnected TOOL_REMOTE from the same vector on
 // the main thread - caught with gdb as a null unique_ptr dereference
 // mid-iteration. That whole race is gone now, not just guarded: a

@@ -140,7 +140,7 @@ Edit it to enable the optional tools:
 Every internal tool is always available - there's no permissions/allowlist
 mechanism gating them. Which remote tools are available is just whatever's
 currently connected. The model, default thinking-mode setting, and persona
-(`OLLAMA_OPENING`) are set in `main.cpp`.
+(`AI_OPENING`) are set in `main.cpp`.
 
 ---
 
@@ -284,7 +284,7 @@ Beyond the local terminal, olli can also be driven from a browser on the
 same LAN - a second, independent way in, running alongside (not instead
 of) the ncurses/keyboard session, not replacing it. `WEB_SERVER_CLASS`
 (`source/web_server.h`/`.cpp`) owns a small embedded HTTP server
-(cpp-httplib, the same header-only dependency [olla.cpp](source/olla.cpp)
+(cpp-httplib, the same header-only dependency [ollama_system.cpp](source/ollama_system.cpp)
 already uses as a client) on its own background thread, listening on
 **port 47602** (separate from the [remote tools](TOOLS.md#remote-tools) protocol's
 47601) and bound to every network interface rather than loopback-only,

@@ -215,7 +215,7 @@ namespace {
  *                                 comms_buffer) into its comms_stt_tts and
  *                                 speaks that via display_with_tts() -
  *                                 sidetrack has no speech path of its own
- *                                 right now (see olla.h's note near
+ *                                 right now (see ai_root.h's note near
  *                                 output_buffer_mutex). The main loop below
  *                                 only ever talks to io_worker via exchange
  *                                 (chat, chat.comms) once per tick.
@@ -267,7 +267,7 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         // libraries' similarly-unsafe init routines). A real, if narrow,
         // crash risk if two threads ever made their first curl call at the
         // same moment - this process already has more than one running
-        // tool-dispatch code (chat_thread, olla.h/.cpp; sidetrack.cpp's own
+        // tool-dispatch code (chat_thread, ai_root.h/.cpp; sidetrack.cpp's own
         // background thread). Doing it once here, before any thread that
         // could touch curl gets spawned, closes that window entirely.
         curl_global_init(CURL_GLOBAL_DEFAULT);
@@ -284,7 +284,7 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         TOOL_WORKER_CLASS tool_worker; // remote-tool communications - see tool_worker.h
 
         // The main chat's real tools_list - the 4 built-ins. Declared here,
-        // not owned by 'chat' itself - see process()'s comment in olla.h for
+        // not owned by 'chat' itself - see process()'s comment in ai_root.h for
         // why this is a reference parameter rather than living on
         // ai_root. Remote tools live in tool_worker's own separate
         // tools_list instead (tool_worker.cpp) - this one never holds one.
@@ -355,7 +355,7 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         // own INPUT_FROM_LLM (already relayed in by exchange() into its
         // comms_buffer) into its own comms_stt_tts and speaks that via
         // display_with_tts(). sidetrack's own generated text has no speech
-        // path at all right now (sidetrack is being reworked) - see olla.h's
+        // path at all right now (sidetrack is being reworked) - see ai_root.h's
         // note near output_buffer_mutex.
         //
         // io_worker owns text-to-speech/speech-to-text privately (see
@@ -380,7 +380,7 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
 
         // --- tool_worker: remote-tool communications ---
 
-        // Built-ins are back in tools_list/dispatch_tool_call() (olla.h), but
+        // Built-ins are back in tools_list/dispatch_tool_call() (ai_root.h), but
         // tool_worker's own registry never learns about them on its own -
         // see register_local_tools()'s own comment (tool_worker.h).
         tool_worker.register_local_tools(tools_list, chat);
@@ -413,7 +413,7 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         // Main loop: runs until user types 'bye' or 'quit' or 'Goodbye.'
         // Ticks every ~20ms (see the sleep_for at the bottom); nothing here
         // blocks for long except chat.input()'s interrupt-handling branch,
-        // which stops an in-flight response before returning (see olla.cpp).
+        // which stops an in-flight response before returning (see ai_root.cpp).
         while (chat.running)
         {
             // Remote-tool registration used to be polled here
@@ -443,13 +443,13 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
             // Stops an in-flight response if comms.INTERRUPTED, and/or
             // submits comms.INPUT_FROM_USER as a new message if comms.ENTER_PRESSED.
             // Returns true once a full response cycle has completed (see
-            // olla.cpp for the exact conditions), at which point we're
+            // ai_root.cpp for the exact conditions), at which point we're
             // ready for new input.
             bool response_complete = chat.input(comms, &tool_worker);
 
             // Dispatches any pending tool calls, flushes new text to TTS
             // (write_to_tts), periodically writes history to disk if it
-            // changed. See ai_root::process in olla.cpp.
+            // changed. See ai_root::process in ai_root.cpp.
             chat.process(io_worker, &system, tools_list, &tool_worker, comms);
 
             // Runs sidetrack's main-thread half of both routines' state

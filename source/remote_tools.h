@@ -45,7 +45,7 @@ struct TOOL_RESULT
 // chat.pending_tool_calls, same as monitor_tool() already does) - empty
 // action_tool means no action, same convention REMOTE_TOOL_REGISTRATION's
 // own 'tools' field above uses (raw, not yet a ToolCall - this header can't
-// see ToolCall's full definition without an olla.h include that would
+// see ToolCall's full definition without an ai_systems.h include that would
 // circle back here through system.h, and there's nothing here that needs
 // to correlate a result back to it the way a real dispatched call's id
 // would, so there's nothing lost by leaving it raw for whoever actually
@@ -55,7 +55,7 @@ struct TOOL_RESULT
 // produced this event (e.g. the call_id of the set_timer call a timer
 // expiry traces back to), or EVENT_NO_ORIGIN_ID below for an event with no
 // such call at all (a purely ambient one, like presence). Lets whichever
-// ai_root instance drains this (olla.cpp PART 5) tell its own
+// ai_root instance drains this (ai_root.cpp PART 5) tell its own
 // dispatched work apart from someone else's/nothing's, instead of
 // narrating every event as if it just answered whatever's currently being
 // discussed - it's still not a call_id in TOOL_RESULT's sense (nothing
@@ -75,7 +75,7 @@ struct TOOL_EVENT
     // plain string, not an enum - same "no header-wide change for a new
     // kind" reasoning OLLI_ATTACHMENT's own type field already uses
     // (comms.h) - whichever olli-side code cares about a given name (right
-    // now: just olla.cpp's own event-draining loop, matching "user.presence")
+    // now: just ai_root.cpp's own event-draining loop, matching "user.presence")
     // is free to add another without touching this struct or its parsing.
     // Both empty when the event carries no var at all - the only case
     // today's one real producer (presence.cpp) doesn't hit.

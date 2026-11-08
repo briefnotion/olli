@@ -13,10 +13,10 @@
 #include <algorithm>
 
 // get_response() takes COMMS& directly (comms.h, included via user_io.h)
-// rather than ai_root& - no need for olla.h here at all, which
-// sidesteps what would otherwise be a circular include (olla.h -> system.h
+// rather than ai_root& - no need for ai_root.h here at all, which
+// sidesteps what would otherwise be a circular include (ai_root.h -> system.h
 // -> user_io.h). timestamp_prefix() below used to come in transitively
-// through olla.h -> helper_olli.h; needs its own include now that path's
+// through ai_root.h -> helper_olli.h; needs its own include now that path's
 // gone.
 #include "helper_olli.h"
 #include "version.h"
@@ -885,7 +885,7 @@ void OUTPUT_CLASS::ncurses_draw_focus_indicators()
  * erase(), unlike ncurses_layout(). Split out as its own path because
  * chat_thinking briefly gets real content most turns even with
  * PROPS.use_thinking off (Ollama's streamed "thinking" field is read
- * unconditionally - see olla.cpp), so in_thinking_block flips on then off
+ * unconditionally - see ai_root.cpp), so in_thinking_block flips on then off
  * almost every turn; routing that through the full ncurses_layout() meant a
  * whole-screen blank-and-rebuild flash twice a turn for a change that only
  * ever affects this one small window. Reads win_chat's current geometry via

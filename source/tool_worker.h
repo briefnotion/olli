@@ -61,7 +61,7 @@ class TOOL_WORKER_CLASS
         //
         // Outgoing: main hands a call off via put_pending_call() for this
         // thread to actually dispatch to the matching TOOL_REMOTE - reuses
-        // ToolCall (olla.h) rather than inventing a duplicate id/name/
+        // ToolCall (ai_root.h) rather than inventing a duplicate id/name/
         // arguments type.
         std::vector<ToolCall> pending_calls;
 
@@ -126,7 +126,7 @@ class TOOL_WORKER_CLASS
         // below has something of its own to hand back without reaching
         // into tools_list directly (that stays local/guarded, same as
         // IO_WORKER_CLASS::tool_names does for its own list, io_worker.h),
-        // and send() (olla.cpp) can fold the result straight into its own
+        // and send() (ai_root.cpp) can fold the result straight into its own
         // outgoing tools array with no further conversion needed.
         json registered_tool_defs = json::array();
 
@@ -191,11 +191,11 @@ class TOOL_WORKER_CLASS
         // dropped by thread_main() instead of kept in pending_results
         // forever - for when the ai_root instance that dispatched
         // the call is being destroyed with that call still outstanding
-        // (see olla.cpp PART 2's own call site: a background task/delegate
+        // (see ai_root.cpp PART 2's own call site: a background task/delegate
         // instance can finish without ever waiting for every call it
         // fired). Without this, get_pending_result(call_id, ...) above
         // would never be asked for that id again - nothing's
-        // outstanding_tool_call_ids (olla.h) would still contain it - so
+        // outstanding_tool_call_ids (ai_root.h) would still contain it - so
         // the result would sit in pending_results with no one left to
         // ever claim it.
         void abandon_call(const std::string& call_id);

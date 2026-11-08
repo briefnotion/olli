@@ -4912,9 +4912,10 @@ it can actually act under its persona's judgment, not just talk about it.
   (compared mechanically), and the `claude` profile was run live on both backends. `ron` has been run on Gemini.
 - **Open: second-guess loops on Gemini lite** (23 of 43 reviews flagged, follow-up calls `get_clock_time`, each re-triggers a
   review up to the chain limit, burning the 15 req/min free quota; see AI_BACKENDS.md). Left as is on purpose.
-- **Open: stale comments.** Many comments still say "see olla.cpp" / "olla.h" / `ollama_system`; the code is right, the pointers
-  are not (ai_root.h/.cpp, ollama_system.cpp). `OLLAMA_SYSTEM_PROPERTIES`, `ollama_system_status` and `OLLAMA_OPENING` keep
-  their old names but are shared by every backend.
+- **Done 2026-11-08: stale comments and shared names.** Comment pointers to olla.cpp/olla.h now point at ai_root.h/.cpp,
+  ai_systems.h or ollama_system.cpp as appropriate (historical "moved from olla.h" notes kept on purpose). Renamed
+  `OLLAMA_SYSTEM_PROPERTIES` -> `AI_PROPERTIES`, `ollama_system_status` -> `ai_status`, `OLLAMA_OPENING` -> `AI_OPENING`.
+  Older TODO entries keep the old names as history.
 - **Open: Ollama-only settings** (`host`, `port`, `num_ctx`, `keep_alive_seconds`, `repeat_penalty`) sit in the shared PROPS and
   are ignored by Gemini. The unused `fallback_model` option from the olli_gemi experiment was dropped.
 - Not done / not tested: switching backend while running (design leaves room: the seam is `backend_generate()`); a task-runner or

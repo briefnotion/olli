@@ -22,7 +22,7 @@ namespace httplib { class Server; }
  * its own background thread, polled non-blockingly once per
  * IO_WORKER_CLASS::thread_main() tick rather than reached into directly.
  *
- * Owns a cpp-httplib httplib::Server (see olla.cpp for this codebase's
+ * Owns a cpp-httplib httplib::Server (see ai_root.cpp for this codebase's
  * other use of cpp-httplib, there as a client instead of a server) and its
  * own accept/serve thread - unavoidable, since accepting sockets can't be
  * polled synchronously inside thread_main()'s ~20ms tick, same reasoning

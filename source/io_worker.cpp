@@ -1153,7 +1153,7 @@ void IO_WORKER_CLASS::thread_main()
             // rest of this block for that event.
             //
             // A transcript's interrupt and its submission can't go out in
-            // the same tick: ai_root::input() (olla.cpp) clears
+            // the same tick: ai_root::input() (ai_root.cpp) clears
             // comms.INTERRUPTED while accepting the line, before
             // sidetrack.check() runs, so second-guess never sees it.
             // Typing doesn't have this problem - the first keystroke sets
@@ -1181,7 +1181,7 @@ void IO_WORKER_CLASS::thread_main()
             VOCA_EVENT voca_event;
             if (popVocaEvent(voca_event))
             {
-                // ai_root::jump_input() (olla.cpp) exits the program on
+                // ai_root::jump_input() (ai_root.cpp) exits the program on
                 // these exact lines, typed or spoken. Exiting by voice isn't
                 // wanted, so a spoken one is dropped here, before it echoes,
                 // interrupts or reaches the chat - same exact-match test as
@@ -1443,7 +1443,7 @@ void IO_WORKER_CLASS::exchange(COMMS& comms, TOOL_WORKER_CLASS* tool_worker)
 
     if (!comms_buffer.INPUT_FROM_USER.empty())
     {
-        // Locked - ai_root::input() (olla.cpp) can write this same
+        // Locked - ai_root::input() (ai_root.cpp) can write this same
         // field from chat_thread at the same time, to restore it right
         // before send() reads it back out. Guard kept (unlike the add_to()
         // sites above) because set() replaces rather than appends - an

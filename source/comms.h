@@ -14,7 +14,7 @@
 // A single shared mutex guarding every ai_root instance's COMMS.
 //
 // This MUST be an 'inline' variable (C++17), not 'static' - same reasoning
-// as history_mutex (olla.h): a 'static' definition in a header gives every
+// as history_mutex (ai_root.h): a 'static' definition in a header gives every
 // translation unit that includes this header its OWN private mutex, so
 // different threads touching different instances' COMMS would lock
 // unrelated mutexes and never actually exclude one another. 'inline'
@@ -193,7 +193,7 @@ class COMMS_STRING
 /**
  * COMMS
  * Bundles what an ai_root instance uses to hand output to whatever's
- * consuming it (the screen, a log) - moved out of olla.h so it can be
+ * consuming it (the screen, a log) - moved out of ai_root.h so it can be
  * included/passed around on its own instead of needing the rest of
  * ai_root along with it.
  *
@@ -257,7 +257,7 @@ class COMMS
         // --------------------------------------------------------------
         // Input-direction signals - set by IO_WORKER_CLASS (io_worker.h/
         // .cpp), relayed here via its exchange(), consumed by
-        // ai_root::input() (olla.cpp) and main.cpp's own loop. Not
+        // ai_root::input() (ai_root.cpp) and main.cpp's own loop. Not
         // protected by output_buffer_mutex above - IO_WORKER_CLASS's own
         // INTERUPTED/PROCESSING lock covers the handoff into these
         // fields instead (see its class comment). Once a field lands

@@ -491,7 +491,7 @@ class IO_WORKER_CLASS
         void stop_speaking();
 
         // Forces Voca directly into a state, bypassing wake-word detection
-        // (e.g. a manual override from a chat tool - see olla.cpp).
+        // (e.g. a manual override from a chat tool - see ai_root.cpp).
         void VOCA_manual_set(int Command);
 
         // No parameters - thread_main() only ever touches this object's own
@@ -506,7 +506,7 @@ class IO_WORKER_CLASS
         // passing the real comms (see this class's own comment for why
         // that's the only thing that crosses this boundary) and the main
         // chat's own tool_worker (nullable - see process()'s comment in
-        // olla.h for why) - copies every currently-registered tool's name,
+        // ai_root.h for why) - copies every currently-registered tool's name,
         // built-in and remote alike (TOOL_WORKER_CLASS::
         // get_registered_tool_defs() - main.cpp seeds the built-ins into
         // this same registry at startup, so it's already the combined

@@ -122,7 +122,7 @@ that never had one (old history, system-injected) gets Google's documented place
   fixing: a setting that turns second-guess off for Gemini, don't re-review a follow-up that
   only ran a read-only tool, or a stricter review question. Not seen with Ollama.
 - Settings fields that only apply to Ollama (`host`, `port`, `num_ctx`, `keep_alive_seconds`,
-  `repeat_penalty`) still live in the shared `OLLAMA_SYSTEM_PROPERTIES` and are ignored by
+  `repeat_penalty`) still live in the shared `AI_PROPERTIES` and are ignored by
   Gemini.
 
 ## Tested

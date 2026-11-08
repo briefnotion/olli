@@ -79,7 +79,7 @@ void ollama_system::backend_generate(TOOL_WORKER_CLASS* tool_worker, COMMS& comm
             if (!msg.tool_call_id.empty()) m["tool_call_id"] = msg.tool_call_id;
             // Echoed back in the same shape parse_tool_calls() (below)
             // parses it out of Ollama's own responses in - see
-            // Message::tool_calls' comment (olla.h) for why this exists:
+            // Message::tool_calls' comment (ai_systems.h) for why this exists:
             // without it, the model's own past tool invocations were
             // invisible in its own context, only ever their results were.
             if (!msg.tool_calls.empty()) {
@@ -114,7 +114,7 @@ void ollama_system::backend_generate(TOOL_WORKER_CLASS* tool_worker, COMMS& comm
     // Ollama's own streaming API is what makes either channel show up live
     // at all - needed whenever EITHER comms.INPUT_FROM_LLM (stream_output)
     // or comms.INPUT_FROM_THINKING (stream_thinking) wants that, not just
-    // stream_output alone (see their shared comment, olla.h).
+    // stream_output alone (see their shared comment, ai_root.h).
     bool use_streaming_request = PROPS.stream_output || PROPS.stream_thinking;
 
     json body = {
@@ -140,7 +140,7 @@ void ollama_system::backend_generate(TOOL_WORKER_CLASS* tool_worker, COMMS& comm
 
     // Asks Ollama to send back the probability of every token it generates
     // (top choice only, no runner-ups) - it is computed anyway, this just
-    // stops it being thrown away. See Confidence (olla.h).
+    // stops it being thrown away. See Confidence (ai_systems.h).
     body["logprobs"] = true;
 
     httplib::Client cli(PROPS.host, PROPS.port);

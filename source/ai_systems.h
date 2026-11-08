@@ -66,7 +66,7 @@ struct ToolCall {
 };
 
 // How sure the model was of its own words, summarized from Ollama's logprobs
-// (send(), olla.cpp). Only filled for an assistant reply's content tokens -
+// (send(), ai_root.cpp). Only filled for an assistant reply's content tokens -
 // not thinking, not tool calls. A probability here is exp(logprob), so 0.65
 // means 65%. It is the model's own certainty about each word it picked, not
 // a measure of whether the statement is true. Declared before Message for the
@@ -160,7 +160,7 @@ struct Message {
     }
 };
 
-// A three-way answer: yes, no, or maybe. Filled in by send() (olla.cpp) only
+// A three-way answer: yes, no, or maybe. Filled in by send() (ai_root.cpp) only
 // when it was called with YES_NO_MAYBE_FORMAT as its response_format; for any
 // other call it stays 0. Read it as:
 //     if (last_received.answer.value == 1) { /* yes */ }
@@ -171,7 +171,7 @@ struct YesNoMaybe {
 };
 
 // The response_format that asks for one of those three words - pass it to
-// send() and last_received.answer is filled in. Defined in olla.cpp.
+// send() and last_received.answer is filled in. Defined in ai_root.cpp.
 extern const json YES_NO_MAYBE_FORMAT;
 
 struct ChatResult {
@@ -197,7 +197,7 @@ struct ChatResult {
 /**
  * Simple data struct to hold metrics.
  */
-struct ollama_system_status {
+struct ai_status {
     bool is_active = false;
     // The interrupt flag. Set this to true from another thread to stop 'send'
     std::atomic<bool> interrupt_signal{false};

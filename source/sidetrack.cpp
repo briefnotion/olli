@@ -41,7 +41,7 @@ static void commit_action_only_note(ai_root& main_instance, const std::vector<st
 
 // Starts SIDETRACK_CHAT_INSTANCE generating a reply to whatever's currently
 // sitting in comms.INPUT_FROM_USER, using its own chat_thread - same
-// mechanism ai_root::input() uses for the main chat (olla.cpp) - so
+// mechanism ai_root::input() uses for the main chat (ai_root.cpp) - so
 // run_second_guess() can poll for completion instead of blocking. Only
 // entered from a stage that already set INPUT_FROM_USER. comms here is the
 // real main chat's own COMMS (passed through from check()), not a separate
@@ -65,7 +65,7 @@ static void start_second_guess_call(ai_root& instance, COMMS& comms,
 
 // Structured-output schema for the stage 2 DONE-check call - forces the
 // reply into this exact shape via Ollama's own constrained decoding
-// (send()'s own comment, olla.h) instead of asking for a magic word and
+// (send()'s own comment, ai_root.h) instead of asking for a magic word and
 // hoping it lands somewhere findable in free text. Replaces the old
 // leading/trailing "DONE" text-matching, which real model replies (an
 // explanation, then the marker at the END, not the start) kept missing -
@@ -84,7 +84,7 @@ static const json SECOND_GUESS_RESULT_FORMAT = {
 // handle_instance_tools() only queues a remote call (outstanding_tool_call_ids
 // plus tool_worker->put_pending_call()); the answer comes back through
 // get_pending_result(), which ai_root::process() drains in its PART 5
-// (olla.cpp). Nothing runs process() on SIDETRACK_CHAT_INSTANCE, so without
+// (ai_root.cpp). Nothing runs process() on SIDETRACK_CHAT_INSTANCE, so without
 // this a remote call's result was never collected - it never reached the
 // instance's history or the debug log, and sat in tool_worker's queue for good.
 //
@@ -114,7 +114,7 @@ static void collect_second_guess_results(ai_root& instance, TOOL_WORKER_CLASS* t
 
 // Dispatches any tool calls the last call produced - same shape
 // ai_root::process()'s own background_tasks handling uses for
-// exactly this kind of tick-spanning secondary instance (olla.cpp, PART 2)
+// exactly this kind of tick-spanning secondary instance (ai_root.cpp, PART 2)
 // - joins the thread once it's done, and reports whether this round is
 // truly finished: not just "the network call returned," but also "no tool
 // call is still waiting to be dispatched, and every remote one dispatched
@@ -124,7 +124,7 @@ static bool poll_second_guess_call(IO_WORKER_CLASS& io_worker, ai_root& instance
                                     TOOL_WORKER_CLASS* tool_worker,
                                     CLASS_SYSTEM* system)
 {
-    // comms is the real main chat's own. ai_root::input() (olla.cpp)
+    // comms is the real main chat's own. ai_root::input() (ai_root.cpp)
     // only clears INTERRUPTED when it's the one consuming it - gated on its
     // own is_processing, which is false the whole time second-guess is
     // running (it only starts once the main turn has already finished). So
@@ -172,7 +172,7 @@ void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ai_root& main
     // ASSISTANT REPLY completing is what should make that happen, same idea
     // as check()'s own shared history-size reset for consolidation/context-
     // clear, just self-contained here instead of shared with those. Not
-    // just "history grew": send() (olla.cpp) pushes the user's own
+    // just "history grew": send() (ai_root.cpp) pushes the user's own
     // submitted message onto history immediately, well before the
     // assistant's reply is pushed once it actually finishes streaming - a
     // bare size check fired on that first growth, triggering second-guess
@@ -216,7 +216,7 @@ void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ai_root& main
 
     // comms.INTERRUPTED means "abort in-flight generation/speech" (comms.h).
     // Cleared here once consumed, same reasoning as poll_second_guess_call()'s
-    // own comment above: ai_root::input() (olla.cpp) only clears it
+    // own comment above: ai_root::input() (ai_root.cpp) only clears it
     // when gated on main's own is_processing, which is false throughout this
     // whole pre-start window, so a bare interrupt (no ENTER_PRESSED) would
     // otherwise dangle true indefinitely. This is the same comms the real
@@ -262,7 +262,7 @@ void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ai_root& main
         SIDETRACK_CHAT_INSTANCE->PROPS.LOAD_SAVE_HISTORY_ON_DISK = false;
 
         // stream_output/stream_thinking are independent gates on
-        // comms.INPUT_FROM_LLM/THINKING (olla.h/olla.cpp) - Ollama's
+        // comms.INPUT_FROM_LLM/THINKING (ai_root.h/ai_root.cpp) - Ollama's
         // streaming API still runs either way, so thinking still shows up
         // live here, but this call's own plain-text "DONE" answer never
         // reaches comms.INPUT_FROM_LLM at all, so there's nothing to
@@ -275,7 +275,7 @@ void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ai_root& main
 
         // Distinguishes this instance's own send()-logged messages
         // (DEBUG_LOG_CLASS::log_message(), called unconditionally inside send(),
-        // olla.cpp) from consolidation's use of the same
+        // ai_root.cpp) from consolidation's use of the same
         // SIDETRACK_CHAT_INSTANCE in debug_full_history.txt - both used to
         // log under one generic "sidetrack" label, impossible to tell apart.
         SIDETRACK_CHAT_INSTANCE->debug_label = "sidetrack-second-guess";
@@ -332,7 +332,7 @@ void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ai_root& main
         // is_ready_for_tools gate) is about to dispatch and clear
         // last_received.tool_calls - see second_guess_actions_taken's own
         // comment (sidetrack.h). Must match that gate's !is_processing
-        // check exactly, not just last_received.complete: send() (olla.cpp)
+        // check exactly, not just last_received.complete: send() (ai_root.cpp)
         // sets complete=true before it returns, but is_processing only
         // flips false slightly later, once the spawned thread's next line
         // runs - during that narrow gap this would otherwise re-capture
@@ -596,7 +596,7 @@ void SIDETRACK_CLASS::run_consolidation(ai_root& main_instance)
 
         // Distinguishes this instance's own send()-logged messages
         // (DEBUG_LOG_CLASS::log_message(), called unconditionally inside send(),
-        // olla.cpp) from second-guess's use of the same
+        // ai_root.cpp) from second-guess's use of the same
         // SIDETRACK_CHAT_INSTANCE in debug_full_history.txt - both used to
         // log under one generic "sidetrack" label, impossible to tell apart.
         SIDETRACK_CHAT_INSTANCE->debug_label = "sidetrack-consolidate";
@@ -697,7 +697,7 @@ void SIDETRACK_CLASS::run_consolidation(ai_root& main_instance)
             // assistant tool_calls entry we're not replaying, so it gets
             // relabeled to "user" with a plain-text marker instead; a
             // DIRECTOR_NOTE (also "system") is redundant with the "tool"
-            // message right before it (integrate_tool_result(), olla.cpp,
+            // message right before it (integrate_tool_result(), ai_root.cpp,
             // embeds the exact same raw result verbatim) so it's dropped
             // rather than doubling up on the same fact. Anything else
             // tagged "system" here is our own past promoted summary, not a
@@ -792,7 +792,7 @@ void SIDETRACK_CLASS::run_clear_context(ai_root& main_instance)
         // Wipe everything except protected (consolidation_level < 0)
         // messages - e.g. the persona/opening prompt. clear_history_keep_
         // protected() locks history_mutex itself: main_instance.history is
-        // the same vector chat_thread's own send() (olla.cpp) pushes into
+        // the same vector chat_thread's own send() (ai_root.cpp) pushes into
         // under that same mutex while a response is still streaming.
         main_instance.clear_history_keep_protected();
         main_instance.save_history();

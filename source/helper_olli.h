@@ -45,21 +45,21 @@ bool write_file(const std::filesystem::path& path, const std::string& text, bool
 // task-runner background instances, all of it, in the order it happened.
 // Review only: nothing in the program ever reads this back. 'tool' and
 // DIRECTOR_NOTE 'system' messages now stay in live history too (see
-// send_tool_result()'s comment, olla.cpp, for why the old immediate
+// send_tool_result()'s comment, ai_root.cpp, for why the old immediate
 // deletion was removed) rather than only ever existing here - but
 // consolidate() (sidetrack.cpp) still eventually folds old messages into an
 // LLM-written summary in the live history/history.json, so this remains
 // the one place the full, unsummarized original wording survives for
 // whoever's debugging a session afterward.
 //
-// Message is defined in olla.h, which includes this header, not the other
+// Message is defined in ai_systems.h, which includes this header, not the other
 // way around - methods here take plain strings rather than a Message&, so
 // this stays decoupled from that type instead of creating a circular
 // include.
 //
 // One global instance (instance() below) rather than a plain global
 // variable - a 'static' member/local would give every translation unit its
-// own private copy (same reasoning as history_mutex in olla.h), so writes
+// own private copy (same reasoning as history_mutex in ai_root.h), so writes
 // from different threads (main chat, sidetrack) would land in different,
 // unconnected file handles instead of the one real log. A Meyer's singleton
 // avoids needing an 'inline' variable trick for that: the function-local
@@ -87,7 +87,7 @@ class DEBUG_LOG_CLASS {
         // rule line unambiguously bounds a record even when its own content
         // spans many lines or contains bracket-looking text of its own.
         // Thread-safe - any ai_root instance, from any thread, can
-        // call this. instance_label is ai_root::debug_label (olla.h)
+        // call this. instance_label is ai_root::debug_label (ai_root.h)
         // - a short human-readable tag ("chat", "sidetrack-review",
         // "task-runner:water the plants", ...) set once per instance at
         // creation, distinguishing which instance produced this record,

@@ -397,7 +397,7 @@ bool TOOL_REMOTE::check(IO_WORKER_CLASS&, ai_root& chat, CLASS_SYSTEM*, std::vec
             // Treated as dead rather than "maybe just slow" - otherwise a
             // truly hung remote tool would cost a fresh 5s stall on every
             // future call instead of failing fast once removed from
-            // tools_list (see is_alive(), checked in olla.cpp's process()).
+            // tools_list (see is_alive(), checked in ai_root.cpp's process()).
             // Harmless if mark_dead() already ran above (a failed pong
             // write) - safe to call twice.
             mark_dead();
@@ -422,7 +422,7 @@ bool TOOL_REMOTE::check(IO_WORKER_CLASS&, ai_root& chat, CLASS_SYSTEM*, std::vec
 // nothing's been received at all in DEAD_TIMEOUT_SECONDS - see the class
 // comment and tools/PROTOCOL.md for why. mark_dead() also runs here on a
 // cleanly closed connection, same as before the heartbeat existed - either
-// way, is_alive() flips to false, which ai_root::process() (olla.cpp)
+// way, is_alive() flips to false, which ai_root::process() (ai_root.cpp)
 // checks every tick to actually drop this instance from tools_list.
 void TOOL_REMOTE::monitor_tool(ai_root& chat, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>&, TOOL_WORKER_CLASS* tool_worker, COMMS& comms)
 {
@@ -474,7 +474,7 @@ void TOOL_REMOTE::monitor_tool(ai_root& chat, CLASS_SYSTEM*, std::vector<std::un
                 // whatever tool-call chain was last in progress - the same
                 // category as a real user message or a task-runner's next
                 // scripted command (see tool_calls_this_turn's comment in
-                // olla.h for why those reset it). Without this, an idle
+                // ai_root.h for why those reset it). Without this, an idle
                 // session accumulates tool_calls_this_turn across every
                 // unrelated background event it ever receives, since only a
                 // "user"-role send() resets it - eventually tripping the cap
@@ -496,7 +496,7 @@ void TOOL_REMOTE::monitor_tool(ai_root& chat, CLASS_SYSTEM*, std::vector<std::un
 
                 // Optional structured follow-up action, separate from
                 // message's narration above - see tools/PROTOCOL.md's
-                // `event` shape. Queued via pending_tool_calls (olla.h) for
+                // `event` shape. Queued via pending_tool_calls (ai_root.h) for
                 // real execution through the normal tools_list dispatch
                 // (ai_root::handle_instance_tools()), same as any
                 // model-issued call - this class has no idea what the

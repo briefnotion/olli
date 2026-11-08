@@ -691,7 +691,7 @@ void command_execute_command(SCRIPT_STATE& state, const std::string& current_inp
     // io_worker.exchange() below for the whole request,
     // preventing anything from streaming to screen until it
     // returned. Same pattern as ai_root::input()
-    // (olla.cpp) and sidetrack.cpp's own
+    // (ai_root.cpp) and sidetrack.cpp's own
     // start_second_guess_call().
     // An [IF] question (EXECUTE_IF) goes out exactly like a normal line, with
     // two differences: it asks for a yes/no/maybe answer, and its reply

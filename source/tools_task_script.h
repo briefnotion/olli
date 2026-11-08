@@ -40,7 +40,7 @@ enum class SCRIPT_STATE
 
     // [IF]<question> - EXECUTE_IF sends the question the way EXECUTE_COMMAND
     // sends a line, except asking for a yes/no/maybe answer
-    // (YES_NO_MAYBE_FORMAT, olla.h). WAIT_IF_RESPONSE waits for it, then
+    // (YES_NO_MAYBE_FORMAT, ai_root.h). WAIT_IF_RESPONSE waits for it, then
     // jumps i to whichever branch matches the answer.
     EXECUTE_IF,
     WAIT_IF_RESPONSE,

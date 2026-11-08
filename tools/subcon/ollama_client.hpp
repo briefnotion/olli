@@ -1,7 +1,7 @@
 // A minimal blocking client for Ollama's /api/chat, over libcurl. Only ever
 // called from job_worker's thread (a model request is slow and blocking -
 // seconds to minutes - and must never run on the thread that services the
-// network). Request/response shapes follow source/olla.cpp's send(): the
+// network). Request/response shapes follow source/ollama_system.cpp's backend_generate(): the
 // same body fields (model, messages, stream:false, think, keep_alive,
 // options.num_ctx/repeat_penalty, tools, format) and the same reply fields
 // (message.content / .thinking / .tool_calls, done).
@@ -14,7 +14,7 @@
 #include <string>
 #include <vector>
 
-// Defaults match olli's own (source/olla.h OLLAMA_SYSTEM_PROPERTIES, and
+// Defaults match olli's own (source/ai_root.h AI_PROPERTIES, and
 // chat.PROPS.model in main.cpp), as subcon used to inherit them from the
 // real chat's PROPS.
 struct OLLAMA_SETTINGS {

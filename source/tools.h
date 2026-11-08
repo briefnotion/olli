@@ -16,7 +16,7 @@ using json = nlohmann::json;
 
 // Forward declarations only - TOOL_BASE and every TOOL_* method below just
 // takes/returns a reference (or, for CLASS_SYSTEM, a pointer), never needs
-// the complete type. ai_root/ToolCall's complete types live in olla.h,
+// the complete type. ai_root's complete type lives in ai_root.h and ToolCall's in ai_systems.h,
 // which includes this header; CLASS_SYSTEM's lives in system.h, deliberately
 // not included here - see the CLASS_SYSTEM* parameter's own comment on
 // TOOL_BASE::check() below.
@@ -36,7 +36,7 @@ void add_tool(json& tools, const std::string& name, const std::string& descripti
 // Common interface every TOOL_* class implements, so a tools_list
 // (std::vector<std::unique_ptr<TOOL_BASE>> - owned by whichever caller needs
 // one, e.g. main.cpp's real one or SIDETRACK_CLASS's own; see process()'s
-// comment in olla.h) can store them uniformly instead of as fixed named
+// comment in ai_root.h) can store them uniformly instead of as fixed named
 // members, and drive all of them the same way regardless of concrete type:
 //   - configure(): once per instance, during open(), before register_tool().
 //     Pulls whatever setup a tool needs from chat.PROPS (API keys,
@@ -72,7 +72,7 @@ class TOOL_BASE
         // for things like the current user's identity (CLASS_SYSTEM, once
         // it grows one), the real keyboard/display/audio, etc. Nullable: the
         // entire tool-dispatch spine these two run through (process() ->
-        // handle_instance_tools() -> dispatch_tool_call(), olla.h/.cpp) is
+        // handle_instance_tools() -> dispatch_tool_call(), ai_root.h/.cpp) is
         // main-thread-only except for one caller - sidetrack.cpp's
         // background thread drives its own throwaway SIDETRACK_CHAT_INSTANCE
         // through process() directly, with no real CLASS_SYSTEM of its own
@@ -83,7 +83,7 @@ class TOOL_BASE
         // unnamed), since nothing in tools_list has a use for it yet.
         //
         // 'tools_list' is the caller's own (see process()'s comment in
-        // olla.h for why it's a reference parameter, not owned by
+        // ai_root.h for why it's a reference parameter, not owned by
         // ai_root) - passed down here so a tool whose handle_tool()
         // calls chat.send()/chat.integrate_tool_result() (which now both
         // need it too) has something to forward. Always valid, never null.
@@ -109,7 +109,7 @@ class TOOL_BASE
         // TOOL_REMOTE (remote_tools.h) overrides it, once its socket
         // closes; every hardcoded tool just inherits this default rather
         // than needing a meaningless override. Checked once per
-        // process() tick - see ai_root::process() in olla.cpp - to
+        // process() tick - see ai_root::process() in ai_root.cpp - to
         // drop a dead tool from tools_list.
         virtual bool is_alive() const { return true; }
 };

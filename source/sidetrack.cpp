@@ -3,6 +3,7 @@
 
 #include "sidetrack.h"
 #include "tool_worker.h" // TOOL_WORKER_CLASS::get_pending_result()
+#include <fstream>
 
 // Small helper for building the "(Took action on review: ...)" fallback
 // note run_second_guess() commits whenever a real tool call happened with
@@ -802,6 +803,133 @@ void SIDETRACK_CLASS::run_clear_context(ai_root& main_instance)
 }
 
 
+// Keeps history slot -2 ("what is known about the user") up to date. The
+// source is a plain-English notes file the user writes by hand,
+// <profile>/collection/about_the_user.txt (created empty by create()); after
+// the chat has sat unchanged for IDLE_WAIT_TIME_FOR_ABOUT_USER, a separate chat
+// instance condenses it into one paragraph, which is put into the -2 slot
+// (replace if it is already there, insert if not - ai_root::
+// set_protected_slot()). Nothing is sent or spoken: it only changes history,
+// so the next real request carries it. Consolidation and the context clear
+// both skip negative levels, so it survives them. Runs again after the next
+// bit of activity plus another idle wait; the wording may differ slightly
+// each time, which is fine. A blank or missing file, an interrupted call or
+// an empty answer leaves whatever -2 is there alone.
+//   0 arm the idle timer   1 wait for it   2 read the file, start the call
+//   3 wait for the call    4 install      100 done (until activity)
+//   5 aborted by activity: wait for the call to end, then back to 0
+void SIDETRACK_CLASS::run_about_user(ai_root& main_instance)
+{
+    // Any change to history is activity: restart the wait, and abort a call
+    // that is still running (its result would be stale, and a reply is about
+    // to need the model). Our own insert below updates this baseline so it is
+    // not mistaken for activity.
+    if (main_instance.history.size() != ABOUT_USER_PREVIOUS_HISTORY_SIZE)
+    {
+        ABOUT_USER_PREVIOUS_HISTORY_SIZE = main_instance.history.size();
+        if (about_user_stage == 3)
+        {
+            ABOUT_USER_CHAT->stop();
+            about_user_stage = 5;
+            DEBUG_LOG_CLASS::instance().log_event("sidetrack-about-user", "activity during generation - discarding");
+        }
+        else if (about_user_stage != 5)
+        {
+            about_user_stage = 0;
+        }
+    }
+
+    if (about_user_stage == 0)
+    {
+        IDLE_WAIT_TIMER_FOR_ABOUT_USER.set(IDLE_WAIT_TIME_FOR_ABOUT_USER);
+        about_user_stage = 1;
+    }
+    else if (about_user_stage == 1)
+    {
+        if (IDLE_WAIT_TIMER_FOR_ABOUT_USER.is_ready()) about_user_stage = 2;
+    }
+    else if (about_user_stage == 2)
+    {
+        std::string notes;
+        {
+            std::ifstream notes_file(main_instance.PROPS.OLLI_DIRECTORY / "collection" / "about_the_user.txt");
+            std::stringstream buffer;
+            buffer << notes_file.rdbuf();
+            notes = buffer.str();
+        }
+        if (notes.size() > 20000) notes.resize(20000); // sanity cap on the prompt
+        if (trim(notes).empty())
+        {
+            about_user_stage = 100; // nothing to summarize - leave any existing -2 alone
+            return;
+        }
+
+        // Created the first time it is needed. No tools, never streams
+        // anywhere, never saves history to disk.
+        if (!ABOUT_USER_CHAT)
+        {
+            ABOUT_USER_CHAT = main_instance.make_sibling();
+            std::vector<std::unique_ptr<TOOL_BASE>> no_tools;
+            ABOUT_USER_CHAT->debug_label = "sidetrack-about-user";
+            ABOUT_USER_CHAT->open(no_tools, main_instance.PROPS);
+        }
+        ABOUT_USER_CHAT->PROPS.use_thinking = false;
+        ABOUT_USER_CHAT->PROPS.stream_output = false;
+        ABOUT_USER_CHAT->PROPS.stream_thinking = false;
+
+        ABOUT_USER_CHAT->clear_history();
+        Message instructions;
+        instructions.role = "system";
+        instructions.content =
+            "You condense a person's own notes about themselves into one short paragraph "
+            "(under about 120 words) of plain sentences. Keep what is most worth remembering "
+            "about them: preferences, where they live, personal facts. Use only what the notes "
+            "say - never add, guess or embellish. Reply with only the paragraph: no preamble, "
+            "no lists, no formatting.";
+        instructions.consolidation_level = -1;
+        ABOUT_USER_CHAT->history.push_back(instructions);
+
+        about_user_comms.INPUT_FROM_USER.set("Here are the notes:\n\n" + notes + "\n\nWrite the paragraph now.");
+        DEBUG_LOG_CLASS::instance().log_event("sidetrack-about-user", "generation started");
+        start_second_guess_call(*ABOUT_USER_CHAT, about_user_comms, nullptr);
+        about_user_stage = 3;
+    }
+    else if (about_user_stage == 3 || about_user_stage == 5)
+    {
+        if (ABOUT_USER_CHAT->is_processing) return; // still working - next tick
+        if (ABOUT_USER_CHAT->chat_thread.joinable()) ABOUT_USER_CHAT->chat_thread.join();
+        about_user_stage = (about_user_stage == 3) ? 4 : 0;
+    }
+    else if (about_user_stage == 4)
+    {
+        std::string paragraph = trim(ABOUT_USER_CHAT->last_received.response);
+        if (!ABOUT_USER_CHAT->last_received.complete || paragraph.empty())
+        {
+            DEBUG_LOG_CLASS::instance().log_event("sidetrack-about-user", "no usable paragraph - keeping the current one");
+            about_user_stage = 100;
+            return;
+        }
+
+        Message about;
+        about.role = "system";
+        about.content = "What is known about the user, in case it helps:\n" + paragraph;
+        main_instance.set_protected_slot(-2, about);
+        main_instance.save_history();
+
+        // An insert makes history one longer. Tell the other watchers of
+        // history's size that this is not activity (second-guess would
+        // otherwise re-review the last reply; check()'s own baseline is
+        // refreshed at the end of every tick).
+        {
+            std::lock_guard<std::mutex> lock(history_mutex);
+            ABOUT_USER_PREVIOUS_HISTORY_SIZE = main_instance.history.size();
+            SECOND_GUESS_PREVIOUS_HISTORY_SIZE = main_instance.history.size();
+        }
+
+        DEBUG_LOG_CLASS::instance().log_event("sidetrack-about-user", "installed slot -2: " + paragraph);
+        about_user_stage = 100;
+    }
+}
 
 
 
@@ -824,11 +952,20 @@ void SIDETRACK_CLASS::create(const ai_root& main_instance)
 
     IDLE_WAIT_TIMER_FOR_CONTEXT_CLEAR.set(IDLE_WAIT_TIME_FOR_CONTEXT_CLEAR);
     PERSISTENT_CHECK_TIMER.set(PERSISTENT_CHECK_INTERVAL);
+
+    // The notes file run_about_user() reads: make sure the folder and an
+    // (empty) file exist, so there is something to open and fill in.
+    std::error_code ec;
+    std::filesystem::path collection_dir = main_instance.PROPS.OLLI_DIRECTORY / "collection";
+    std::filesystem::create_directories(collection_dir, ec);
+    std::filesystem::path about_file = collection_dir / "about_the_user.txt";
+    if (!std::filesystem::exists(about_file, ec)) std::ofstream{about_file};
 }
 
 void SIDETRACK_CLASS::shutdown()
 {
     if (SIDETRACK_CHAT_INSTANCE) SIDETRACK_CHAT_INSTANCE->request_exit();
+    if (ABOUT_USER_CHAT) ABOUT_USER_CHAT->request_exit();
 }
 
 void SIDETRACK_CLASS::check(IO_WORKER_CLASS& io_worker, ai_root& main_instance, COMMS& comms, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, CLASS_SYSTEM* system)
@@ -863,6 +1000,12 @@ void SIDETRACK_CLASS::check(IO_WORKER_CLASS& io_worker, ai_root& main_instance, 
 
     // Second Guess Routine
     run_second_guess(io_worker, main_instance, comms, tools_list, tool_worker, system);
+
+
+    // About-the-user paragraph (history slot -2) - must stay above the
+    // PREVIOUS_HISTORY_SIZE update below, so its own insert isn't seen as
+    // activity next tick.
+    run_about_user(main_instance);
 
 
     // if all stages at 100, do not reset until something happens in main.

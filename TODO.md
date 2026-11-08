@@ -4921,3 +4921,28 @@ it can actually act under its persona's judgment, not just talk about it.
 - Not done / not tested: switching backend while running (design leaves room: the seam is `backend_generate()`); a task-runner or
   delegation script on Ollama after the split; interrupting mid-reply and long-history consolidation on Gemini.
 - Install: rebuild + reinstall + restart olli. Profiles without `ai_backend` stay on Ollama.
+
+## 2026-11-08 - "About the user" history slot (-2)
+
+- New reserved slot: any negative `consolidation_level` is protected (consolidation, context clear and the persistence check all
+  already skipped `< 0`); the level now also fixes the position (`ai_root::set_protected_slot(level, message)`: -1 = entry 0,
+  -2 = entry 1, -3 = entry 2; replace if the entry already has that level, else insert). `ai_root::open()` now checks for exactly
+  `-1` when deciding whether the persona is missing, so a loaded -2 can't hide a missing persona.
+- Source: `<profile>/collection/about_the_user.txt`, hand-written plain English, created empty by `SIDETRACK_CLASS::create()`. After 5 idle
+  minutes (`IDLE_WAIT_TIME_FOR_ABOUT_USER`, `sidetrack.h`) `run_about_user()` has its OWN chat instance (`ABOUT_USER_CHAT`, own
+  private COMMS, no tools, nothing streamed) condense it into one paragraph and installs "What is known about the user, in case
+  it helps:" + paragraph as slot -2, then `save_history()`. Not sent, not spoken, not in the chat log; it is in `history.json`.
+- Own instance on purpose: sharing `SIDETRACK_CHAT_INSTANCE` would have needed gating against consolidation (blocking send) and
+  second-guess. Any history change during generation aborts and discards it (`stop()`, wait for the thread, restart the timer).
+- Two things an insert would otherwise break, both handled in `run_about_user()`: it makes history one longer, which the
+  consolidation/context-clear idle reset (check()'s baseline, refreshed at the end of each tick) and second-guess's own
+  `SECOND_GUESS_PREVIOUS_HISTORY_SIZE` both read as activity (the latter would re-review the last reply). The function refreshes
+  its own and second-guess's baselines. It must stay called above the baseline update at the end of `check()`.
+- `shutdown()` also calls `request_exit()` on `ABOUT_USER_CHAT` (same joinable-thread SIGABRT as 2026-09-22).
+- Tested live on the scratch `claude` profile, Ollama, with the idle wait temporarily 20 s (restored): installs at index 1 with level
+  -2; a second pass replaces it (no duplicate); re-arms after activity; a message sent 41 ms after generation started was logged
+  as "activity during generation - discarding" 20 ms later and nothing was installed; second-guess did not re-fire on the insert;
+  no crashes. Then, with the real 5-minute constant, on the `gemi` profile (Gemini lite): the paragraph was generated 5:00 after startup,
+  installed at index 1, and a question afterwards ("favorite color and dog's name?") was answered correctly from it.
+- Ideas for later: slot -3 (plan/goal); regenerate from the current chat as well as the file; a way for Olli to add to the file.
+- Install: rebuild + reinstall + restart olli.

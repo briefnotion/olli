@@ -93,6 +93,18 @@ class SIDETRACK_CLASS
         double IDLE_WAIT_TIME_FOR_CONTEXT_CLEAR = 30.0 * 60.0 * 1000.0; // ms
         TIMED_IS_READY_SIMPLE IDLE_WAIT_TIMER_FOR_CONTEXT_CLEAR;
 
+        // "About the user" paragraph (history slot -2) - see
+        // run_about_user(). Has its own chat instance, created the first time
+        // it is needed, so it never shares SIDETRACK_CHAT_INSTANCE (and its
+        // gating) with second-guess and consolidation. Its own private COMMS
+        // too: nothing it says is ever streamed to the screen or spoken.
+        int about_user_stage = 0;
+        std::unique_ptr<ai_root> ABOUT_USER_CHAT;
+        COMMS about_user_comms;
+        size_t ABOUT_USER_PREVIOUS_HISTORY_SIZE = 0;
+        double IDLE_WAIT_TIME_FOR_ABOUT_USER = 5.0 * 60.0 * 1000.0; // ms
+        TIMED_IS_READY_SIMPLE IDLE_WAIT_TIMER_FOR_ABOUT_USER;
+
         // Runs every PERSISTENT_CHECK_INTERVAL regardless of activity -
         // see persistent_time_checks()'s own comment.
         double PERSISTENT_CHECK_INTERVAL = 10.0 * 60.0 * 1000.0; // ms (10 minutes)
@@ -103,6 +115,7 @@ class SIDETRACK_CLASS
         void persistent_time_checks(ai_root& main_instance);
         void run_consolidation(ai_root& main_instance);
         void run_clear_context(ai_root& main_instance);
+        void run_about_user(ai_root& main_instance);
 
     public:
         // main_instance: sidetrack's own instance is made from it with

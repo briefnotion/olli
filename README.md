@@ -90,6 +90,7 @@ inter-process coordination:
 | `history.json` | Persisted chat history, reloaded on start. |
 | `history_debug.txt` | Human-readable dump of the current history. |
 | `scenes.json` | Locally saved Hue light scenes. |
+| `collection/about_the_user.txt` | Plain-English notes about you (favorite color, where you live, ...), written by hand. See [About the user](#about-the-user-history-slot--2) below. |
 | `models/` | Whisper model file(s) for Voca's speech-to-text. Always shared — see below. |
 | `chat_log.txt` | Live, flat-text transcript of the current session (see [Chat log](#chat-log) below). |
 | `chat_logs/` | Archived, timestamped past sessions' transcripts. |
@@ -432,6 +433,26 @@ Three housekeeping routines run off the main thread (`sidetrack.cpp`):
    `-1`-tagged persona message. Skipped if there's any activity in flight
    when the timer fires. A stale or "poisoned" context can't outlive 30
    minutes of silence.
+
+### About the user (history slot -2)
+
+Chat history is one ordered list. Entry 0 is the persona (consolidation level
+`-1`); any message with a negative level is protected: never consolidated and
+kept through the idle context clear. Each negative level is a reserved slot at
+a fixed position: `-1` is entry 0, `-2` is entry 1, `-3` (not used yet) entry 2.
+
+Slot `-2` holds what Olli knows about you. You write the source by hand in
+plain English, in `collection/about_the_user.txt` inside your settings folder
+(created empty on first run; being in `collection/` it is also indexed for RAG
+search). After the chat has sat unchanged for 5 minutes, a separate chat
+instance (`run_about_user()`, `sidetrack.cpp`) condenses the file into one
+paragraph, prefixed "What is known about the user, in case it helps:", and puts
+it into slot `-2` (replaced if already there, inserted if not). Nothing is sent
+or spoken at that moment; the next request just carries it. It runs again after
+the next bit of activity plus another 5 idle minutes, so the wording may drift a
+little. A blank or missing file, an interrupted call or an empty answer leaves
+the current paragraph alone. The paragraph goes to whichever AI backend is
+selected, so with `ai_backend: gemini` it goes to Google like the rest of the chat.
 
 ### The background "subconscious" (subcon)
 

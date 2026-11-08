@@ -87,9 +87,12 @@ void ai_root::open(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list)
     // from disk but predates protected messages (and may have already had
     // its original opening prompt consolidated away). Either way, the model
     // needs its persona/instructions to always be present, unsummarized.
+    // Exactly -1, not just "< 0": other negative levels (-2, -3...) are
+    // separate reserved slots (set_protected_slot()) and must not hide a
+    // missing persona.
     bool has_protected_message = false;
     for (const Message& msg : history) {
-        if (msg.consolidation_level < 0) {
+        if (msg.consolidation_level == -1) {
             has_protected_message = true;
             break;
         }
@@ -611,6 +614,23 @@ void ai_root::replace_history(std::vector<Message> new_history)
 {
     std::lock_guard<std::mutex> lock(history_mutex);
     history = std::move(new_history);
+}
+
+void ai_root::set_protected_slot(int level, Message message)
+{
+    message.consolidation_level = level;
+    std::lock_guard<std::mutex> lock(history_mutex);
+
+    size_t position = static_cast<size_t>(-level - 1); // -1 -> 0, -2 -> 1, -3 -> 2
+    if (position < history.size() && history[position].consolidation_level == level)
+    {
+        history[position] = message;
+    }
+    else
+    {
+        if (position > history.size()) position = history.size();
+        history.insert(history.begin() + static_cast<std::ptrdiff_t>(position), message);
+    }
 }
 
 

@@ -47,3 +47,6 @@ build/
 # Python bytecode cache
 __pycache__/
 *.pyc
+
+# olli rewrites this readable history dump in whatever folder it is launched from
+history_debug.txt

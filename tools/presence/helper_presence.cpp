@@ -111,6 +111,44 @@ namespace {
                output.find("STALE") != std::string::npos ||
                output.find("DELAY") != std::string::npos;
     }
+
+    // True when THIS machine has lost its own network - no default route at
+    // all, or the default gateway doesn't answer a ping. check_wifi_present()
+    // can't tell "the phone left" from "my own Wi-Fi dropped": both are just
+    // a failed ping. Seen for real (2026-11-08 23:18) - the PC's own Wi-Fi
+    // card dropped off the router for ~2.5 minutes, every check missed for
+    // longer than the search window, and presence announced the person as
+    // away and fired the leaving-home action while they were sitting at home.
+    // Only called after a miss (see WifiBackend::poll_is_near()), so a healthy
+    // network never pays for the extra gateway ping.
+    //
+    // A default route with no "via <ip>" (an on-link default) has no gateway
+    // to ping - treated as "network is up", i.e. the old behavior, rather than
+    // guessing.
+    bool host_network_is_down()
+    {
+        FILE* pipe = popen("ip -4 route show default 2>/dev/null", "r");
+        if (pipe == nullptr) return false;
+
+        std::string output;
+        char buf[256];
+        while (std::fgets(buf, sizeof(buf), pipe) != nullptr) output += buf;
+        pclose(pipe);
+
+        if (output.find("default") == std::string::npos) return true; // no default route at all
+
+        size_t via_pos = output.find(" via ");
+        if (via_pos == std::string::npos) return false;
+        size_t start = via_pos + 5;
+        size_t end = output.find_first_of(" \n", start);
+        std::string gateway = output.substr(start, end == std::string::npos ? std::string::npos : end - start);
+        if (!looks_like_ipv4(gateway)) return false;
+
+        std::string ping_cmd = "timeout " + std::to_string(WIFI_PING_TIMEOUT_SECONDS) +
+                                " ping -c 1 -W " + std::to_string(WIFI_PING_TIMEOUT_SECONDS) +
+                                " " + gateway + " >/dev/null 2>&1";
+        return std::system(ping_cmd.c_str()) != 0;
+    }
 }
 
 BluetoothBackend::BluetoothBackend(std::string mac, std::chrono::seconds poll_interval, std::chrono::seconds search_poll_interval)
@@ -154,8 +192,20 @@ void WifiBackend::poll_is_near()
         near = true;
         searching_since.reset(); // hit - confirmed near (or a fresh arrival), back to the normal rate
     } else if (near) {
-        // Was near, just missed - start (or continue) searching rather than
-        // flipping away on a single miss.
+        // Was near, just missed. If it's this machine's own network that's
+        // down (see host_network_is_down()) the miss says nothing about the
+        // phone - keep the last known state and don't let it count toward
+        // the search window. Restarting the window (reset) means a genuine
+        // miss right after the network comes back gets a fresh full window
+        // instead of an instant "away" from time that passed during the
+        // outage. With the window unset and near still true, the next check
+        // is back on the normal slow rate - fine, nothing is being searched for.
+        if (host_network_is_down()) {
+            searching_since.reset();
+            return;
+        }
+        // Network is fine, so it really is a miss - start (or continue)
+        // searching rather than flipping away on a single miss.
         if (!searching_since.has_value()) searching_since = now;
         if (now - *searching_since >= poll_interval) {
             near = false; // searched the full window, never found them - confirmed away

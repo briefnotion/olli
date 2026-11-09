@@ -112,6 +112,18 @@ The poll rate adapts rather than staying fixed:
   near. Only once the full 2 minutes passes with no hit does it actually
   declare them away.
 
+**This machine's own network drops don't count as a miss.** When the Wi-Fi
+check misses while the person was near, presence first checks whether *this
+machine* can still reach its own default gateway. If it can't (no default
+route, or the gateway doesn't answer), the miss says nothing about the phone:
+the Wi-Fi backend keeps its last known state, doesn't start or advance the
+search window, and starts a fresh full window once the network is back. Found
+the hard way - on 2026-11-08 the PC's own Wi-Fi card dropped off the router for
+about 2.5 minutes, every check missed, and presence declared the person away
+and fired their leaving-home action while they were sitting at home. Bluetooth
+is unaffected (it doesn't use the network), and the extra gateway ping only
+happens after a miss, so a healthy network never pays for it.
+
 The live display (each person's Bluetooth/Wi-Fi line) shows `(searching)`
 next to a backend while it's in that confirmation window.
 

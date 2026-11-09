@@ -4946,3 +4946,25 @@ it can actually act under its persona's judgment, not just talk about it.
   installed at index 1, and a question afterwards ("favorite color and dog's name?") was answered correctly from it.
 - Ideas for later: slot -3 (plan/goal); regenerate from the current chat as well as the file; a way for Olli to add to the file.
 - Install: rebuild + reinstall + restart olli.
+
+## 2026-11-09 - Overnight "unresponsive" investigation (ron) + second-guess fix
+
+- What it turned out to be, in order of evidence: (1) the PC's own Wi-Fi dropped off the router (23:18:05-~23:20:40 and again 02:47-02:49;
+  Intel 8260, NetworkManager's default `wifi.powersave = 3`). The Hue call timed out (`CURL failed: Timeout`) and presence read "away"
+  then "near", firing leaving-home/welcome-home. Power save is now off (`iwconfig` live + `nmcli connection modify Cats
+  802-11-wireless.powersave 2`); NOT yet confirmed that it stops the drops. (2) Presence treated the PC's own outage as the phone leaving:
+  fixed in `tools/presence` (d0186f9, `host_network_is_down()`). (3) A voice command that "wasn't heard" never reached olli - a
+  discarded phrase (no wake word) leaves no trace; cause unknown, see Open.
+- Fixed: `run_second_guess()` started a review 2 s after a tool-call-only assistant turn while the tool was still running, so the
+  review held Ollama's single slot and the real reply waited behind it. It now ignores an assistant message that carries
+  `tool_calls`; the review starts off the final reply instead. Only matters for REMOTE tools (their wait doesn't block the main loop);
+  a built-in tool blocks the main thread for its whole run, so check() never saw the tool-call turn. Tested on the scratch `claude`
+  profile with a throwaway 3.5 s remote tool: old build "review started" +2.05 s after the tool-call turn, 1.5 s BEFORE the tool result,
+  tool-result-to-reply 26 s; new build review started 2 s after the final reply, tool-result-to-reply 14.6 s. A plain no-tool turn
+  is still reviewed 2 s after the reply.
+- Open: log discarded (non-wake-word) phrases, or run `ron` with `VOCA_DEBUG=1`, to see what whisper actually heard on a miss
+  (bare wake words accepted: "olli"/"ollie" only; "hey ol..." loose). Open: Ollama has one slot (`-np 1`) and every switch between
+  the chat, second-guess, subcon and task-runner prompts re-reads the whole ~5000-token prompt (`cached n_tokens = 5`), ~12-15 s per
+  call. Open: whether Wi-Fi power-save off stopped the drops (look for `beacon-loss` / `ssid-not-found` in `journalctl`).
+- Note: starting `presence` always reads the person as arriving and fires their welcome-home action once.
+- Install: rebuild + reinstall + restart olli.

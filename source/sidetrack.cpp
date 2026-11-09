@@ -190,16 +190,28 @@ void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ai_root& main
     if (main_instance.history.size() != SECOND_GUESS_PREVIOUS_HISTORY_SIZE)
     {
         std::string newest_role;
+        bool newest_has_tool_calls = false;
         {
             std::lock_guard<std::mutex> lock(history_mutex);
-            if (!main_instance.history.empty()) newest_role = main_instance.history.back().role;
+            if (!main_instance.history.empty())
+            {
+                newest_role = main_instance.history.back().role;
+                newest_has_tool_calls = !main_instance.history.back().tool_calls.empty();
+            }
         }
 
         if (newest_role == "user")
         {
             second_guess_chain_count = 0;
         }
-        else if (newest_role == "assistant" && second_guess_stage == 100)
+        // A tool-call-only assistant turn isn't the reply yet - the tool
+        // result and the real answer are still coming. Reviewing it started a
+        // review that held the one Ollama slot while the chat itself needed it
+        // for that answer (seen 2026-11-08 23:19: a ~10 s Hue call, review
+        // started 2 s after the tool-call turn, real reply 57 s after the
+        // request). The history grows again when the result and then the
+        // reply land, and the reply is what starts the review.
+        else if (newest_role == "assistant" && !newest_has_tool_calls && second_guess_stage == 100)
         {
             if (second_guess_chain_count < SECOND_GUESS_MAX_CHAIN)
             {

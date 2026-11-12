@@ -4968,3 +4968,11 @@ it can actually act under its persona's judgment, not just talk about it.
   call. Open: whether Wi-Fi power-save off stopped the drops (look for `beacon-loss` / `ssid-not-found` in `journalctl`).
 - Note: starting `presence` always reads the person as arriving and fires their welcome-home action once.
 - Install: rebuild + reinstall + restart olli.
+
+## 2026-11-12 - about_the_user.txt moved into collection/For_Olli/
+
+- The notes file for history slot -2 now lives at `<profile>/collection/For_Olli/about_the_user.txt` (was `collection/about_the_user.txt`),
+  so the folder can hold other things meant for Olli. `SIDETRACK_CLASS::create()` makes the folder and an empty file if missing;
+  `run_about_user()` reads from there. No fallback to the old location: an existing file has to be moved by hand (a missing file just
+  means "nothing to summarize" - the current slot -2 is left alone). Still under `collection/`, so still indexed for RAG.
+- Install: rebuild + reinstall + restart olli, and move the existing file first (`ron`, `claude`).

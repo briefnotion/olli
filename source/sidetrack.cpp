@@ -817,7 +817,7 @@ void SIDETRACK_CLASS::run_clear_context(ai_root& main_instance)
 
 // Keeps history slot -2 ("what is known about the user") up to date. The
 // source is a plain-English notes file the user writes by hand,
-// <profile>/collection/about_the_user.txt (created empty by create()); after
+// <profile>/collection/For_Olli/about_the_user.txt (created empty by create()); after
 // the chat has sat unchanged for IDLE_WAIT_TIME_FOR_ABOUT_USER, a separate chat
 // instance condenses it into one paragraph, which is put into the -2 slot
 // (replace if it is already there, insert if not - ai_root::
@@ -864,7 +864,7 @@ void SIDETRACK_CLASS::run_about_user(ai_root& main_instance)
     {
         std::string notes;
         {
-            std::ifstream notes_file(main_instance.PROPS.OLLI_DIRECTORY / "collection" / "about_the_user.txt");
+            std::ifstream notes_file(main_instance.PROPS.OLLI_DIRECTORY / "collection" / "For_Olli" / "about_the_user.txt");
             std::stringstream buffer;
             buffer << notes_file.rdbuf();
             notes = buffer.str();
@@ -968,7 +968,7 @@ void SIDETRACK_CLASS::create(const ai_root& main_instance)
     // The notes file run_about_user() reads: make sure the folder and an
     // (empty) file exist, so there is something to open and fill in.
     std::error_code ec;
-    std::filesystem::path collection_dir = main_instance.PROPS.OLLI_DIRECTORY / "collection";
+    std::filesystem::path collection_dir = main_instance.PROPS.OLLI_DIRECTORY / "collection" / "For_Olli";
     std::filesystem::create_directories(collection_dir, ec);
     std::filesystem::path about_file = collection_dir / "about_the_user.txt";
     if (!std::filesystem::exists(about_file, ec)) std::ofstream{about_file};

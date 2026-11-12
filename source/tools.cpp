@@ -605,6 +605,124 @@ bool TOOL_REMEMBER::check(IO_WORKER_CLASS&, ai_root& chat, CLASS_SYSTEM*, std::v
 void TOOL_REMEMBER::monitor_tool(ai_root&, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>&, TOOL_WORKER_CLASS*, COMMS&) {}
 
 
+// ---- TOOL_QUICK_NOTE ----
+
+// Writes one plain note file - the user's words and a save time stamped here,
+// nothing else - into 'dir', named YYYY-MM-DD_HHMM_<first words>.txt. Kept as
+// a small free function, separate from TOOL_QUICK_NOTE, because every
+// "just save some text to a collection folder" tool wants exactly this (a
+// journal entry tool is planned); a new one calls it with its own folder,
+// header word and limit. remember_note does NOT use it - its save_note()
+// (above) was left as it was. {true, what-was-saved} or {false, why-not}.
+static std::pair<bool, std::string> save_simple_note(const std::filesystem::path& dir, const std::string& collection_name, const std::string& kind_label, const std::string& text, size_t max_characters)
+{
+    if (text.find_first_not_of(" \t\r\n") == std::string::npos)
+        return {false, "Error: the note was empty, nothing was saved."};
+    if (text.size() > max_characters)
+        return {false, "Error: the note is longer than " + std::to_string(max_characters) + " characters, nothing was saved."};
+
+    std::time_t now = std::time(nullptr);
+    std::tm now_tm{};
+    localtime_r(&now, &now_tm);
+    char stamp[64], day_part[16];
+    std::strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M (%A)", &now_tm);
+    std::strftime(day_part, sizeof(day_part), "%Y-%m-%d_%H%M", &now_tm);
+
+    // The first few words name the file (note_slug() keeps it file-name safe).
+    std::string label;
+    {
+        std::istringstream words(text);
+        std::string word;
+        for (int n = 0; n < 5 && (words >> word); ++n)
+            label += (n ? " " : "") + word;
+    }
+
+    // The two header lines give the search something to match besides a note
+    // that may be only a few words long (same reason remember_note has them).
+    std::string content = kind_label + "\nSaved: " + stamp + "\n\n" + text + "\n";
+
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    if (ec)
+        return {false, "Error: could not create the notes folder (" + ec.message() + "), nothing was saved."};
+
+    // Two notes in the same minute with the same first words get -2, -3, ...
+    std::string base = std::string(day_part) + "_" + note_slug(label);
+    std::filesystem::path file = dir / (base + ".txt");
+    for (int n = 2; std::filesystem::exists(file, ec) && n < 100; ++n)
+        file = dir / (base + "-" + std::to_string(n) + ".txt");
+
+    if (!write_file(file, content))
+        return {false, "Error: the file could not be written, nothing was saved."};
+
+    return {true, "Saved the " + kind_label + " as " + file.filename().string() + " in the " + collection_name + " collection. Saved at " + stamp +
+                  ". It will turn up in knowledge-base searches within about 10 minutes."};
+}
+
+void TOOL_QUICK_NOTE::configure(ai_root& chat) {
+    notes_dir = chat.PROPS.OLLI_DIRECTORY / "collection" / "Olli_Quick_Notes";
+}
+
+void TOOL_QUICK_NOTE::register_tool(ai_root&, json& tools) {
+    tool_functions.clear();
+
+    json params = {
+        {"type", "object"},
+        {"properties", {
+            {"text", {{"type", "string"}, {"description", "The note itself, in the user's own words, as they said it - leave out the request ('make a quick note that', 'jot down'). Do not summarize, shorten or add anything."}}}
+        }},
+        {"required", {"text"}}
+    };
+
+    tool_functions.push_back("quick_note");
+    add_tool(tools, "quick_note",
+        "Jots down a quick note, exactly as the user said it. Use it ONLY when the user clearly asks for a quick note, a "
+        "fast note, or to jot something down (for example 'make a quick note that the pin code is 2416', 'make a fast "
+        "note, I had a good time today'). It saves just the words and the time; there is no date, title or reminder. If "
+        "the user wants to be reminded of something, or it is about a particular day (an appointment, a birthday), use "
+        "remember_note instead. Merely mentioning a fact in conversation is NOT a request: never save anything the user "
+        "did not ask you to note. Never save your own replies, and never use this to repeat or follow through on "
+        "something you said earlier - only the user's own request counts. If it is unclear what they want noted, ask "
+        "instead of saving. When they do ask, call it, and never say it was saved without calling it. The time is "
+        "stamped automatically. This only saves; to find notes again later, search the knowledge base.",
+        params);
+}
+
+void TOOL_QUICK_NOTE::handle_tool(ai_root& chat, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const json& args, const std::string& tc_id) {
+    // Same plain "this did not work" framing remember_note and web_search use,
+    // so a failed save is never told to the user as if it had been saved.
+    static const std::string failure_instruction =
+        "This attempt did NOT succeed - it is an error, not real data. Tell "
+        "the user plainly, in your own words, that it failed and what "
+        "likely went wrong. Do not present this as a real answer to their "
+        "question.";
+
+    // A wrongly-typed field (a number where text belongs) is read as empty,
+    // not allowed to throw - the save then refuses it as an empty note.
+    std::string text = (args.contains("text") && args.at("text").is_string()) ? args.at("text").get<std::string>() : std::string();
+
+    constexpr size_t MAX_NOTE_CHARACTERS = 5000; // only here so a runaway call can't fill the disk
+    auto [ok, result] = save_simple_note(notes_dir, "Olli_Quick_Notes", "Quick note", text, MAX_NOTE_CHARACTERS);
+
+    chat.send_tool_result(tc_id, result);
+    chat.integrate_tool_result(tool_worker, comms, ok ? "" : failure_instruction, result);
+}
+
+bool TOOL_QUICK_NOTE::check(IO_WORKER_CLASS&, ai_root& chat, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>&, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const ToolCall& tc) {
+    if (tc.name != "quick_note")
+        return false;
+
+    chat.log("[System] Tool call received: " + tc.name + "\n");
+
+    handle_tool(chat, tool_worker, comms, tc.arguments, tc.id);
+
+    return true;
+}
+
+// No periodic work needed - part of the common tool interface (see the note in tools.h).
+void TOOL_QUICK_NOTE::monitor_tool(ai_root&, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>&, TOOL_WORKER_CLASS*, COMMS&) {}
+
+
 void TOOL_DELEGATOR::configure(ai_root&) {}
 
 void TOOL_DELEGATOR::register_tool(ai_root&, json& tools)

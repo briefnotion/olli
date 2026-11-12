@@ -23,6 +23,7 @@ exactly when it's connected.
 | `run_automation_task` | Runs a scripted, multi-step macro from a profile's `scripts/*.task` files. Full format in [AUTOMATIONS.md](AUTOMATIONS.md). |
 | `set_thinking_mode` | Toggles the model's internal reasoning stream at runtime. |
 | `remember_note` | Saves something the user asks Olli to remember (an appointment, a birthday, a fact) as one small text file in `<profile>/collection/Olli_Remembers/`. Save-only: nothing is scheduled or announced. The collection must be created once in `rag_admin` (name `Olli_Remembers`); `rag_tool`'s normal sync then makes the notes searchable within about 10 minutes, and subcon's "Notes and reminders" task reads them. Details below. |
+| `quick_note` | Jots down a quick note exactly as the user said it ("make a quick note that the pin code is 2416") as one small text file in `<profile>/collection/Olli_Quick_Notes/`. Just the words and a save time - no title, context or date. Save-only. |
 | `consult_expert` | Delegates a sub-question to a different persona, spawned as an isolated background sub-agent that answers and hands its result back. A specialist can itself call `consult_expert` (bounded by a nesting depth limit so it can't just loop asking itself the same thing). |
 
 ### remember_note
@@ -31,6 +32,14 @@ exactly when it's connected.
 - **Context:** an optional one- or two-sentence explanation written by the model (who "he" is, a month the user left out), kept on its own labeled line apart from the user's words.
 - **Dates are checked in code.** `about_date` must be a real `YYYY-MM-DD` date, and it is kept only if the user's own words contain the whole date (year, month and day) or a relative one (today, tomorrow, next Tuesday, in 3 days). Otherwise the date is dropped and the note is still saved without it; the result tells Olli so. A malformed date or time is an error and nothing is saved.
 - **Known gap:** the second-guess pass can still call this tool and save an unrequested note. See `TODO.md` (2026-11-04).
+
+### quick_note
+
+- **File:** `YYYY-MM-DD_HHMM_<first words>.txt`, containing a `Quick note` line, a `Saved:` time and weekday (stamped by code, not the model), then the user's words exactly as given (minus the request itself, e.g. "make a quick note that").
+- **No extras:** no title, `Context` line or `About:` date. Use `remember_note` for anything tied to a day or that should be remembered with context; the tool descriptions tell the model which is which.
+- **Collection:** `Olli_Quick_Notes` is a normal RAG collection folder - create the collection in `rag_admin` (as for `Olli_Remembers`); rag_tool's sync then makes the notes searchable within about 10 minutes. Subcon's notes task does not search it.
+- **Shared saving code:** the file writing is one small function, `save_simple_note()` in `source/tools.cpp`, meant to be reused by any later tool that only saves text to a collection folder (a journal tool is planned). `remember_note` keeps its own, unchanged.
+- **Known gap:** the second-guess pass can still call this tool and save an unrequested note, same as `remember_note`.
 
 ## Remote tools
 

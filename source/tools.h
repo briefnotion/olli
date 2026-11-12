@@ -200,6 +200,28 @@ class TOOL_REMEMBER : public TOOL_BASE
         void monitor_tool(ai_root& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms) override;
 };
 
+// "quick_note" - the lightweight sibling of remember_note: the model jots
+// down exactly what the user said ("make a quick note that the pin code is
+// 2416") as one small text file in OLLI_DIRECTORY/collection/Olli_Quick_Notes/.
+// Just the user's words and a save time stamped in code - no title, context
+// or about-date. A normal RAG collection folder, picked up by rag_tool's
+// regular sync like Olli_Remembers (the collection itself is created in
+// rag_admin). The file writing is save_simple_note() in tools.cpp, shared
+// with any later tool that only needs "save some text to a folder".
+class TOOL_QUICK_NOTE : public TOOL_BASE
+{
+    private:
+        std::filesystem::path notes_dir;
+
+        void handle_tool(ai_root& chat, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const json& args, const std::string& tc_id);
+
+    public:
+        void configure(ai_root& chat) override;
+        void register_tool(ai_root& chat, json& tools) override;
+        bool check(IO_WORKER_CLASS& io_worker, ai_root& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const ToolCall& tc) override;
+        void monitor_tool(ai_root& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms) override;
+};
+
 // Recursive sub-agent delegation - the model can hand a sub-question to a
 // specialist persona ("consult_expert"), which spawns an isolated
 // ai_root sub-agent (chat.spawn_background_task(), same as

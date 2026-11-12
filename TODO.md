@@ -4976,3 +4976,19 @@ it can actually act under its persona's judgment, not just talk about it.
   `run_about_user()` reads from there. No fallback to the old location: an existing file has to be moved by hand (a missing file just
   means "nothing to summarize" - the current slot -2 is left alone). Still under `collection/`, so still indexed for RAG.
 - Install: rebuild + reinstall + restart olli, and move the existing file first (`ron`, `claude`).
+
+## 2026-11-12 - quick_note tool (Olli_Quick_Notes)
+
+- New internal tool `quick_note` (`TOOL_QUICK_NOTE`, tools.h/.cpp, registered in `populate_default_tools()`, ai_root.cpp): saves exactly what the
+  user says plus a code-stamped time as one small file in `<profile>/collection/Olli_Quick_Notes/` ("make a quick note that the pin code is
+  2416"). No title, context or about-date. Separate tool from `remember_note` (left untouched) so the model never has to choose a collection.
+- The file writing is a small free function, `save_simple_note(dir, collection_name, kind_label, text, max_characters)`, in tools.cpp, written to be
+  reused by a future journal-entry tool. `remember_note`'s own `save_note()` was NOT moved onto it (kept scope to the new tool); doing that later is
+  an easy follow-up.
+- Tested live on the scratch `claude` profile (Ollama): "Make a fast note, I had a good time today", "Make a quick note that the pin code is 2416.",
+  "Jot down that I need to buy milk." and "Note down that the garage code is 1234." all called `quick_note` with the bare text; "Remember that my
+  dentist appointment is next Tuesday at 3pm." still called `remember_note` (with the right about_date); a plain statement ("The sky was really
+  blue today.") saved nothing. Test notes removed afterwards. No stray notes from second-guess in these runs.
+- Open: "note down" is also in `remember_note`'s description - it went to `quick_note` here, but the two descriptions overlap a little; watch real use.
+  Second-guess could in principle save a stray note, same as `remember_note` (2026-11-04). Subcon's notes task does not search `Olli_Quick_Notes`.
+- Install: rebuild + reinstall + restart olli, then create the `Olli_Quick_Notes` collection in `rag_admin` so the notes become searchable.

@@ -669,7 +669,7 @@ void TOOL_QUICK_NOTE::register_tool(ai_root&, json& tools) {
     json params = {
         {"type", "object"},
         {"properties", {
-            {"text", {{"type", "string"}, {"description", "The note itself, in the user's own words, as they said it - leave out the request ('make a quick note that', 'jot down'). Do not summarize, shorten or add anything."}}}
+            {"text", {{"type", "string"}, {"description", "The complete note, in the user's own words, exactly as given - the whole pasted or dictated text from first word to last, headings included. Leave out only the request itself ('make a quick note that', 'jot down'). Never a title alone, never a summary, never shortened."}}}
         }},
         {"required", {"text"}}
     };
@@ -682,7 +682,9 @@ void TOOL_QUICK_NOTE::register_tool(ai_root&, json& tools) {
         "the user wants to be reminded of something, or it is about a particular day (an appointment, a birthday), use "
         "remember_note instead. Merely mentioning a fact in conversation is NOT a request: never save anything the user "
         "did not ask you to note. Never save your own replies, and never use this to repeat or follow through on "
-        "something you said earlier - only the user's own request counts. If it is unclear what they want noted, ask "
+        "something you said earlier - only the user's own request counts. When the user pastes or dictates a long text, "
+        "the text argument must contain ALL of it, from its first word to its last - never just its title or heading and "
+        "never a summary; a note that cuts the text short is a failure. If it is unclear what they want noted, ask "
         "instead of saving. When they do ask, call it, and never say it was saved without calling it. The time is "
         "stamped automatically. This only saves; to find notes again later, search the knowledge base.",
         params);
@@ -701,8 +703,38 @@ void TOOL_QUICK_NOTE::handle_tool(ai_root& chat, TOOL_WORKER_CLASS* tool_worker,
     // not allowed to throw - the save then refuses it as an empty note.
     std::string text = (args.contains("text") && args.at("text").is_string()) ? args.at("text").get<std::string>() : std::string();
 
+    // The model copies a long pasted text badly: with Ollama's repeat_penalty
+    // (1.3) it avoids repeating tokens it just read, so a 4,000 character paste
+    // came back as ~2,300 (or just a title), and wording in the tool
+    // description could not fully stop it. Safety net: when the start of what
+    // it passed is found in the user's latest message and the message goes on
+    // for clearly more than that, save the message from that point on instead.
+    // An ordinary short note is unaffected (the leftover is about as long as
+    // the text itself).
+    bool used_whole_message = false;
+    {
+        std::string user_message;
+        for (auto it = chat.history.rbegin(); it != chat.history.rend(); ++it)
+            if (it->role == "user") { user_message = it->content; break; }
+
+        size_t start_length = std::min<size_t>(text.size(), 40);
+        size_t at = (start_length >= 10) ? user_message.find(text.substr(0, start_length)) : std::string::npos;
+        if (at != std::string::npos)
+        {
+            std::string rest = user_message.substr(at);
+            while (!rest.empty() && std::isspace(static_cast<unsigned char>(rest.back()))) rest.pop_back();
+            if (rest.size() > text.size() + text.size() / 4 + 100)
+            {
+                text = rest;
+                used_whole_message = true;
+            }
+        }
+    }
+
     constexpr size_t MAX_NOTE_CHARACTERS = 5000; // only here so a runaway call can't fill the disk
     auto [ok, result] = save_simple_note(notes_dir, "Olli_Quick_Notes", "Quick note", text, MAX_NOTE_CHARACTERS);
+    if (ok && used_whole_message)
+        result += " The text passed in was shorter than what the user sent, so the user's whole text was saved (" + std::to_string(text.size()) + " characters).";
 
     chat.send_tool_result(tc_id, result);
     chat.integrate_tool_result(tool_worker, comms, ok ? "" : failure_instruction, result);

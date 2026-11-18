@@ -4992,3 +4992,20 @@ it can actually act under its persona's judgment, not just talk about it.
 - Open: "note down" is also in `remember_note`'s description - it went to `quick_note` here, but the two descriptions overlap a little; watch real use.
   Second-guess could in principle save a stray note, same as `remember_note` (2026-11-04). Subcon's notes task does not search `Olli_Quick_Notes`.
 - Install: rebuild + reinstall + restart olli, then create the `Olli_Quick_Notes` collection in `rag_admin` so the notes become searchable.
+
+## 2026-11-18 - quick_note: long pasted notes were saved as just a title
+
+- Found in ron's debug log (Nov 13): "make a note from the following text: <4,000 characters>" called `quick_note` with only the heading ("Space and gravity",
+  "Light and sensors", "OLED"). Cause: Ollama's `repeat_penalty` (1.3, shared PROPS) makes the model avoid repeating tokens it just read, so it cannot copy a long
+  paste. Direct probes against qwen3:8b with the real persona and tool definitions: 4,225-character paste, old wording -> 205-2,344 characters saved; new wording ->
+  2,309-3,300; new wording with repeat_penalty 1.0 -> 4,186 (all, 4/4). A 1,706-character paste: old wording 113, new wording 1,706 (5/5).
+- Fixed in `TOOL_QUICK_NOTE` only: clearer description (the text must be the complete paste, never a title or summary) and a small code safety net in
+  `handle_tool()` - if the start of the model's text is found in the user's latest message and the message goes on for clearly more than the model passed
+  (more than text + 25% + 100 characters), the user's whole text from that point is saved instead and the tool result says so. Tested live on the scratch
+  `claude` profile: the 4,186-character paste was saved whole (byte-identical to what was pasted); "Make a quick note that the pin code is 2416. Also what is two
+  plus two?" saved only "the pin code is 2416". `remember_note` has the same weakness for a long text and was NOT changed.
+- Not fixed (found while testing, left alone): (1) `ai_root::send()` (ai_root.cpp ~283) runs every user message through `filter_non_printable()`, which turns every
+  non-ASCII BYTE into a '.', so a bullet, an em dash or "cafe" with an accent arrive as "...", ".." etc. - this is why the pasted notes showed "..." where the
+  bullets were. (2) The model's wording could not stop it saving a topic when the user's message ends at "the following note about X:" with no text yet (5 of 6
+  runs still saved the topic); only a code check would. (3) The 4,222-character paste at 05:18 on Nov 13 got no reply at all; not investigated.
+- Install: rebuild + reinstall + restart olli.

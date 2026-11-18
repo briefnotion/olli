@@ -5009,3 +5009,17 @@ it can actually act under its persona's judgment, not just talk about it.
   bullets were. (2) The model's wording could not stop it saving a topic when the user's message ends at "the following note about X:" with no text yet (5 of 6
   runs still saved the topic); only a code check would. (3) The 4,222-character paste at 05:18 on Nov 13 got no reply at all; not investigated.
 - Install: rebuild + reinstall + restart olli.
+
+### 2026-11-18 (later) - the two small items fixed, and the real cause of the lost long-paste reply
+
+- Fixed: (1) `filter_non_printable()` (stringthings.cpp, its only caller is `ai_root::send()`) now keeps well-formed multi-byte UTF-8 (bullets, accents, em dashes,
+  curly quotes) and only turns stray/invalid/overlong bytes into '.', so the text stays valid UTF-8 for the JSON history dump. Tested live: "bullet • here, accent
+  café, dash — end" arrives intact; a bad byte and a cut-off sequence become '.' with no crash and a valid history.json. (2) `quick_note` refuses a message that
+  ends at a colon with no text after it ("save the following note about X:") - nothing is saved and the model asks for the text (tested live).
+- FOUND, NOT FIXED (core, `ollama_system::backend_generate()` streaming callback, ollama_system.cpp ~160-231): the callback runs `json::parse()` on each chunk httplib
+  hands it, assuming one complete JSON line per call, and a blanket `catch (...) {}` swallows any failure. A streamed line over ~4,090 bytes arrives as TWO callbacks
+  (replayed with olli's own httplib 0.34.0 against Ollama: one 4,462-byte tool-call line came in as 4,090 + 372 bytes, both "failed to parse"; a 2,650-byte one parsed
+  fine), so the model's tool call - or any long streamed line - is silently dropped and olli shows an empty reply with no error. This is why a long paste that the model
+  copies in full gets NO reply (Nov 13 05:18; reproduced live twice on the scratch profile with the real bulleted note), while a paste the model cuts short works. With
+  thinking on the model copies the paste fully (4,131 of 4,131 characters, 3/3), which is exactly what trips it. Fix would be a small line buffer in that callback
+  (append data, process complete '\n'-terminated lines, keep the remainder). Held back: it is the shared streaming path every chat uses.

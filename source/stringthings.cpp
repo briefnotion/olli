@@ -352,17 +352,54 @@ string filter_non_printable(const std::string& input)
 {
   string result = "";
 
-  for (char c : input) 
+  size_t i = 0;
+  while (i < input.size())
   {
-    if (isprint(static_cast<unsigned char>(c))
+    unsigned char c = static_cast<unsigned char>(input[i]);
+
+    if (isprint(c)
           || c == '\n'
           || c == '\r')
     {
-      result += c;
+      result += input[i];
+      i++;
+      continue;
+    }
+
+    // A well-formed multi-byte UTF-8 character (a bullet, an accent, an em
+    // dash, curly quotes ...) is real text - kept whole. This used to turn
+    // every byte >= 0x80 into a '.', so a bullet arrived as "..." and "cafe"
+    // with its accent as "caf..". Anything that is NOT a valid sequence (a
+    // stray byte, a truncated or overlong sequence, a surrogate) still
+    // becomes '.', so what leaves here is always valid UTF-8 - the history is
+    // dumped to JSON, which rejects invalid UTF-8.
+    size_t len = (c >= 0xC2 && c <= 0xDF) ? 2 : (c >= 0xE0 && c <= 0xEF) ? 3 : (c >= 0xF0 && c <= 0xF4) ? 4 : 0;
+    bool valid = (len > 0) && (i + len <= input.size());
+    for (size_t k = 1; valid && k < len; k++)
+    {
+      if ((static_cast<unsigned char>(input[i + k]) & 0xC0) != 0x80) valid = false;
+    }
+    if (valid && len > 2)
+    {
+      unsigned char second = static_cast<unsigned char>(input[i + 1]);
+      if ((c == 0xE0 && second < 0xA0)      // overlong 3-byte
+            || (c == 0xED && second > 0x9F) // surrogate
+            || (c == 0xF0 && second < 0x90) // overlong 4-byte
+            || (c == 0xF4 && second > 0x8F)) // beyond U+10FFFF
+      {
+        valid = false;
+      }
+    }
+
+    if (valid)
+    {
+      result.append(input, i, len);
+      i += len;
     }
     else
     {
       result += '.';
+      i++;
     }
   }
 

@@ -711,12 +711,28 @@ void TOOL_QUICK_NOTE::handle_tool(ai_root& chat, TOOL_WORKER_CLASS* tool_worker,
     // for clearly more than that, save the message from that point on instead.
     // An ordinary short note is unaffected (the leftover is about as long as
     // the text itself).
+    std::string user_message;
+    for (auto it = chat.history.rbegin(); it != chat.history.rend(); ++it)
+        if (it->role == "user") { user_message = it->content; break; }
+
+    // "save the following note about X:" with nothing after the colon has not
+    // given the note yet - the model still saved the topic as the note (5 of 6
+    // test runs, whatever the wording), so it is checked here. Refused with the
+    // normal failure framing, which makes it ask for the text.
+    {
+        std::string trimmed = user_message;
+        while (!trimmed.empty() && std::isspace(static_cast<unsigned char>(trimmed.back()))) trimmed.pop_back();
+        if (!trimmed.empty() && trimmed.back() == ':')
+        {
+            std::string result = "Error: the user's message ends at a colon with no text after it, so the note itself has not been given yet. Nothing was saved. Ask the user to send the text of the note.";
+            chat.send_tool_result(tc_id, result);
+            chat.integrate_tool_result(tool_worker, comms, failure_instruction, result);
+            return;
+        }
+    }
+
     bool used_whole_message = false;
     {
-        std::string user_message;
-        for (auto it = chat.history.rbegin(); it != chat.history.rend(); ++it)
-            if (it->role == "user") { user_message = it->content; break; }
-
         size_t start_length = std::min<size_t>(text.size(), 40);
         size_t at = (start_length >= 10) ? user_message.find(text.substr(0, start_length)) : std::string::npos;
         if (at != std::string::npos)

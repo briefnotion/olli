@@ -152,6 +152,7 @@ void ollama_system::backend_generate(TOOL_WORKER_CLASS* tool_worker, COMMS& comm
     std::string json_body = body.dump();
 
     if (use_streaming_request) {
+        std::string line_buffer; // bytes received but not yet a whole line - see the callback below
         auto res = cli.Post(
             "/api/chat",
             headers,
@@ -162,7 +163,21 @@ void ollama_system::backend_generate(TOOL_WORKER_CLASS* tool_worker, COMMS& comm
                     return false;
                 }
 
-                std::string chunk(data, data_length);
+                // Ollama streams one JSON object per line, but the bytes
+                // httplib hands this callback are NOT aligned to lines: a line
+                // over ~4 KB (a long tool call, e.g. a quick_note with a pasted
+                // text the model copied in full) arrives in two or more pieces.
+                // Parsing each piece on its own failed for every piece and the
+                // blanket catch below swallowed it - the call was silently lost
+                // and the reply came back empty. So bytes are collected here and
+                // each complete '\n'-terminated line is parsed once whole. (Ollama
+                // ends every line with '\n', so nothing is left over at the end.)
+                line_buffer.append(data, data_length);
+                size_t newline_at;
+                while ((newline_at = line_buffer.find('\n')) != std::string::npos) {
+                std::string chunk = line_buffer.substr(0, newline_at);
+                line_buffer.erase(0, newline_at + 1);
+                if (chunk.find_first_not_of(" \t\r") == std::string::npos) continue;
                 try {
                     auto j_chunk = json::parse(chunk);
 
@@ -229,6 +244,7 @@ void ollama_system::backend_generate(TOOL_WORKER_CLASS* tool_worker, COMMS& comm
                         }
                     }
                 } catch (...) {}
+                }
                 return true;
             }
         );

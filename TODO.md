@@ -5022,4 +5022,8 @@ it can actually act under its persona's judgment, not just talk about it.
   fine), so the model's tool call - or any long streamed line - is silently dropped and olli shows an empty reply with no error. This is why a long paste that the model
   copies in full gets NO reply (Nov 13 05:18; reproduced live twice on the scratch profile with the real bulleted note), while a paste the model cuts short works. With
   thinking on the model copies the paste fully (4,131 of 4,131 characters, 3/3), which is exactly what trips it. Fix would be a small line buffer in that callback
-  (append data, process complete '\n'-terminated lines, keep the remainder). Held back: it is the shared streaming path every chat uses.
+  (append data, process complete '\n'-terminated lines, keep the remainder).
+- FIXED (same day, user's go-ahead): `backend_generate()`'s streaming callback now keeps a `line_buffer`, and parses each complete '\n'-terminated line once, whole (17 added
+  lines in ollama_system.cpp; the parsing body is unchanged). Tested live on the scratch `claude` profile: a normal turn works, and the real 4,126-character bulleted
+  paste, which got NO reply twice before, now gets its `quick_note` call and is saved byte-identical with all 30 bullets. Still silent on a line that genuinely fails to
+  parse (the blanket `catch (...) {}` is unchanged) - a log line there would make the next odd failure findable.

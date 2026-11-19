@@ -5117,3 +5117,16 @@ it can actually act under its persona's judgment, not just talk about it.
   voice threads, the web server) still leaves no backtrace (tested: 0 bytes). Covering them means one call at the start of each thread - about 10 places (ai_root.cpp, io_worker.cpp,
   sidetrack.cpp, tools.cpp, tools_task_script.cpp, web_server.cpp, tool_worker.cpp, Voca) - not done, since it touches many files. Two threads crashing at the same instant share one frame buffer.
 - Not installed, not committed.
+
+## 2026-11-19 (night, later) - fetch: HTTP error pages are failures; web_search points to the new tools
+
+- `fetch_website_content` used to return a 404/500 page as if it were the article (found in the 2026-11-19 web-tool review). `curl_get()` got a separate `fail_on_http_error` parameter
+  (default false); only `fetch_url_content()` passes true, so a 4xx/5xx now fails with "the website answered with an error (HTTP 404), so there is no page to read there." Kept separate
+  from `lock_down` on purpose: `get_weather` and `get_news` also use `lock_down` and need the body of an error answer (Open-Meteo puts its reason there).
+- `web_search`'s description now ends "For weather use get_weather, and for the latest news headlines use get_news - not this." (not testable directly; get_weather was still chosen for
+  "what's the weather like right now?" in the live run).
+- Tested: the real `curl_get` text against httpbin and example.com (404 and 500 fail with the flag, return the body without it, normal pages and the private-address refusal unchanged);
+  live on the scratch `claude` profile: a fetch of https://httpbin.org/status/404 -> the model told the user the site answered with HTTP 404. The earlier question "read
+  example.com/this-page-does-not-exist-xyz" was answered by the model without calling the tool, so it was not a usable test.
+- Still open: a fetch whose answer is slow can land after the next typed question (seen once in the test run: the example.com result arrived during the following question) - the
+  known single-Ollama-slot / blocking post-tool-reply behaviour, not new. Not installed, not committed.

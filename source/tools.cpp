@@ -259,7 +259,7 @@ namespace {
     }
 }
 
-std::pair<bool, std::string> TOOL_WEB_SEARCH::curl_get(const std::string& url, long timeout_seconds, const std::string& user_agent, bool lock_down) {
+std::pair<bool, std::string> TOOL_WEB_SEARCH::curl_get(const std::string& url, long timeout_seconds, const std::string& user_agent, bool lock_down, bool fail_on_http_error) {
     for (int attempt = 0; attempt < 2; ++attempt) {
         CURL* curl = curl_easy_init();
         if (!curl) return {false, "Error: Could not initialize libcurl."};
@@ -276,6 +276,9 @@ std::pair<bool, std::string> TOOL_WEB_SEARCH::curl_get(const std::string& url, l
         curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, CONNECT_TIMEOUT_SECONDS);
         curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
         curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, errbuf);
+        // A 404/500 page is a failure, not "page content": without this the server's error page
+        // came back as a successful fetch and could be mistaken for the real article.
+        if (fail_on_http_error) curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1L);
         if (lock_down) {
             curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "http,https");
             curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "http,https");
@@ -287,9 +290,13 @@ std::pair<bool, std::string> TOOL_WEB_SEARCH::curl_get(const std::string& url, l
             curl_easy_setopt(curl, CURLOPT_USERAGENT, user_agent.c_str());
 
         CURLcode res = curl_easy_perform(curl);
+        long http_status = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_status);
         curl_easy_cleanup(curl);
 
         if (res == CURLE_OK) return {true, readBuffer};
+        if (res == CURLE_HTTP_RETURNED_ERROR)
+            return {false, "Error: the website answered with an error (HTTP " + std::to_string(http_status) + "), so there is no page to read there."};
         if (guard.refused)
             return {false, "Error: that address is on a private or local network. This tool only reads public websites."};
 
@@ -358,7 +365,7 @@ std::pair<bool, std::string> TOOL_WEB_SEARCH::perform_actual_search(const std::s
 }
 
 std::pair<bool, std::string> TOOL_WEB_SEARCH::fetch_url_content(const std::string& url, COMMS& comms) {
-    auto [ok, body] = curl_get(url, FETCH_TIMEOUT_SECONDS, "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", true);
+    auto [ok, body] = curl_get(url, FETCH_TIMEOUT_SECONDS, "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", true, true);
     if (!ok) return {false, body};
 
     {
@@ -391,7 +398,7 @@ void TOOL_WEB_SEARCH::register_tool(ai_root&, json& tools) {
         {"required", {"query"}}
     };
     tool_functions.push_back("web_search");
-    add_tool(tools, "web_search", "Searches the internet. Results include titles, snippets, and URLs.", search_params);
+    add_tool(tools, "web_search", "Searches the internet. Results include titles, snippets, and URLs. For weather use get_weather, and for the latest news headlines use get_news - not this.", search_params);
 
     json fetch_params = {
         {"type", "object"},

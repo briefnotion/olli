@@ -170,7 +170,10 @@ class TOOL_WEB_SEARCH : public TOOL_BASE
         // http/https only, public internet addresses only, 5 redirects, 2 MB (see tools.cpp).
         // Static and public (2026-11-19) so get_weather / get_news (tools_info.cpp) use the
         // same locked-down request instead of a third copy; it uses no instance state.
-        static std::pair<bool, std::string> curl_get(const std::string& url, long timeout_seconds, const std::string& user_agent = "", bool lock_down = false);
+        // fail_on_http_error = true turns an HTTP 4xx/5xx answer into a failure instead of returning
+        // the server's error page as if it were the content (fetch_website_content only - the
+        // weather service's own error text is in the body of its 4xx answers, which get_weather reads).
+        static std::pair<bool, std::string> curl_get(const std::string& url, long timeout_seconds, const std::string& user_agent = "", bool lock_down = false, bool fail_on_http_error = false);
 
         void configure(ai_root& chat) override;
         void register_tool(ai_root& chat, json& tools) override;

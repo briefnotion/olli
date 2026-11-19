@@ -5102,3 +5102,18 @@ it can actually act under its persona's judgment, not just talk about it.
   thread for up to ~8 s (16 s with the one timeout retry) if a service is slow; the model sometimes writes "partly cloudy" when the data says "overcast" (its wording, not ours).
 - Not installed (installed `~/olli/olli` is still the Nov 12 build); NOT committed. The `ron` profile gets its own `info_settings.json` the first time the new build starts - edit
   `home_location` there if "Eunice, Louisiana" is not right.
+
+## 2026-11-19 (night) - crash handler: stack overflows now leave a backtrace (main thread)
+
+- Why: the strip_html_tags overflow (entry above) wrote only the supervisor's bare "signal 11" line - a stack overflow leaves no stack for the crash handler to run on, and even with one,
+  the 64 innermost frames of a runaway recursion are all the same function and never show who started it.
+- Changed (main.cpp, the crash-handler block only): (1) the handler runs on its own 256 KB alternate stack (`sigaltstack` in `install_crash_handler()`, handlers registered with
+  `sigaction(... SA_ONSTACK)` instead of `std::signal`); (2) the whole stack is captured (static buffer, 300,000 frames) and written as the innermost 40 + "N frames left out (deep recursion
+  or stack overflow)" + the outermost 40 - the outermost frames are what named `fetch_website_content` in today's core dump. A crash with 80 frames or fewer prints in full, as before.
+  The re-raise with the default disposition (the supervisor's "terminated by signal N" line) is unchanged.
+- Tested with the exact handler code in a harness: runaway recursion on the main thread -> full backtrace with 74,757 frames elided and the outer callers (`who_started_the_recursion`,
+  `call_from_chain`, `main`) listed; a null-pointer write and `abort()` -> normal short backtraces; exit statuses 139/134 as before. Built into olli; not run inside olli itself.
+- NOT fixed: `sigaltstack` is per thread, so only the main thread (where today's overflow happened) is covered. An overflow on any other thread (chat_thread, tool_worker, io_worker,
+  voice threads, the web server) still leaves no backtrace (tested: 0 bytes). Covering them means one call at the start of each thread - about 10 places (ai_root.cpp, io_worker.cpp,
+  sidetrack.cpp, tools.cpp, tools_task_script.cpp, web_server.cpp, tool_worker.cpp, Voca) - not done, since it touches many files. Two threads crashing at the same instant share one frame buffer.
+- Not installed, not committed.

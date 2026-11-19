@@ -127,6 +127,29 @@ namespace {
     // still strictly better than one vanishing with no trace at all.
     volatile std::sig_atomic_t g_crash_handler_thread = 0;
 
+    // Stack-overflow support (2026-11-19). A runaway recursion (the std::regex
+    // overflow in strip_html_tags, ron, 01:46) fills the 8 MB stack, and a
+    // handler that needs a stack to run on then faults at once - the crash left
+    // only the supervisor's bare "signal 11" line. Two additions:
+    //  1. The handler runs on its own alternate stack (sigaltstack + SA_ONSTACK,
+    //     see install_crash_handler). sigaltstack is PER THREAD: it is set up for
+    //     the thread that calls install_crash_handler (olli's main thread, where
+    //     that overflow happened). Other threads keep using their own stack, so
+    //     an overflow there still leaves no backtrace.
+    //  2. A runaway recursion's innermost 64 frames are all the same function and
+    //     do not say who started it (gdb on the core needed the OUTERMOST frames).
+    //     So the whole stack is captured and only the first and last few frames
+    //     are written, with a count of the frames left out between them.
+    // Both buffers are static (zero pages nobody touches until a crash), since
+    // nothing may be allocated inside a crash handler. Two threads crashing at the
+    // same moment would share g_crash_frames and could garble each other's output.
+    constexpr size_t CRASH_ALT_STACK_BYTES = 256 * 1024;
+    alignas(16) char g_crash_alt_stack[CRASH_ALT_STACK_BYTES];
+    constexpr int CRASH_MAX_FRAMES = 300000;   // an 8 MB stack holds fewer than ~262,000 frames
+    void* g_crash_frames[CRASH_MAX_FRAMES];
+    constexpr int CRASH_FRAMES_HEAD = 40;      // innermost frames kept
+    constexpr int CRASH_FRAMES_TAIL = 40;      // outermost frames kept
+
     void crash_write(const char* text)
     {
         if (g_crash_log_fd >= 0)
@@ -156,9 +179,29 @@ namespace {
         crash_write(strsignal(sig));
         crash_write(" - backtrace:\n");
 
-        void* frames[64];
-        int frame_count = backtrace(frames, 64);
-        backtrace_symbols_fd(frames, frame_count, g_crash_log_fd);
+        int frame_count = backtrace(g_crash_frames, CRASH_MAX_FRAMES);
+        if (frame_count <= CRASH_FRAMES_HEAD + CRASH_FRAMES_TAIL)
+        {
+            backtrace_symbols_fd(g_crash_frames, frame_count, g_crash_log_fd);
+        }
+        else
+        {
+            backtrace_symbols_fd(g_crash_frames, CRASH_FRAMES_HEAD, g_crash_log_fd);
+
+            // No snprintf in a signal handler: the count is written digit by digit.
+            char digits[16];
+            int n = 0;
+            for (int left = frame_count - CRASH_FRAMES_HEAD - CRASH_FRAMES_TAIL; left > 0 && n < 15; left /= 10)
+                digits[n++] = static_cast<char>('0' + left % 10);
+            char number[16];
+            for (int i = 0; i < n; ++i) number[i] = digits[n - 1 - i];
+            number[n] = '\0';
+
+            crash_write("... ");
+            crash_write(number);
+            crash_write(" frames left out (deep recursion or stack overflow) - the outermost frames follow ...\n");
+            backtrace_symbols_fd(g_crash_frames + (frame_count - CRASH_FRAMES_TAIL), CRASH_FRAMES_TAIL, g_crash_log_fd);
+        }
 
         crash_write("[CRASH] end of backtrace\n");
         if (g_crash_log_fd >= 0) fsync(g_crash_log_fd);
@@ -187,8 +230,21 @@ namespace {
         void* warmup[1];
         backtrace(warmup, 1);
 
+        // Alternate stack for the handler, for THIS thread (see g_crash_alt_stack).
+        stack_t alt{};
+        alt.ss_sp = g_crash_alt_stack;
+        alt.ss_size = CRASH_ALT_STACK_BYTES;
+        alt.ss_flags = 0;
+        sigaltstack(&alt, nullptr);
+
         for (int sig : {SIGSEGV, SIGABRT, SIGFPE, SIGILL, SIGBUS})
-            std::signal(sig, crash_signal_handler);
+        {
+            struct sigaction action{};
+            action.sa_handler = crash_signal_handler;
+            sigemptyset(&action.sa_mask);
+            action.sa_flags = SA_ONSTACK;
+            sigaction(sig, &action, nullptr);
+        }
     }
 }
 

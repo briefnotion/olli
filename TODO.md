@@ -5051,3 +5051,16 @@ it can actually act under its persona's judgment, not just talk about it.
 - PINNED idea, not started: a smarter note save tool (title as file name, quick vs detailed, `from` = last reply / last tool result / user's words so code copies the
   text instead of the model retyping it, later an olli-driven file editor). Reminders (`remember_note`) stay a separate tool.
 - Install: rebuild + reinstall + restart olli (the installed copy at the time of writing was still the Nov 12 build).
+
+## 2026-11-19 - crash: `strip_html_tags()` overflowed the stack on a big web page (ron, 01:46)
+
+- Symptom: olli died mid-turn ("let me pull up tonight's low temp details... One sec."), supervisor restarted it, crash_log.txt got a bare "signal 11" line with NO
+  backtrace. A core dump existed (/var/lib/apport/coredump, readable by the user): `gdb -batch -ex "thread 1" -ex "bt -25" ~/olli/olli <core>` showed 190,203 frames,
+  almost all `std::__detail::_Executor::_M_dfs`, called from `TOOL_WEB_SEARCH::strip_html_tags` <- `fetch_url_content` (a weather.com hour-by-hour page) <-
+  `fetch_website_content`, on the main thread (via the second-guess review's tool handling).
+- Cause: libstdc++'s `std::regex` matches recursively, one stack frame per character, and `<script[\s\S]*?>[\s\S]*?<\/script>` walks every character of a script block. A
+  real page with a large inline script blew the 8 MB main stack. Reproduced standalone: old code segfaults on a 3 MB script block.
+- Fixed (`strip_html_tags()` only, tools.cpp): rewritten as one linear pass, no regex. Same result as before on well-formed HTML (3,027 randomized cases, 0 differences);
+  only broken markup such as `<b<script>` can differ. A 55 MB page strips in ~120 ms. Built, NOT installed, NOT run live (ron was in use); NOT committed.
+- Not fixed (found): the crash handler printed no backtrace for this crash because a stack overflow leaves no stack to run the handler on (needs `sigaltstack` +
+  `SA_ONSTACK` on the SIGSEGV handler; none exists in source/). The TTS text filter in stringthings.cpp (~140-220) also uses `std::regex` (including a lazy `[\s\S]*?` code-block pattern), but only on the model's own reply text, so it is unlikely to reach the same depth; not changed.

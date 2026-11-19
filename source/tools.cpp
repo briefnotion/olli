@@ -108,13 +108,76 @@ void TOOL_WEB_SEARCH::configure(ai_root& chat) {
     apiKey = chat.PROPS.web_search_api_key;
 }
 
+// One linear pass, no std::regex. The old version used std::regex with
+// "[\s\S]*?" for the script/style blocks, and libstdc++'s regex matches
+// recursively - one stack frame per character - so a big inline script in a
+// real page (weather.com, 2026-11-19) recursed ~190,000 frames deep and
+// overflowed the main thread's 8 MB stack (SIGSEGV, no backtrace). Same
+// result as before: script/style blocks and tags become one space, runs of
+// whitespace collapse to one space, an unclosed block/tag is left as it was.
 std::string TOOL_WEB_SEARCH::strip_html_tags(std::string html) {
-    html = std::regex_replace(html, std::regex("<script[\\s\\S]*?>[\\s\\S]*?<\\/script>", std::regex::icase), " ");
-    html = std::regex_replace(html, std::regex("<style[\\s\\S]*?>[\\s\\S]*?<\\/style>", std::regex::icase), " ");
-    html = std::regex_replace(html, std::regex("<[^>]*>"), " ");
-    html = std::regex_replace(html, std::regex("\\s+"), " ");
+    const size_t n = html.size();
 
-    return html;
+    // Lower-cased copy only for finding the closing tags case-insensitively.
+    std::string lower(n, '\0');
+    for (size_t k = 0; k < n; ++k) {
+        char c = html[k];
+        lower[k] = (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c;
+    }
+
+    std::string out;
+    out.reserve(n);
+    auto push_space = [&out]() {
+        if (out.empty() || out.back() != ' ') out.push_back(' ');
+    };
+
+    // Once a search for a closer has failed it can never succeed later in
+    // the page, so remember it (keeps the whole pass linear).
+    bool no_script_close = false, no_style_close = false, no_more_gt = false;
+
+    size_t i = 0;
+    while (i < n) {
+        char c = html[i];
+
+        if (c == '<') {
+            // <script ...> ... </script>  and  <style ...> ... </style>
+            bool handled = false;
+            for (int which = 0; which < 2 && !handled; ++which) {
+                const char* name  = (which == 0) ? "script" : "style";
+                const char* close = (which == 0) ? "</script>" : "</style>";
+                size_t name_len   = (which == 0) ? 6 : 5;
+                bool& no_close    = (which == 0) ? no_script_close : no_style_close;
+
+                if (no_close || lower.compare(i + 1, name_len, name) != 0) continue;
+
+                size_t gt = html.find('>', i + 1 + name_len);
+                if (gt == std::string::npos) continue;
+                size_t end = lower.find(close, gt + 1);
+                if (end == std::string::npos) { no_close = true; continue; }
+
+                push_space();
+                i = end + std::char_traits<char>::length(close);
+                handled = true;
+            }
+            if (handled) continue;
+
+            // Any other tag: <...>
+            if (!no_more_gt) {
+                size_t gt = html.find('>', i + 1);
+                if (gt == std::string::npos) no_more_gt = true;
+                else { push_space(); i = gt + 1; continue; }
+            }
+            out.push_back(c);
+            ++i;
+            continue;
+        }
+
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r') push_space();
+        else out.push_back(c);
+        ++i;
+    }
+
+    return out;
 }
 
 std::pair<bool, std::string> TOOL_WEB_SEARCH::curl_get(const std::string& url, long timeout_seconds, const std::string& user_agent) {

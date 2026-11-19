@@ -162,11 +162,16 @@ class TOOL_WEB_SEARCH : public TOOL_BASE
         static constexpr long SEARCH_TIMEOUT_SECONDS = 20;
         static constexpr long FETCH_TIMEOUT_SECONDS = 25;
         static constexpr long CONNECT_TIMEOUT_SECONDS = 5;
-        std::pair<bool, std::string> curl_get(const std::string& url, long timeout_seconds, const std::string& user_agent = "");
 
         std::string apiKey = "Enter_API_key_for_serpapi.com";
 
     public:
+        // lock_down = true is for fetch_website_content, where the model picks the URL:
+        // http/https only, public internet addresses only, 5 redirects, 2 MB (see tools.cpp).
+        // Static and public (2026-11-19) so get_weather / get_news (tools_info.cpp) use the
+        // same locked-down request instead of a third copy; it uses no instance state.
+        static std::pair<bool, std::string> curl_get(const std::string& url, long timeout_seconds, const std::string& user_agent = "", bool lock_down = false);
+
         void configure(ai_root& chat) override;
         void register_tool(ai_root& chat, json& tools) override;
         bool check(IO_WORKER_CLASS& io_worker, ai_root& chat, CLASS_SYSTEM* system, std::vector<std::unique_ptr<TOOL_BASE>>& tools_list, TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const ToolCall& tc) override;

@@ -152,6 +152,7 @@ add_executable(olli
     ../source/tool_worker.cpp
     ../source/web_server.cpp
     ../source/tools.cpp
+    ../source/tools_info.cpp
     ../source/tools_task_script.cpp
     ../source/remote_tools.cpp
     ../source/helper_olli.cpp

@@ -20,11 +20,22 @@ exactly when it's connected.
 | Tool | What it does |
 |------|--------------|
 | `web_search` / `fetch_website_content` | SerpAPI search and page-text extraction (via libcurl), cleaned for the model. Needs a SerpAPI key - see [Configuration](README.md#configuration). |
+| `get_weather` | Real current weather, the next 24 hours and a 5-day forecast from Open-Meteo (free, no key). No argument = where the user lives; a place name ("Houston, Texas") works too. Settings in `<profile>/info_settings.json`. Details below. |
+| `get_news` | Latest headlines with a short summary from RSS feeds (NPR and BBC by default), `feed` and `count` optional; every story's link is shown to the user as a link. Settings in `<profile>/info_settings.json`. Details below. |
 | `run_automation_task` | Runs a scripted, multi-step macro from a profile's `scripts/*.task` files. Full format in [AUTOMATIONS.md](AUTOMATIONS.md). |
 | `set_thinking_mode` | Toggles the model's internal reasoning stream at runtime. |
 | `remember_note` | Saves something the user asks Olli to remember (an appointment, a birthday, a fact) as one small text file in `<profile>/collection/Olli_Remembers/`. Save-only: nothing is scheduled or announced. The collection must be created once in `rag_admin` (name `Olli_Remembers`); `rag_tool`'s normal sync then makes the notes searchable within about 10 minutes, and subcon's "Notes and reminders" task reads them. Details below. |
 | `quick_note` | Jots down a quick note exactly as the user said it ("make a quick note that the pin code is 2416") as one small text file in `<profile>/collection/Olli_Quick_Notes/`. Just the words and a save time - no title, context or date. Save-only. |
 | `consult_expert` | Delegates a sub-question to a different persona, spawned as an isolated background sub-agent that answers and hands its result back. A specialist can itself call `consult_expert` (bounded by a nesting depth limit so it can't just loop asking itself the same thing). |
+
+### get_weather and get_news
+
+- **Why:** weather and news used to go through `web_search`, which gives three snippets and sometimes a page full of script, so answers disagreed ("49 degrees, others say 68"). These two read structured data, so the numbers are exact.
+- **Settings:** `<profile>/info_settings.json`, written with defaults the first time olli starts: `home_location` (default "Eunice, Louisiana" - change it to yours), `temperature_unit` (`fahrenheit` with mph and inches, or `celsius` with km/h and mm), `default_news_feed`, `news_feeds` (name -> RSS 2.0 URL; add your own and the model is offered it on the next request), `cache_seconds` (the same answer is reused for 10 minutes by default). The file is re-read on every call, so edits take effect without a restart.
+- **Weather:** two requests to open-meteo.com (a place-name lookup, then the forecast; the place is remembered for the session). The text has: now, every 3 hours for 24 hours, the lowest and highest in the next 24 hours (which is what "tonight's low" means), and 5 daily rows. A day's own high/low cover midnight to midnight, and the text says so. Words like "current", "here" or "home" in the `location` field are treated as "where the user lives" (small models write them instead of leaving it out).
+- **News:** RSS 2.0 only (not Atom). Summaries are cut to about 240 characters; entities and HTML in them are cleaned.
+- **Network:** both use the locked-down request (http/https only, public internet addresses only, size-capped), 8 second timeout. They run on olli's main thread like `web_search`, so a slow service can pause olli for up to that long.
+- **Planned:** these two and the web tools are to become one remote program once the remote-tool protocol can carry links (TODO.md, 2026-11-19).
 
 ### remember_note
 

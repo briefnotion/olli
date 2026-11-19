@@ -2,6 +2,7 @@
 #define ai_root_cpp
 
 #include "ai_root.h"
+#include "tools_info.h"
 #include "io_worker.h"
 #include "user_io.h"
 #include "tool_worker.h"
@@ -17,6 +18,8 @@ void populate_default_tools(std::vector<std::unique_ptr<TOOL_BASE>>& tools_list)
 {
     tools_list.push_back(std::make_unique<TOOL_SET_THINKING_MODE>());
     tools_list.push_back(std::make_unique<TOOL_WEB_SEARCH>());
+    tools_list.push_back(std::make_unique<TOOL_WEATHER>());
+    tools_list.push_back(std::make_unique<TOOL_NEWS>());
     tools_list.push_back(std::make_unique<TOOL_REMEMBER>());
     tools_list.push_back(std::make_unique<TOOL_QUICK_NOTE>());
     tools_list.push_back(std::make_unique<TOOL_TASK_RUNNER>());

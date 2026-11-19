@@ -5064,3 +5064,41 @@ it can actually act under its persona's judgment, not just talk about it.
   only broken markup such as `<b<script>` can differ. A 55 MB page strips in ~120 ms. Built, NOT installed, NOT run live (ron was in use); NOT committed.
 - Not fixed (found): the crash handler printed no backtrace for this crash because a stack overflow leaves no stack to run the handler on (needs `sigaltstack` +
   `SA_ONSTACK` on the SIGSEGV handler; none exists in source/). The TTS text filter in stringthings.cpp (~140-220) also uses `std::regex` (including a lazy `[\s\S]*?` code-block pattern), but only on the model's own reply text, so it is unlikely to reach the same depth; not changed.
+
+## 2026-11-19 (later) - `fetch_website_content` locked down (it used to read any URL the model gave it)
+
+- Reviewed the built-in web tools (`TOOL_WEB_SEARCH`, tools.cpp; web_search goes to serpapi.com, fetch reads any URL). Found: the model chooses the fetch URL (and a page or
+  search result can steer it), and `curl_get()` set no limits. Demonstrated with the real `curl_get` text in a harness: the old path read `file:///etc/hostname`, and fetched
+  pages from 127.0.0.1 / localhost / `127.1` / `2130706433` (where Ollama, olli's web port and the other tools listen). A LAN address (router, Hue bridge) was equally reachable. No
+  size cap, unlimited redirects.
+- Fixed (`curl_get()` got a `lock_down` parameter, default false so web_search is unchanged; `fetch_url_content()` passes true; tools.h declaration; a lock-down block above
+  `curl_get()` in tools.cpp): http/https only (also for redirects); refuses any non-public address, checked on the address curl is about to connect to (private/loopback/
+  link-local/CGNAT/multicast/IPv6 local, plus IPv4 hidden in IPv6) - same rules as tools/subcon/internal_tools.cpp; max 5 redirects; keeps at most 2 MB of a page.
+- Tested (harness with the exact code text, not the running program - `ron` was in use): file://, ftp://, 127.0.0.1, localhost, ::1, 127.1, 2130706433, 192.168.1.1,
+  169.254.169.254 all refused with "that address is on a private or local network"; example.com (http + https) and weather.com (471 KB) fetch fine; a 10 MB file stops at exactly
+  2,097,152 bytes; 3 redirects work, 9 stop at 5. Then run inside the real build on the scratch `claude` profile (ron was off): fetch of http://127.0.0.1:11434/ was refused and the model explained why; https://example.com came back and was summarised; the `[Tool]` box line showed for both. The file:// request was declined by the model on its own before any tool call, so that case is only covered by the harness. Installed copy is still the old build.
+- Also: `chmod 600` on every profile's `settings.json` (and `.bak`) - it holds the serpapi key and was readable by other users. `Settings::save_settings()` rewrites in place, so the mode stays.
+- Not changed (found): (1) a 404/500 page is still returned as if it were the page (subcon's copy fails on HTTP errors); (2) subcon's own copy has no redirect cap; (3) the page text is
+  still handed to the model as-is, so a page can still try to instruct it (prompt injection) - the lock-down only limits where it can read from; (4) web_search for weather stays a
+  poor source - a weather-API tool (NWS api.weather.gov or Open-Meteo) and RSS news are the proposed next steps.
+
+## 2026-11-19 (later still) - `get_weather` and `get_news` (internal tools, new files tools_info.h / tools_info.cpp)
+
+- Why: weather and news went through `web_search` (serpapi: 3 snippets) and sometimes `fetch_website_content` on a script-heavy page, so answers were vague and contradictory. User's plan
+  (discussed 2026-11-19): four internal tools for now - weather, news, web search, web fetch - and later ONE remote program holding all of them, once the remote-tool protocol can carry
+  links (today only an internal tool can show the clickable source links; `tools/PROTOCOL.md` has no field for them). The new tools are self-contained for that reason.
+- Choices (user's): weather = Open-Meteo (free, no key, looks up place names, worldwide); news = NPR + BBC RSS feeds.
+- `get_weather(location?)`: geocoding request + forecast request; text = now, every 3 h for 24 h, lowest/highest in the next 24 h, 5 daily rows. Default place `home_location` from
+  `<profile>/info_settings.json` (written with defaults at startup; default is "Eunice, Louisiana"). "current"/"here"/"home"/etc. in `location` mean home (found live: the model sent
+  `location=current`, which Open-Meteo looked up as a town of that name and returned 78 F instead of 57 F). `get_news(feed?, count?)`: RSS 2.0 parser written by hand (CDATA, entities,
+  HTML in descriptions, no regex), 6 feeds by name, story links shown as links like web_search's, 10-minute cache for both.
+- Changed in existing code (small): `TOOL_WEB_SEARCH::curl_get()` is now `static` and public (tools.h) so the new tools reuse the locked-down request instead of a third copy; two lines in
+  `populate_default_tools()` (ai_root.cpp); `tools_info.cpp` added to source/CMakeLists.txt. TOOLS.md has the new rows and a section.
+- Tested: pure parsing/formatting code against real NPR/BBC feeds and real Open-Meteo JSON, with ASan+UBSan, 50+ checks, and ~2,800 truncated/garbage inputs (no crash). Live on the scratch
+  `claude` profile with the real build: "weather right now" / "tonight's low" / "rain tomorrow" -> `get_weather` with the right numbers (58 F, low 54 F, 8% = Open-Meteo's own); "weather in
+  Houston, Texas" -> that place; "what's in the news" -> `get_news(top)`; "three world news stories" -> `get_news(world, 3)`. Each call showed its `[Tool]` line in the system box.
+- Not done / known: the model sometimes still answers from its own memory instead of calling a tool (not seen in the 7 live questions); `web_search`'s own description does not say "use
+  get_weather/get_news instead" (only the new tools' descriptions do); weather in the first 24 h table is in the place's local time (shown); RSS only, no Atom; both tools block the main
+  thread for up to ~8 s (16 s with the one timeout retry) if a service is slow; the model sometimes writes "partly cloudy" when the data says "overcast" (its wording, not ours).
+- Not installed (installed `~/olli/olli` is still the Nov 12 build); NOT committed. The `ron` profile gets its own `info_settings.json` the first time the new build starts - edit
+  `home_location` there if "Eunice, Louisiana" is not right.

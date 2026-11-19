@@ -8,6 +8,11 @@
 #include <thread>
 
 #include <curl/curl.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <cstdint>
+#include <cstring>
 
 #include "tools.h"
 #include "ai_root.h"
@@ -180,22 +185,104 @@ std::string TOOL_WEB_SEARCH::strip_html_tags(std::string html) {
     return out;
 }
 
-std::pair<bool, std::string> TOOL_WEB_SEARCH::curl_get(const std::string& url, long timeout_seconds, const std::string& user_agent) {
+// ---- fetch_website_content lock-down (2026-11-19) ----
+// fetch_website_content lets the MODEL pick the URL, and text on a page or a
+// search result it just read can try to steer it. Without limits libcurl would
+// read file:///... (this machine's own files, including the API keys in the
+// profile), talk to localhost (Ollama, olli's web interface, the other tools)
+// or to the LAN (router, Hue bridge), follow endless redirects and buffer a
+// page of any size. So a "locked down" fetch (curl_get's last parameter):
+//   - only http and https, also for redirects
+//   - refuses to connect to anything that is not a public internet address,
+//     checked on the address curl is about to connect to (not the URL text), so
+//     IP literals, host names that resolve to a private address and redirects
+//     to either are all covered
+//   - at most 5 redirects
+//   - keeps at most 2 MB of a page; the rest is discarded, not buffered
+// Same address rules as tools/subcon/internal_tools.cpp (its copy of this tool).
+// Not covered: an http(s)_proxy environment variable - the connection then goes
+// to the proxy, which is refused here like any private address (fails safe).
+namespace {
+    constexpr size_t FETCH_DOWNLOAD_MAX_BYTES = 2 * 1024 * 1024;
+    constexpr long   FETCH_MAX_REDIRECTS = 5;
+
+    size_t capped_write_callback(void* contents, size_t size, size_t nmemb, void* userp) {
+        std::string* body = static_cast<std::string*>(userp);
+        size_t n = size * nmemb;
+        if (body->size() < FETCH_DOWNLOAD_MAX_BYTES)
+            body->append(static_cast<const char*>(contents), std::min(n, FETCH_DOWNLOAD_MAX_BYTES - body->size()));
+        return n; // always "consumed", so an oversized page is discarded rather than failing the transfer
+    }
+
+    bool is_public_ipv4(uint32_t a) {   // host byte order
+        const uint32_t b1 = a >> 24, b2 = (a >> 16) & 0xff;
+        if (b1 == 0 || b1 == 10 || b1 == 127) return false;     // "this" network, private, loopback
+        if (b1 == 100 && b2 >= 64 && b2 <= 127) return false;   // CGNAT (also Tailscale)
+        if (b1 == 169 && b2 == 254) return false;               // link-local
+        if (b1 == 172 && b2 >= 16 && b2 <= 31) return false;    // private
+        if (b1 == 192 && b2 == 168) return false;               // private
+        if (b1 >= 224) return false;                            // multicast, reserved, broadcast
+        return true;
+    }
+
+    bool is_public_address(const sockaddr* sa) {
+        if (sa->sa_family == AF_INET)
+            return is_public_ipv4(ntohl(reinterpret_cast<const sockaddr_in*>(sa)->sin_addr.s_addr));
+        if (sa->sa_family == AF_INET6) {
+            const unsigned char* p = reinterpret_cast<const sockaddr_in6*>(sa)->sin6_addr.s6_addr;
+            // IPv4 hidden inside an IPv6 address (::ffff:a.b.c.d mapped, 64:ff9b::a.b.c.d NAT64):
+            // judge the IPv4 part by the IPv4 rules.
+            static const unsigned char mapped[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff};
+            static const unsigned char nat64[12] = {0, 0x64, 0xff, 0x9b, 0, 0, 0, 0, 0, 0, 0, 0};
+            if (std::memcmp(p, mapped, 12) == 0 || std::memcmp(p, nat64, 12) == 0)
+                return is_public_ipv4((uint32_t(p[12]) << 24) | (uint32_t(p[13]) << 16) | (uint32_t(p[14]) << 8) | p[15]);
+            static const unsigned char zero[16] = {0};
+            if (std::memcmp(p, zero, 16) == 0) return false;          // ::
+            static const unsigned char loop[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+            if (std::memcmp(p, loop, 16) == 0) return false;          // ::1
+            if ((p[0] & 0xfe) == 0xfc) return false;                  // fc00::/7 unique local
+            if (p[0] == 0xfe && (p[1] & 0xc0) == 0x80) return false;  // fe80::/10 link-local
+            if (p[0] == 0xff) return false;                           // multicast
+            return true;
+        }
+        return false; // anything else (e.g. a unix socket) is never a website
+    }
+
+    struct CONNECT_GUARD { bool refused = false; };
+
+    curl_socket_t open_public_socket_only(void* clientp, curlsocktype purpose, struct curl_sockaddr* address) {
+        if (purpose == CURLSOCKTYPE_IPCXN && !is_public_address(reinterpret_cast<const sockaddr*>(&address->addr))) {
+            static_cast<CONNECT_GUARD*>(clientp)->refused = true;
+            return CURL_SOCKET_BAD;
+        }
+        return socket(address->family, address->socktype, address->protocol);
+    }
+}
+
+std::pair<bool, std::string> TOOL_WEB_SEARCH::curl_get(const std::string& url, long timeout_seconds, const std::string& user_agent, bool lock_down) {
     for (int attempt = 0; attempt < 2; ++attempt) {
         CURL* curl = curl_easy_init();
         if (!curl) return {false, "Error: Could not initialize libcurl."};
 
         std::string readBuffer;
+        CONNECT_GUARD guard;
         char errbuf[CURL_ERROR_SIZE];
         errbuf[0] = '\0';
 
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, lock_down ? capped_write_callback : WriteCallback);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_seconds);
         curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, CONNECT_TIMEOUT_SECONDS);
         curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
         curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, errbuf);
+        if (lock_down) {
+            curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "http,https");
+            curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "http,https");
+            curl_easy_setopt(curl, CURLOPT_MAXREDIRS, FETCH_MAX_REDIRECTS);
+            curl_easy_setopt(curl, CURLOPT_OPENSOCKETFUNCTION, open_public_socket_only);
+            curl_easy_setopt(curl, CURLOPT_OPENSOCKETDATA, &guard);
+        }
         if (!user_agent.empty())
             curl_easy_setopt(curl, CURLOPT_USERAGENT, user_agent.c_str());
 
@@ -203,6 +290,8 @@ std::pair<bool, std::string> TOOL_WEB_SEARCH::curl_get(const std::string& url, l
         curl_easy_cleanup(curl);
 
         if (res == CURLE_OK) return {true, readBuffer};
+        if (guard.refused)
+            return {false, "Error: that address is on a private or local network. This tool only reads public websites."};
 
         // Only a timeout gets a second attempt - a slow DNS/TLS/server
         // hiccup can easily resolve itself a moment later, but a bad
@@ -269,7 +358,7 @@ std::pair<bool, std::string> TOOL_WEB_SEARCH::perform_actual_search(const std::s
 }
 
 std::pair<bool, std::string> TOOL_WEB_SEARCH::fetch_url_content(const std::string& url, COMMS& comms) {
-    auto [ok, body] = curl_get(url, FETCH_TIMEOUT_SECONDS, "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
+    auto [ok, body] = curl_get(url, FETCH_TIMEOUT_SECONDS, "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", true);
     if (!ok) return {false, body};
 
     {

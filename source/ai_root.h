@@ -116,6 +116,27 @@ class AI_PROPERTIES
         int max_tool_calls_per_turn = 4;
 };
 
+// integrate_tool_result() adds its "[DIRECTOR_NOTE]" prompt to history with the
+// role "user" (it used to be "system"; "user" keeps Ollama's prompt cache
+// intact - see TODO.md 2026-11-18). That means "the newest message with role
+// user" is no longer always something the user really wrote. Anything that
+// wants the user's own latest words must skip these.
+inline bool is_director_note(const Message& m)
+{
+    return m.content.rfind("[DIRECTOR_NOTE]", 0) == 0;
+}
+
+// Index of the newest message the user really wrote (role "user", not a
+// director's note), or std::string::npos if there is none. No locking here -
+// the caller already holds whatever lock its own history access needs.
+inline size_t last_real_user_message(const std::vector<Message>& history)
+{
+    for (size_t i = history.size(); i > 0; --i)
+        if (history[i - 1].role == "user" && !is_director_note(history[i - 1]))
+            return i - 1;
+    return std::string::npos;
+}
+
 // ai_root: everything about a conversation that doesn't depend on WHICH AI
 // is answering - history, consolidation hooks, tool dispatch, result
 // claiming, threads, saving/loading, and the head and tail of send().

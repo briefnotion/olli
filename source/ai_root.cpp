@@ -198,7 +198,10 @@ void ai_root::integrate_tool_result(TOOL_WORKER_CLASS* tool_worker, COMMS& comms
         std::string prompt =
             "[DIRECTOR_NOTE]\n"
             "The following raw data was just retrieved: '" + raw_result + "'.\n"
-            "TASK: Report this real result to the user, in persona, without changing the facts/values it contains.\n"
+            "TASK: First check the user's original request. If it still has steps left to do (for example saving a note about this result), do the next step now by calling the right tool, and do not speak yet. "
+            "Only when nothing is left to do, tell the user what they need from this real result, in persona, without changing the facts/values it contains. "
+            "If they asked a question, answer just that and do not read out the rest. "
+            "The rest stays in the conversation for any later questions.\n"
             "CONSTRAINTS: Be concise. No technical jargon. Do not claim this didn't come from a real check.\n";
 
         if (!Special_Instruction.empty()) 
@@ -208,14 +211,18 @@ void ai_root::integrate_tool_result(TOOL_WORKER_CLASS* tool_worker, COMMS& comms
         else
         {
             prompt += 
-            "Begin speaking now:";
+            "Respond now:";
         }
 
         // 2. We use "system" here.
         // This prevents the "What was the last thing I said?" confusion
         // because the model treats this as a 'state' rather than 'user input'.
         comms.INPUT_FROM_USER.set(prompt);
-        this->send(tool_worker, comms, "system");
+        // EXPERIMENT (2026-11-18): sent as "user" instead of "system" to test
+        // whether the "system" label is what makes Ollama's qwen3 prompt
+        // cache miss on every tool follow-up. send() below no longer treats
+        // "user" as "start of a new turn" for a [DIRECTOR_NOTE] prompt.
+        this->send(tool_worker, comms, "user");
 
         // 3. This DIRECTOR_NOTE, and the raw tool result send_tool_result()
         // pushed just before it, both stay in history now rather than being
@@ -298,7 +305,7 @@ void ai_root::send(TOOL_WORKER_CLASS* tool_worker, COMMS& comms, const std::stri
     // tool_calls_this_turn's comment in ai_root.h. A "system"-role send()
     // (DIRECTOR_NOTE follow-ups) deliberately does NOT reset this; those
     // are still part of the same turn the guard is bounding.
-    if (role == "user")
+    if (role == "user" && new_user_input.rfind("[DIRECTOR_NOTE]", 0) != 0)
     {
         tool_calls_this_turn = 0;
     }

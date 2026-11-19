@@ -581,8 +581,8 @@ void TOOL_REMEMBER::handle_tool(ai_root& chat, TOOL_WORKER_CLASS* tool_worker, C
     // this instance's own history. Deliberately not older messages - a year
     // mentioned earlier (a birth year) is exactly what got borrowed by mistake.
     std::string user_words = text_arg("text");
-    for (auto it = chat.history.rbegin(); it != chat.history.rend(); ++it)
-        if (it->role == "user") { user_words += "\n" + it->content; break; }
+    size_t real_user = last_real_user_message(chat.history);
+    if (real_user != std::string::npos) user_words += "\n" + chat.history[real_user].content;
 
     auto [ok, result] = save_note(text_arg("text"), text_arg("context"), text_arg("title"), text_arg("about_date"), text_arg("about_time"), user_words);
 
@@ -712,8 +712,8 @@ void TOOL_QUICK_NOTE::handle_tool(ai_root& chat, TOOL_WORKER_CLASS* tool_worker,
     // An ordinary short note is unaffected (the leftover is about as long as
     // the text itself).
     std::string user_message;
-    for (auto it = chat.history.rbegin(); it != chat.history.rend(); ++it)
-        if (it->role == "user") { user_message = it->content; break; }
+    size_t real_user = last_real_user_message(chat.history);
+    if (real_user != std::string::npos) user_message = chat.history[real_user].content;
 
     // "save the following note about X:" with nothing after the colon has not
     // given the note yet - the model still saved the topic as the note (5 of 6
@@ -1529,6 +1529,45 @@ bool TOOL_TASK_RUNNER::check(IO_WORKER_CLASS& io_worker, ai_root& chat, CLASS_SY
 // No periodic work needed - part of the common tool interface (see the note in tools.h).
 void TOOL_TASK_RUNNER::monitor_tool(ai_root&, CLASS_SYSTEM*, std::vector<std::unique_ptr<TOOL_BASE>>&, TOOL_WORKER_CLASS*, COMMS&) {}
 
+// One short line for the system box: "[Tool] name (key=value, key=value)\n".
+// Each value, and the arguments as a whole, are cut short (and line breaks
+// turned into spaces) so a long note or paste can't flood the box. Cuts never
+// land inside a multi-byte character - the box text is later dumped to JSON
+// for the web page, which rejects invalid UTF-8.
+static std::string tool_call_box_line(const ToolCall& tc)
+{
+    constexpr size_t MAX_VALUE_BYTES = 60;
+    constexpr size_t MAX_ARGUMENT_BYTES = 200;
+
+    auto cut = [](std::string& s, size_t limit) {
+        if (s.size() <= limit) return;
+        size_t n = limit;
+        while (n > 0 && (static_cast<unsigned char>(s[n]) & 0xC0) == 0x80) --n;
+        s.resize(n);
+        s += "...";
+    };
+
+    std::string arguments;
+    if (tc.arguments.is_object())
+    {
+        for (auto it = tc.arguments.begin(); it != tc.arguments.end(); ++it)
+        {
+            std::string value = it.value().is_string()
+                ? it.value().get<std::string>()
+                : it.value().dump(-1, ' ', false, json::error_handler_t::replace);
+            for (char& c : value)
+                if (c == '\n' || c == '\r' || c == '\t') c = ' ';
+            cut(value, MAX_VALUE_BYTES);
+
+            if (!arguments.empty()) arguments += ", ";
+            arguments += it.key() + "=" + value;
+        }
+    }
+    cut(arguments, MAX_ARGUMENT_BYTES);
+
+    return "[Tool] " + tc.name + (arguments.empty() ? "" : " (" + arguments + ")") + "\n";
+}
+
 // Shared by both call sources handle_instance_tools() drains - see its own
 // comment in ai_root.h. Applies the tool_calls_this_turn cap (see ai_root.h),
 // then routes to whichever tool's check() claims tc.name (see the
@@ -1548,6 +1587,11 @@ void ai_root::dispatch_tool_call(IO_WORKER_CLASS& io_worker, const ToolCall& tc,
         return;
     }
     ++tool_calls_this_turn;
+
+    // Tell the user in the system box that a tool is being run - every tool,
+    // built-in or remote, passes through here. (The chat.log() "Tool call
+    // received" lines in each tool's check() go nowhere - log() is stubbed.)
+    comms.INPUT_FROM_SYSTEM.add_to(tool_call_box_line(tc));
 
     // Built-ins first, same check()-loop as always - each tool decides for
     // itself whether tc.name is its own. Only if nothing in tools_list

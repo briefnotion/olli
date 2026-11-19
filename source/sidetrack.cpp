@@ -191,16 +191,20 @@ void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ai_root& main
     {
         std::string newest_role;
         bool newest_has_tool_calls = false;
+        bool newest_is_director_note = false;
         {
             std::lock_guard<std::mutex> lock(history_mutex);
             if (!main_instance.history.empty())
             {
                 newest_role = main_instance.history.back().role;
                 newest_has_tool_calls = !main_instance.history.back().tool_calls.empty();
+                newest_is_director_note = is_director_note(main_instance.history.back());
             }
         }
 
-        if (newest_role == "user")
+        // A director's note is labeled "user" too, but it isn't a new turn
+        // from the user - it must not reset the chain counter.
+        if (newest_role == "user" && !newest_is_director_note)
         {
             second_guess_chain_count = 0;
         }
@@ -321,8 +325,10 @@ void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ai_root& main
         // of the whole conversation.
         {
             std::lock_guard<std::mutex> lock(history_mutex);
-            size_t start = main_instance.history.size();
-            while (start > 0 && main_instance.history[start - 1].role != "user") --start;
+            // Same stopping point as before (just after the newest user
+            // message), but a director's note labeled "user" doesn't count.
+            size_t last_user = last_real_user_message(main_instance.history);
+            size_t start = (last_user == std::string::npos) ? 0 : last_user + 1;
             for (size_t i = start; i < main_instance.history.size(); ++i) {
                 SIDETRACK_CHAT_INSTANCE->history.push_back(main_instance.history[i]);
             }
@@ -727,7 +733,9 @@ void SIDETRACK_CLASS::run_consolidation(ai_root& main_instance)
                     flattened.role = "user";
                     flattened.content = "[Tool result]: " + msg.content;
                     SIDETRACK_CHAT_INSTANCE->history.push_back(flattened);
-                } else if (msg.role == "system" && starts_with(msg.content, "[DIRECTOR_NOTE]")) {
+                } else if (starts_with(msg.content, "[DIRECTOR_NOTE]")) {
+                    // Any role: old histories saved these as "system", new
+                    // ones (integrate_tool_result(), 2026-11-18) as "user".
                     continue; // redundant with the "tool" message right before it
                 } else {
                     SIDETRACK_CHAT_INSTANCE->history.push_back(msg);

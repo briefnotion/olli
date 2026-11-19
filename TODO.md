@@ -5027,3 +5027,27 @@ it can actually act under its persona's judgment, not just talk about it.
   lines in ollama_system.cpp; the parsing body is unchanged). Tested live on the scratch `claude` profile: a normal turn works, and the real 4,126-character bulleted
   paste, which got NO reply twice before, now gets its `quick_note` call and is saved byte-identical with all 30 bullets. Still silent on a line that genuinely fails to
   parse (the blanket `catch (...) {}` is unchanged) - a log line there would make the next odd failure findable.
+
+## 2026-11-18 (evening) - tool-turn latency: director's note as a "user" message; `[Tool]` notices in the system box
+
+- Found: after a tool call, the follow-up reply took 20-25 s. `integrate_tool_result()` sent the `[DIRECTOR_NOTE]` as role "system"; qwen3's chat template moves every
+  system message to the top of the prompt, so Ollama's prefix cache missed and the whole conversation was re-read. Sent as role "user" it stays at the end: ~1.2 s
+  measured (same model, same conversation, ~400 tok/s prompt reading vs ~25 tok/s generation on the GTX 1070). User confirmed it is much faster on the real profile.
+- Changed in `ai_root.cpp` (`integrate_tool_result()`, `send()`): note sent as "user"; wording now "hold this raw data, first finish any step the user's request still
+  has (call the next tool, do not speak), only then answer in persona, answer just what was asked"; ending changed from "Begin speaking now:" to "Respond now:" (the
+  old ending made the model stop after one tool call, so "search then save a note" failed). The tool-call counter reset skips `[DIRECTOR_NOTE]` messages.
+- The label change broke four places that find "the newest user message", all fixed with one helper `last_real_user_message()` / `is_director_note()` (ai_root.h):
+  `remember_note` date check and `quick_note` colon check (tools.cpp), second-guess chain counter and turn copy (sidetrack.cpp). Consolidation (sidetrack.cpp) now skips
+  every `[DIRECTOR_NOTE]` message whatever its role.
+- Tested live on the scratch `claude` profile: "search then save a quick note" chains 3/3; follow-up reply ~1.2 s instead of 20-25 s.
+- Added `[Tool] name (arg=value, ...)` lines to the system message box for EVERY tool call, local and remote (`tool_call_box_line()` + one `add_to` in
+  `dispatch_tool_call()`, tools.cpp). Values cut at 60 bytes, whole args at 200, UTF-8-safe. Verified live (count_subcon_notes, quick_note with accents, web_search).
+  Quirk: `run_automation_task` / `consult_expert` write their own box line with `.set()` right after, which can replace ours.
+- NOT fixed (found, left alone): (1) the post-tool `send()` still runs on the main thread, so the reply arrives as one lump and the `[Tool]` line can appear at the
+  same moment as the reply (non-blocking queue + thread discussed, not approved; user will study the code first). (2) The second-guess turn copy starts AFTER the
+  user's message, so the review never sees the question although the comment says "and including" (pre-existing). (3) `repeat_penalty` 1.3 makes the model garble copied
+  URLs/long text. (4) Follow-ups after a failed/empty tool result get answered from model memory (wrong facts). (5) A second-guess review can think 45-150 s on the
+  single Ollama slot and delay the next typed message (not checked on the old build). (6) `quick_note` file-name slug strips accented letters ("the-caf-s-r-sum...").
+- PINNED idea, not started: a smarter note save tool (title as file name, quick vs detailed, `from` = last reply / last tool result / user's words so code copies the
+  text instead of the model retyping it, later an olli-driven file editor). Reminders (`remember_note`) stay a separate tool.
+- Install: rebuild + reinstall + restart olli (the installed copy at the time of writing was still the Nov 12 build).

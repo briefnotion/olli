@@ -96,6 +96,7 @@ echoed back unchanged (Gemini uses it for its `thoughtSignature`).
 | streamed `thinking` / `content` | parts flagged `thought: true` / ordinary text parts |
 | `num_ctx`, `repeat_penalty`, `keep_alive`, host/port | not used |
 | logprobs / confidence | not available, so `Confidence` stays empty |
+| a call to a tool that is no longer registered (it stopped, or the model invented the name) | Ollama drops it and returns an empty reply - `ollama_system.cpp` recovers the call from the raw tokens and hands it on; Gemini passes it on itself. Either way `tool_worker.cpp` answers it with a "not available" error within 3 s, so the model can explain (see TODO.md, 2026-11-20 night) |
 
 **Thought signatures.** Gemini 3 returns an opaque `thoughtSignature` with every tool
 call and answers HTTP 400 if the call is sent back without it. It is kept on

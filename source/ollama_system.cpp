@@ -1,6 +1,8 @@
 #include "ollama_system.h"
 #include "tool_worker.h"
 #include "helper_olli.h"
+#include <atomic>
+#include <chrono>
 #include <cmath>
 
 // The Ollama backend: everything here is specific to talking to an Ollama
@@ -62,6 +64,35 @@ static void append_token_probs(const json& logprobs, std::vector<TokenProb>& out
             // skipped - a missing or non-numeric logprob is just no data
         }
     }
+}
+
+// When the model answers with a tool call for a tool that is NOT in the request's tool list (it was used earlier in the
+// conversation, then the tool went away - a remote tool stopped, say), Ollama neither turns it into "tool_calls" nor leaves
+// it in "content": the reply arrives empty. The only trace is the generated tokens (logprobs), which spell out
+// <tool_call>{"name": "...", "arguments": {...}}</tool_call>. This reads that call back out of the text so olli can treat it
+// as the tool call it was (see the end of backend_generate()). false if there is no readable call. The name is model output
+// that ends up on screen and in the history, so it is cut short and stripped of control characters.
+static bool unavailable_tool_call(const std::string& generated_text, std::string& name, json& arguments)
+{
+    const size_t open_at = generated_text.find("<tool_call>");
+    if (open_at == std::string::npos) return false;
+    const size_t body_at = open_at + std::string("<tool_call>").size();
+    size_t close_at = generated_text.find("</tool_call>", body_at);
+    if (close_at == std::string::npos) close_at = generated_text.size();   // cut off: still worth reporting
+
+    try {
+        const json call = json::parse(generated_text.substr(body_at, close_at - body_at));
+        name = call.at("name").get<std::string>();
+        arguments = call.contains("arguments") && call["arguments"].is_object() ? call["arguments"] : json::object();
+    } catch (const std::exception&) {
+        return false;   // not a readable call - do nothing rather than guess
+    }
+    if (name.empty()) return false;
+    if (name.size() > 80) name.resize(80);
+    for (char& c : name) {
+        if (static_cast<unsigned char>(c) < 0x20 || c == 0x7F) c = ' ';
+    }
+    return true;
 }
 
 std::unique_ptr<ai_root> ollama_system::make_sibling() const
@@ -147,6 +178,7 @@ void ollama_system::backend_generate(TOOL_WORKER_CLASS* tool_worker, COMMS& comm
     cli.set_read_timeout(120);
 
     bool stream_received_done_flag = false;
+    std::string generated_call_text; // tokens that were neither reply text nor thinking: see unavailable_tool_name()
 
     httplib::Headers headers = { {"Content-Type", "application/json"} };
     std::string json_body = body.dump();
@@ -241,6 +273,9 @@ void ollama_system::backend_generate(TOOL_WORKER_CLASS* tool_worker, COMMS& comm
                             append_token_probs(j_chunk["logprobs"], last_received.response_tokens);
                         } else if (!msg_for_probs.value("thinking", std::string()).empty()) {
                             append_token_probs(j_chunk["logprobs"], last_received.thinking_tokens);
+                        } else if (j_chunk["logprobs"].is_array() && generated_call_text.size() < 8192) {
+                            // no reply text, no thinking: a tool call (or nothing) - keep its text
+                            for (const auto& entry : j_chunk["logprobs"]) generated_call_text += entry.value("token", "");
                         }
                     }
                 } catch (...) {}
@@ -299,6 +334,28 @@ void ollama_system::backend_generate(TOOL_WORKER_CLASS* tool_worker, COMMS& comm
             last_received.complete = false;
             std::cerr << "[Error] Request failed in send: " 
                       << (res ? std::to_string(res->status) : "Connection error") << std::endl;
+        }
+    }
+
+    // An empty reply that is really a call to a tool that is not available (see unavailable_tool_call()). Left alone, the
+    // turn ends with nothing shown, nothing logged and nothing saved - it looks exactly like olli hanging, and since the
+    // unanswered question stays in the history the model tries the same dead tool again on the next message too. So it is
+    // handed on as the tool call it was: olli runs it like any other, nothing offers that name, and the standard
+    // "that tool is not available" error comes back from tool_worker within seconds (tool_worker.cpp) for the model to
+    // explain - the same thing that already happens with Gemini, which passes such calls on itself.
+    if (accumulated_content.empty() && last_received.tool_calls.empty() && !status.interrupt_signal.load()) {
+        if (generated_call_text.empty()) {   // the non-streaming path keeps every non-thinking token in response_tokens
+            for (const TokenProb& t : last_received.response_tokens) generated_call_text += t.token;
+        }
+        std::string missing_tool;
+        json missing_arguments;
+        if (unavailable_tool_call(generated_call_text, missing_tool, missing_arguments)) {
+            // Ollama gave this call no id; the call needs a unique one to be matched with its result.
+            static std::atomic<unsigned long> synthesized_call_counter{0};
+            const std::string call_id = "ollama_missing_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
+                                        "_" + std::to_string(synthesized_call_counter++);
+            last_received.tool_calls.push_back({call_id, missing_tool, missing_arguments});
+            DEBUG_LOG_CLASS::instance().log_event(debug_label, "the model called '" + missing_tool + "', which Ollama did not accept (not in the tool list) - handed on as a normal tool call");
         }
     }
 }

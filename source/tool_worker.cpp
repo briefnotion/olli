@@ -19,6 +19,20 @@ void TOOL_WORKER_CLASS::thread_stop()
     THREAD_CONTROL.wait_for_thread_to_finish();
 }
 
+namespace
+{
+    // How long a call for a tool that no connected tool offers waits before it is answered with an error (see the sweep in
+    // thread_main()) - long enough for a tool that is re-registering to claim it, short enough that nobody notices a wait.
+    constexpr int UNAVAILABLE_TOOL_GRACE_SECONDS = 3;
+
+    // Same wording tools.cpp's failure_instruction uses for a failed web search / Hue call / note save.
+    const std::string UNAVAILABLE_TOOL_INSTRUCTION =
+        "This attempt did NOT succeed - it is an error, not real data. Tell "
+        "the user plainly, in your own words, that it failed and what "
+        "likely went wrong. Do not present this as a real answer to their "
+        "question.";
+}
+
 void TOOL_WORKER_CLASS::thread_main()
 {
     // Local, not a class member - same guarding main.cpp's own tools_list
@@ -176,6 +190,49 @@ void TOOL_WORKER_CLASS::thread_main()
             for (auto& tool : tools_list)
                 for (auto& def : tool->get_tool_defs())
                     add_tool(registered_tool_defs, def.value("name", ""), def.value("description", ""), def.value("parameters", json::object()));
+
+            // A call for a tool nothing offers at all - it was there earlier in the conversation and has since stopped,
+            // disconnected or crashed, or the model invented the name - would otherwise sit in pending_calls for the whole
+            // CALL_TIMEOUT_SECONDS, which is right for a slow tool but means minutes of silence for one that is simply not
+            // there. After a short grace period (a tool that is mid-reconnect gets its chance to claim it) it is answered
+            // with an error right away, with the same "this is a failure, say so" instruction other failed tools use, so
+            // the model tells the user in its own words. Judged against registered_tool_defs just rebuilt above: a call
+            // for an offered tool that is only busy is never touched.
+            {
+                const auto sweep_now = std::chrono::steady_clock::now();
+                for (auto call = pending_calls.begin(); call != pending_calls.end(); )
+                {
+                    bool offered = false;
+                    for (const auto& def : registered_tool_defs)
+                    {
+                        if (def.value("function", json::object()).value("name", "") == call->name) { offered = true; break; }
+                    }
+
+                    auto waiting = std::find_if(call_deadlines.begin(), call_deadlines.end(),
+                        [&call](const std::pair<std::string, std::chrono::steady_clock::time_point>& entry) { return entry.first == call->id; });
+                    const bool waited_long_enough = waiting != call_deadlines.end() &&
+                        std::chrono::duration_cast<std::chrono::seconds>(sweep_now - waiting->second).count() >= UNAVAILABLE_TOOL_GRACE_SECONDS;
+
+                    if (offered || !waited_long_enough)
+                    {
+                        ++call;
+                        continue;
+                    }
+
+                    std::string shown_name = call->name.substr(0, 80);   // model-written text: cut short, no control characters
+                    for (char& c : shown_name)
+                        if (static_cast<unsigned char>(c) < 0x20 || c == 0x7F) c = ' ';
+
+                    TOOL_RESULT unavailable;
+                    unavailable.call_id = call->id;
+                    unavailable.response = "Error: the tool '" + shown_name + "' is not available right now - nothing that is connected offers it.";
+                    unavailable.special_instruction = UNAVAILABLE_TOOL_INSTRUCTION;
+                    pending_results.push_back(std::move(unavailable));
+
+                    call_deadlines.erase(waiting);
+                    call = pending_calls.erase(call);
+                }
+            }
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(20));

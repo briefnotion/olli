@@ -86,6 +86,13 @@ class OLLI_LINK {
         // routing decisions ("olli" or "subcon").
         const char* server_name() const { return port == SUBCON_TOOL_PORT ? "subcon" : "olli"; }
 
+        // True if another running copy of this same tool already holds the
+        // single-instance lock (see duplicate_instance below), known from the
+        // moment the constructor returns - for a tool that would otherwise do
+        // real work (start child processes, open devices) before service()
+        // ever reports it. Every other tool can ignore this.
+        bool is_duplicate_instance() const { return duplicate_instance; }
+
         // Current socket fd, or -1 if not connected right now - for the
         // caller's own select() FD_SET. Never blocks, never does I/O.
         int fd() const { return sock_fd; }
@@ -157,6 +164,23 @@ class OLLI_LINK {
         // it wants; whether anything currently reads that name is olli's
         // own business, not this tool's.
         void send_event(const std::string& message, const nlohmann::json& action = nullptr, const std::string& origin_id = EVENT_NO_ORIGIN_ID, const nlohmann::json& var = nullptr);
+
+        // Replaces the register message this link sends on every (re)connect.
+        // For a tool whose set of tools can change while it runs (tools/
+        // mcp_bridge/ - the tools it offers are whatever the MCP servers it
+        // manages expose). The wire protocol registers once per connection
+        // (../PROTOCOL.md's `register`), so a changed list is announced the
+        // only way olli already understands: if connected, this drops the
+        // connection and the next service() call dials again right away and
+        // registers the new list (olli sees an ordinary disconnect + fresh
+        // registration, same as a tool restarting). Calls olli still has
+        // outstanding on the old connection are lost, so a caller with
+        // answers owed should wait until it has sent them. The single-
+        // instance lock key (lock_key_for(), olli_link.cpp) is worked out
+        // once, in the constructor, from the FIRST tool name of the message
+        // given then - keep that first name the same in every later message.
+        // Every other tool never calls this, so nothing about them changes.
+        void set_register_message(nlohmann::json new_register_message);
 
         // Connection status text for display - what just happened to the
         // connection this tick (connecting/registered/disconnected/timed

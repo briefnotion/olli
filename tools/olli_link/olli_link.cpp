@@ -316,6 +316,18 @@ void OLLI_LINK::service(bool socket_readable)
     }
 }
 
+void OLLI_LINK::set_register_message(json new_register_message)
+{
+    register_message = std::move(new_register_message);
+    if (sock_fd >= 0) {
+        handle_disconnect(std::string("Tool list changed - registering again with ") + server_name() + "...");
+    }
+    // Epoch, so the very next service() call dials immediately instead of
+    // waiting out RECONNECT_INTERVAL_SECONDS (see last_connect_attempt's own
+    // comment in olli_link.hpp).
+    last_connect_attempt = std::chrono::steady_clock::time_point{};
+}
+
 bool OLLI_LINK::next_message(json& out)
 {
     if (incoming.empty()) return false;

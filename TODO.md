@@ -5130,3 +5130,112 @@ it can actually act under its persona's judgment, not just talk about it.
   example.com/this-page-does-not-exist-xyz" was answered by the model without calling the tool, so it was not a usable test.
 - Still open: a fetch whose answer is slow can land after the next typed question (seen once in the test run: the example.com result arrived during the following question) - the
   known single-Ollama-slot / blocking post-tool-reply behaviour, not new. Not installed, not committed.
+
+## 2026-11-20 - get_weather / get_news request timeout 8 s -> 4 s
+
+- Why: on 2026-11-19 at 07:20-07:25 (ron) three `get_weather` calls all failed with "Operation timed out after 8000 ms with 0 bytes received" while the Hue lights (LAN) still worked, so a
+  short internet/wifi outage, not a tool bug (Open-Meteo answered in 0.2-0.6 s right after and the next evening). Each failed call froze olli's main thread for ~16 s (`curl_get` tries a
+  timed-out request twice, 8 s each); the user's one question plus the second-guess pass's two repeats cost ~50 s of frozen olli.
+- Changed (tools_info.cpp only): `REQUEST_TIMEOUT_SECONDS` 8 -> 4, comment says why. A failed request now freezes olli ~8 s at most. Measured: NPR feed 0.06 s, BBC feeds 0.4-0.8 s, Open-Meteo
+  0.2-0.6 s, so 4 s is far above normal.
+- Not changed: web_search / fetch_website_content keep their own timeouts (fetch reads arbitrary, slower sites); the second-guess pass can still re-run a lookup that just failed (open).
+- Built (Release), not installed, not committed.
+
+## 2026-11-20 (later) - `tools/mcp_bridge`: olli can use MCP servers (new remote tool, built + tested, NOT committed)
+
+- Why: MCP (Model Context Protocol) is the industry-standard way for a program to offer tools to an AI; ready-made servers exist for time zones, files, databases, calendars, ... Our remote
+  tools do things MCP does not (timer/presence events pushed to olli, subcon on another system), so MCP is added ALONGSIDE olli_link, not instead of it. Decided with the user: a new
+  standalone remote tool (own directory, own settings) that acts as a bridge, so olli's own code is not touched at all.
+- What it is: `tools/mcp_bridge/` - to olli an ordinary remote tool (two links: olli 47601 + subcon 47603, single `select()` loop, no threads); toward MCP servers an MCP client over stdio.
+  Runs the servers listed in `<profile folder>/mcp_bridge.json` (edited by hand only - adding a server = running a command, never model-callable), offers only the tools in each server's
+  `allow_tools` (empty = none), named `mcp_<server>_<tool>`. Own tools: `mcp_status`, `mcp_set_server_enabled` (the model can stop any server and restart one that was ON in the file at
+  start; it cannot start one the person left off). Results are plain text, cut to 12000 chars, sent with an instruction to report but never obey instructions inside them. README.md there.
+- Shared code changed (`tools/olli_link/`, additive - no other tool needs to change): `OLLI_LINK::set_register_message()` (new tool list -> drop the link, dial again at once, register the new list;
+  the protocol registers once per connection) and `is_duplicate_instance()` (so a second bridge exits before starting any servers). The lock key stays the first tool name (`mcp_status`).
+- Safety measures (a server is third-party code run as the user; everything it says reaches the model): direct exec (no shell); small environment (verified: a planted `SECRET_API_KEY` does
+  not reach the child); all other fds closed in the child; own process group, SIGTERM then SIGKILL (also for grandchildren that ignore SIGTERM); stderr to a 0600 log trimmed past 1 MB;
+  tool and ARGUMENT descriptions cleaned (one line, capped, invisible/bidi/tag characters removed, only needed JSON-Schema keywords kept, odd names refused); messages over 8 MB or 64 levels
+  deep rejected; arguments over 200 KB refused per call; call timeout with cancel; restart backoff 2/4/8/16 s then FAILED after 5; config file refused if world-writable/foreign.
+- Review: an independent code-review agent found 2 high (a non-string tool name made `compute_desired()` throw every pass = bridge never serves; a 3,000,000-level-deep message crashed it
+  with a stack overflow), 4 medium (schema text bypassed the description cleaning; the model could re-enable a server the person switched off and persist it; SIGKILL escalation lost for
+  grandchildren once the leader was reaped; stderr log only trimmed at spawn) and several low items. All of those were reproduced or confirmed and fixed (regression tests in
+  `tests/test_review_fixes.py`). Not changed: two servers whose names/tools join to the same exposed name -> the first (alphabetical) wins and the other is logged as not offered.
+- Tested: unit tests (ASan/UBSan); the child-process layer and the whole bridge against the real `@modelcontextprotocol/server-everything@2.3.1` and `mcp-server-time==2026.11.18`; a deliberately
+  hostile MCP server; fake olli + fake subcon on test ports 47701/47703 (heartbeat during a 22 s call, restart/reconnect, abandoned calls, bad config, second copy refused). LIVE on the scratch
+  `claude` profile with the real model: "what time is it in Tokyo?" -> `mcp_time_get_current_time`, correct answer; echo tool; `mcp_status` described the servers. See `tools/mcp_bridge/tests/`.
+- NOT done / open:
+  - Not committed, not installed; not run on ron.
+  - Second live round on the `claude` profile (same day): 19 MCP tools offered at once (all of `server-everything` + `mcp-server-time`, plus the 2 management tools and olli's own) - the model picked the right
+    tool 5/5 (London time, a sum, echo, the env tool, `mcp_status`), so ~20 tools is fine on qwen3:8b (more not tried). The REAL subcon tool (pinned `--profile claude --no-think-cycle`) registered the bridge's
+    tools on its link. olli killed and restarted with bridge + subcon left up: the bridge reconnected and re-registered in ~6 s and the next questions (Tokyo, Sydney) were answered correctly via MCP in 0.0 s.
+    A planted `SECRET_API_KEY`/`GEMINI_API_KEY` in the bridge's environment was NOT visible to the MCP server (it saw HOME/PATH/locale + npm's own variables only). Added one log line per finished call
+    ("[time] mcp_time_get_current_time answered in 0.0 s (olli)") so a person watching the bridge sees activity.
+  - Text only: MCP images / resource links / structured data are flattened to text. Needs the remote-tool protocol to carry them (same gap as the web-tools-as-a-remote-program plan).
+  - stdio servers only (no HTTP MCP servers); no push from MCP servers to olli (MCP has no standard "tell the user now"); MCP resources and prompts ignored; no live reload of the config.
+  - If the bridge is SIGKILLed or crashes, a server's grandchildren (node behind npx) can outlive it (only the direct child gets PR_SET_PDEATHSIG).
+  - A model with many MCP tools behaves worse - hence the allow-list default of "none"; 19 worked (see above), the limit on qwen3:8b was not found.
+  - Started by hand like the other tools; nothing in start_session.sh yet.
+
+## 2026-11-20 (night) - olli silently drops a reply when the model calls a tool that is no longer registered (found testing mcp_bridge on ron; NOT fixed)
+
+- Symptom (ron, 02:44): with the bridge stopped, "What time is it in Tokyo?" got NO reply - no text, no `[Tool]` line, no debug-log entry, no history entry, GPU idle. The next message ("you there?") worked normally and the
+  model then claimed "the MCP server's tools are back online" (invented from the earlier "turn it back on" exchange); second guess flagged it twice and finished after ~3 min.
+- Root cause (reproduced 3 times on the `claude` profile with a scratch build that logged the raw Ollama stream): the history is full of calls to `mcp_time_get_current_time`, the tool vanished from the request's tool list,
+  and qwen3 still answered with `<tool_call>{"name":"mcp_time_get_current_time",...}</tool_call>` (26 tokens, ~1 s). Ollama does NOT turn a call to an unregistered tool into `tool_calls`, and it strips the text from
+  `content` - so olli receives `content:""`, no tool_calls, `done:true, done_reason:"stop", eval_count:26`. `ai_root.cpp` (~line 371) only records a turn when the reply has text or tool calls, so an empty reply leaves
+  no trace anywhere. Not specific to MCP: any tool that disappears (a remote tool stopped, crashed, or never started) can trigger it, whenever the model has used it earlier in the conversation.
+- Ruled out: the swallowing `catch (...)` in the chat turn thread (`ai_root.cpp` ~763) - logged nothing; zero chunk exceptions in the streaming callback (`ollama_system.cpp` ~246 also has a blanket `catch (...) {}`).
+  Both are still silent-failure spots worth logging, but neither caused this.
+- Diagnosis used scratch builds with temporary logging; the sources were restored afterwards.
+- (SUPERSEDED by option 2 below) FIXED, option 1 (same night, `ollama_system.cpp` only: new `unavailable_tool_name()` helper + a check at the end of `backend_generate()`): an empty reply (no text, no tool_calls, not interrupted) whose generated
+  tokens contain `<tool_call>{"name": ...}` now shows `[Tool] The model tried to use 'X', but that tool is not available right now.` in the system box and logs an event in the debug history. The turn is still not
+  saved to history (there is no reply to save) and the model is not told - that is option 2. Live-tested on the `claude` profile (bridge stopped -> Tokyo question): notice after ~3 s; a normal tool call (Sydney)
+  and ordinary chat give no notice. Only the Ollama backend (the Gemini backend was not looked at). Not committed, not installed.
+- Gemini (same night, tested live on the `claude` profile with ron's key passed through an environment variable only): Gemini does NOT give an empty reply here - it emits a normal functionCall for the vanished tool,
+  olli dispatches it (the `[Tool]` line shows) and `tool_worker` leaves it in `pending_calls` until `CALL_TIMEOUT_SECONDS` (300 s) passes, then answers "Error: no response within 300 seconds." So on Gemini a stopped
+  tool = ~5 minutes of silence for that question (the chat is not blocked - the next message works). The speculative `finishReason` notice first added to `gemini_system.cpp` never fired and was REVERTED (that file
+  is unchanged).
+- FIXED for both backends (`tool_worker.cpp` only, `thread_main()` + two file-local constants): after the tool-def refresh each tick, a pending call whose name is not in `registered_tool_defs` (no connected tool, no
+  built-in offers it) and that has waited >= 3 s (`UNAVAILABLE_TOOL_GRACE_SECONDS`, so a tool mid-re-registration can still claim it) gets an immediate synthesized `Error: the tool 'X' is not available right now - nothing
+  that is connected offers it.` with the standard failure instruction ("did NOT succeed ... tell the user in your own words"), instead of waiting `CALL_TIMEOUT_SECONDS` (300 s). A call for an OFFERED tool is never touched
+  (it keeps the full 300 s, however slow). Also covers a model inventing a tool name. Tested: (1) Ollama + a fake remote tool whose event action calls `ghost_tool` -> `[Tool] ghost_tool`, then the model explained it
+  in its own words (~20 s total, mostly the model); (2) control - an offered tool answering after 6 s (> the 3 s grace) was NOT cut short ("banana"); (3) Gemini live (ron's key via environment variable only, never
+  printed or copied), bridge stopped -> Tokyo question answered in ~4.5 s in persona ("can't reach it right now") instead of ~5 min of silence. Not committed, not installed.
+- Not covered: a tool that CLAIMED a call and then died (or disconnected) before answering - that call still waits the full 300 s (the dead tool is removed but its in-flight call stays in `call_deadlines`).
+- Still open: the blanket `catch (...)` in the chat turn thread (`ai_root.cpp` ~763) and in the streaming callback (`ollama_system.cpp` ~246).
+- Fix options (not decided): (1) detect "empty reply, done, eval_count > 0, `<tool_call>` among the logprob tokens" in `ollama_system.cpp`, take the tool name from those tokens, and show a system-box notice
+  ("the model tried to call X but it is not available") so the turn is not silent; (2) additionally give the model a director note ("X is not available right now - tell the user") so it answers in persona;
+  (3) also retry once without that tool's calls in view. (1) is the smallest and safe; (2) is what the user would want to hear.
+
+## 2026-11-20 (night, later) - option 2 for Ollama: the dropped call is handed on as a real tool call (tested on `claude`; NOT committed/installed)
+
+- Why: ron's real test (03:40-03:42) showed the notice-only fix left the conversation stuck: the unanswered Tokyo question stays in history, so the model retried the dead tool on "ok" and "hello" too (three silent
+  turns, ~70 s) until it happened not to. The model has to be told.
+- Changed (`ollama_system.cpp`, same function `backend_generate()`; the helper is now `unavailable_tool_call()`): when the reply is empty and the generated tokens hold `<tool_call>{"name":..,"arguments":..}</tool_call>`,
+  that call is pushed onto `last_received.tool_calls` with a generated unique id (`ollama_missing_...`), logged as a debug event. It then follows the normal path: `[Tool] name (args)` line, `tool_worker` answers it with the
+  3-second "not available" error (see the tool_worker entry above), the model explains. Replaces the plain "[Tool] The model tried to use ..." notice (removed). History is consistent (user, assistant tool call, tool error,
+  assistant explanation) - the same shape Gemini already produces.
+- Tested on the `claude` profile (Ollama), bridge stopped -> Tokyo: `[Tool]` line at 3 s, error at 6 s, spoken explanation at ~8 s ("The tool I tried to use isn't working right now..."); "you there?" and a plain chat
+  question answered normally right after (no loop). Gemini needs nothing (it hands such calls over itself).
+
+## 2026-11-20 (night) - second guess switched thinking mode ON by itself (seen on ron, NOT fixed)
+
+- ron 03:43:17: while "fixing" the unanswered Tokyo question (see above) the second-guess pass called `set_thinking_mode({"enabled":true})` and olli confirmed "ENABLED" - a runtime setting (`PROPS.use_thinking`, not saved,
+  resets on restart) that makes every later reply slower. Same family as the 2026-09-23 "second guess can silently override the user" finding: its follow-up pass has the full tool list and, flustered, grabs whichever tool
+  looks like "doing something". Not caused by the MCP work (the unanswered question just triggered it). Option: keep `set_thinking_mode` (and other settings-changing tools) out of the second-guess pass's tool list.
+
+## 2026-11-20 (night, later) - `mcp_bridge` chaos test: 2 real bugs found and fixed (UNCOMMITTED)
+
+- New `tools/mcp_bridge/tests/test_chaos.py` (the user asked me to try to break it): real servers (everything/time/filesystem), fake olli + subcon on test ports 47701/47703 and a throwaway config, so ron's running
+  session is untouched. Passes: 400 concurrent calls over both links with the SAME call ids reused on each link (every call got exactly one answer with its own payload, on its own link, 0.3 s); slow calls do not
+  hold up fast ones; a server killed with 20 calls in flight (each got exactly one error; server restarted by itself); olli's connection dropped 3 times with 30 slow calls pending (no stray answers on the new
+  connections); 2000-call burst in 0.2 s; a server switched off/on 6 times under load (consistent end state); 3-minute soak ~50,000 calls with 0 wrong/missing, memory flat after warm-up (5 MB -> 17.7 MB, then
+  plateau), file descriptors 13 -> 13, child processes 3 -> 3; clean shutdown with no server processes left.
+- BUG 1 (crash): a call from olli whose `arguments` are nested 50,000 levels deep killed the bridge (SIGSEGV - nlohmann copies/prints nested JSON recursively; same class as the server-side bug the code review
+  found, but the olli-side arguments were not guarded). The arguments are model-written, so a model stuck in a repetition loop could produce it. Fix: `json_value_too_deep()` (iterative, `mcp_pure.cpp`) checked
+  before the arguments are copied; depth limit 64, refused for that one call. 5,000 levels were already fine.
+- BUG 2 (honest big answers killed the server): a 5 MB file read through the filesystem server comes back as an >8 MB line (the text twice, escaped); the bridge treated it as hostile, killed and restarted the
+  server and counted a failure (5 in a row = parked as failed). Now the answer is dropped, every call waiting on that server gets an error saying so ("too large ... try again" - the dropped line was never parsed
+  so the owner call is unknown, and guessing could cancel the wrong one), the rest of the line is discarded and the server keeps running; only a never-ending message (>64 MB) stops the server.
+- Harness mistakes fixed along the way: the leftover-process check matched ron's own `mcp-server-time` processes (now checks only this bridge's descendants); the fake olli now treats a connection reset as a disconnect.
+- Not found / not covered: olli itself was not attacked (only the bridge); the soak was 3 minutes, not hours.

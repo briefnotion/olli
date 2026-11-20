@@ -150,7 +150,8 @@ currently connected. The model, default thinking-mode setting, and persona
 olli acts in the world through internal tools (compiled into its core) and
 remote tools (standalone programs that connect over TCP at runtime, no
 rebuild needed - things like the clock, Hue lights, presence detection, and
-the RAG knowledge base). Full breakdown of both kinds, what each one does,
+the RAG knowledge base, plus an [MCP bridge](tools/mcp_bridge/README.md) that lets
+olli use tools from any MCP server you choose). Full breakdown of both kinds, what each one does,
 and how to write a new remote tool: **[TOOLS.md](TOOLS.md)**.
 
 `run_automation_task`, one of the internal tools, runs scripted multi-step

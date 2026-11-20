@@ -314,6 +314,8 @@ Six message types, distinguished by `"type"`.
   this is the same shape every hardcoded tool's `register_tool()` already
   builds via `add_tool()` (see `source/tools.cpp`), just supplied externally
   instead of written in C++.
+- A tool whose list can change while it runs (`tools/mcp_bridge/`) announces the new list the only way olli understands: it drops the
+  connection and registers again (`OLLI_LINK::set_register_message()` does exactly that). There is no "update tools" message.
 - On olli's side, `TOOL_REMOTE::register_tool()` does nothing but re-emit
   this array into the `tools` JSON sent to Ollama - no tool-specific code.
 

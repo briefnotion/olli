@@ -78,6 +78,7 @@ olli listens for these on **port 47601**, loopback-only for now (see
 | RAG / knowledge base | Search notes, imported documentation, or past conversations mid-chat. | [tools/rag/README.md](tools/rag/README.md) |
 | Mail | Watches one Gmail inbox (read-only, hourly) and runs a standing rule you set - tell you, run another tool such as blinking the lights, or nothing - when new mail arrives. | [tools/mail/README.md](tools/mail/README.md) |
 | Subcon | Olli's background "subconscious": works through recurring checks (weather, past conversations, notes, lights, timers) with its own LLM and keeps worthwhile findings. Ask olli "any updates?" to hear them. Unlike the others it also acts as a small server, so the other tools hold a second connection to it. | [tools/subcon/README.md](tools/subcon/README.md) |
+| MCP bridge | Connects olli to MCP servers (the industry-standard tool protocol: time zones, files, databases, ...). Runs the servers you configure and offers only the tools you allow, as ordinary olli tools. | [tools/mcp_bridge/README.md](tools/mcp_bridge/README.md) |
 
 ### Try the example
 

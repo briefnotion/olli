@@ -22,7 +22,11 @@ namespace {
 
     // Same user agent the page-fetch tool sends; a few sites refuse an empty one.
     const char* const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)";
-    constexpr long REQUEST_TIMEOUT_SECONDS = 8;   // both tools run on olli's main thread until they become a remote program
+    // Both tools run on olli's main thread until they become a remote program, so olli is
+    // frozen while a request waits. The sites normally answer in well under a second, and
+    // curl_get tries a timed-out request twice, so 4 s means an outage freezes olli for at
+    // most ~8 s per request (it was 8 s -> ~16 s; see TODO.md, 2026-11-20).
+    constexpr long REQUEST_TIMEOUT_SECONDS = 4;
     constexpr size_t NEWS_SUMMARY_MAX_BYTES = 240;
     constexpr size_t NEWS_MAX_STORIES = 10;
     constexpr int    NEWS_DEFAULT_STORIES = 5;

@@ -1,6 +1,7 @@
 #include "gemini_system.h"
 #include "tool_worker.h"
 #include "helper_olli.h"
+#include "health.h"
 #include <curl/curl.h>
 #include <fstream>
 #include <functional>
@@ -505,6 +506,7 @@ void gemini_system::backend_generate(TOOL_WORKER_CLASS* tool_worker, COMMS& comm
     }
 
     if (!request_ok && !status.interrupt_signal.load()) {
+        olli_health::note(olli_health::ERROR_KIND::GEMINI_REQUEST_FAILED);
         std::cerr << "\n[Error] Gemini request failed: " << failure << std::endl;
         DEBUG_LOG_CLASS::instance().log_event(debug_label, "gemini request failed: " + failure);
     }

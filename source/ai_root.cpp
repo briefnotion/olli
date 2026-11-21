@@ -2,6 +2,8 @@
 #define ai_root_cpp
 
 #include "ai_root.h"
+#include "health.h"
+#include "protected_slots.h"
 #include "tools_info.h"
 #include "io_worker.h"
 #include "user_io.h"
@@ -632,16 +634,36 @@ void ai_root::set_protected_slot(int level, Message message)
     message.consolidation_level = level;
     std::lock_guard<std::mutex> lock(history_mutex);
 
-    size_t position = static_cast<size_t>(-level - 1); // -1 -> 0, -2 -> 1, -3 -> 2
-    if (position < history.size() && history[position].consolidation_level == level)
+    // The level is the slot's ID, not a position (protected_slots.h): replace the slot with this level wherever it is
+    // in the protected prefix, otherwise insert it in order (-1, -2, -3 ...) - any of them may be missing.
+    std::vector<int> levels;
+    levels.reserve(history.size());
+    for (const Message& existing : history) levels.push_back(existing.consolidation_level);
+
+    const size_t found = protected_slots::find(levels, level);
+    if (found != protected_slots::NOT_FOUND)
     {
-        history[position] = message;
+        history[found] = message;
     }
     else
     {
-        if (position > history.size()) position = history.size();
+        const size_t position = protected_slots::insert_position(levels, level);
         history.insert(history.begin() + static_cast<std::ptrdiff_t>(position), message);
     }
+}
+
+bool ai_root::clear_protected_slot(int level)
+{
+    std::lock_guard<std::mutex> lock(history_mutex);
+
+    std::vector<int> levels;
+    levels.reserve(history.size());
+    for (const Message& existing : history) levels.push_back(existing.consolidation_level);
+
+    const size_t found = protected_slots::find(levels, level);
+    if (found == protected_slots::NOT_FOUND) return false;
+    history.erase(history.begin() + static_cast<std::ptrdiff_t>(found));
+    return true;
 }
 
 
@@ -762,6 +784,7 @@ bool ai_root::input(COMMS& comms, TOOL_WORKER_CLASS* tool_worker)
                     send(tool_worker, comms, "user");
                 } catch (...) {
                     // Maintain existing safety
+                    olli_health::note(olli_health::ERROR_KIND::CHAT_TURN_EXCEPTION);
                 }
                 this->is_processing = false;
             });

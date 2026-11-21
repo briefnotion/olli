@@ -1,4 +1,5 @@
 #include "io_worker.h"
+#include "health.h"
 
 #include <chrono>
 #include <thread>
@@ -708,8 +709,10 @@ void Voca::transcribeLoop() {
             try {
                 handleTranscript(text);
             } catch (const std::exception& e) {
+                olli_health::note(olli_health::ERROR_KIND::VOICE_CALLBACK_EXCEPTION);
                 std::cerr << "voca: callback threw: " << e.what() << "\n";
             } catch (...) {
+                olli_health::note(olli_health::ERROR_KIND::VOICE_CALLBACK_EXCEPTION);
                 std::cerr << "voca: callback threw a non-standard exception\n";
             }
         }

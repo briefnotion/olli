@@ -389,6 +389,13 @@ source/
 │                               background thread - see Display below. AUDIO_CONTROL_CLASS/
 │                               audio_control.{h,cpp}/tts.{hpp,cpp}/voca.{hpp,cpp} are gone
 │                               (2026-08-28) - folded in here entirely.
+├── protected_slots.h           Where the protected history slots (-1 persona, -2 about the user, -3 subcon
+│                               note) go: levels are IDs, in order, any may be missing.
+├── subcon_note.h              Pure parsing of subcon's peek answer + the -3 nudge text (tested on its own).
+├── health.{h,cpp}              HEALTH_CLASS: a quiet background thread that writes olli's own status
+│                               (crashes on record, memory, threads, disk, what needs attention) to
+│                               collection/Olli_Health/status.txt + events.txt once a minute. Isolated
+│                               - see "Olli's health report" below.
 ├── tool_worker.{h,cpp}         TOOL_WORKER_CLASS: owns all remote-tool wire communication (see
 │                               Remote tools below) on its own background thread, same
 │                               atomics-rendezvous shape as IO_WORKER_CLASS above. Built-in
@@ -439,8 +446,14 @@ Three housekeeping routines run off the main thread (`sidetrack.cpp`):
 
 Chat history is one ordered list. Entry 0 is the persona (consolidation level
 `-1`); any message with a negative level is protected: never consolidated and
-kept through the idle context clear. Each negative level is a reserved slot at
-a fixed position: `-1` is entry 0, `-2` is entry 1, `-3` (not used yet) entry 2.
+kept through the idle context clear. Each negative level is a reserved slot
+with its own ID: `-1` is the persona, `-2` what Olli knows about you, `-3`
+subcon's quick note (below). The level is an ID, not a position: the slots sit
+together at the top of the history in the order -1, -2, -3, but any of them may
+be missing (with no `-2` yet, a `-3` simply follows the `-1`, and a `-2` added
+later goes in front of it), and one can be removed on its own
+(`ai_root::set_protected_slot()` / `clear_protected_slot()`, rules in
+`protected_slots.h`).
 
 Slot `-2` holds what Olli knows about you. You write the source by hand in
 plain English, in `collection/For_Olli/about_the_user.txt` inside your settings folder
@@ -452,8 +465,33 @@ it into slot `-2` (replaced if already there, inserted if not). Nothing is sent
 or spoken at that moment; the next request just carries it. It runs again after
 the next bit of activity plus another 5 idle minutes, so the wording may drift a
 little. A blank or missing file, an interrupted call or an empty answer leaves
-the current paragraph alone. The paragraph goes to whichever AI backend is
+the current paragraph alone. While the chat is idle it also starts over every 30 minutes (`ABOUT_USER_REPEAT_INTERVAL`), so an edit to the notes file is picked up without any typing - each run is one model call, which Ollama serves one at a time. The paragraph goes to whichever AI backend is
 selected, so with `ai_backend: gemini` it goes to Google like the rest of the chat.
+
+### Subcon's quick note (history slot -3)
+
+While subcon has notes waiting for you, slot `-3` tells the model so and nudges it
+to deliver them: "Subcon quick note: your background thinking has 2 things waiting
+for the user (topics: Timers, Weather), and at least one is urgent... At the first
+natural moment - right after you answer what they just asked, or when they greet
+you - call get_subcon_notes and tell them what it says." Delivering them (the
+existing `get_subcon_notes` pull) uses the notes up, and the slot is removed on the
+next check.
+
+How: `run_subcon_note()` (`sidetrack.cpp`) is a stage machine like the other
+sidetrack routines (0 arm timer, 1 wait, 2 send the call, 3 wait for the answer, 4 apply,
+100 parked). One minute after the chat last changed it calls subcon's read-only
+`peek_subcon_notes` tool through the tool worker and reads the count and the topics (the
+pure parsing and wording are in `subcon_note.h`), then parks until the chat changes again -
+one check per interaction, like second-guess. It also repeats: 30 minutes after parking it starts over, so a note that arrives while nothing is typed still gets its slot (activity restarts it sooner). The -2 paragraph repeats on the same 30-minute interval; second-guess, consolidation and the context clear deliberately do not.
+Subcon never pushes anything; a peek marks nothing as told. The slot carries only
+topics, never the facts - those reach you only through `get_subcon_notes`, word for
+word. No subcon connected: no call is made and any old slot is removed. A slow,
+failed or garbled answer changes nothing. A change to the slot is not counted as
+activity (second-guess does not re-review, the about-the-user wait does not
+restart). Nothing is spoken when the slot changes; it only rides along with the
+next request. Ollama re-reads the conversation after a change at the top of the
+prompt, so the first reply after a change can be slower (Gemini is unaffected).
 
 ### The background "subconscious" (subcon)
 
@@ -471,6 +509,38 @@ limits and files it keeps in `<profile>/subcon/`, and
 
 (Subcon used to be a thread inside olli. That code was removed on 2026-10-31;
 it is still in git history, last present at commit `481e697`.)
+
+---
+
+## Olli's health report
+
+Once a minute olli writes a short plain-English report about itself into its own profile folder:
+
+```
+~/olli_files_<profile>/collection/Olli_Health/status.txt   how olli is doing right now (rewritten every minute)
+~/olli_files_<profile>/collection/Olli_Health/events.txt   notable things with timestamps (the last 200 are kept)
+```
+
+`status.txt` holds when this run started (and whether it followed a crash), the crashes on record from `crash_log.txt` (total / last 24 h /
+last 7 days / the last one), memory, threads, open files, free disk space, the sizes of `history.json`, the debug log and the crash log, and a
+**Needs attention** line that is "nothing" or lists what is wrong (a crash in the last 24 h, under 5 GB or 10 % disk free, over 2 GB memory,
+100+ threads, 500+ open files - the limits are constants at the top of `health.cpp`). Its first line carries the time it was written: an old
+time means olli is not running. `events.txt` records starts ("started again after a crash (...)"), problems appearing and clearing, and "olli
+stopped normally" on a clean exit - after a crash that last line is simply missing.
+
+It lives in `collection/` so the MCP bridge's file server (rooted there) lets olli's own chat and subcon read it through the read-only file
+tools; no new tool was needed. RAG does not index it (RAG only imports folders created as collections), so rag_tool shows it as "a folder
+with no matching collection". The code (`source/health.{h,cpp}`) reads only what the process can see about itself and writes only into that
+folder; every failure inside it is swallowed there.
+
+**Error counters** (added 2026-11-21): eight places in existing code report an error with one line, `olli_health::note(olli_health::ERROR_KIND::...)`
+(an atomic increment - no lock, never throws): `tool_worker.cpp` (a call for a tool nothing offers; a call that got no answer in 300 s),
+`ollama_system.cpp` (a failed request; the blanket `catch (...)` around a streamed chunk), `gemini_system.cpp` (a failed request, after its
+retries), `ai_root.cpp` (the `catch (...)` around a whole chat turn), `io_worker.cpp` (voice input's callback threw), `sidetrack.cpp` (second-guess
+hit its 10-round cap). `status.txt` gets an "Errors since this run started" line with the counts, a one-line event per kind appears in `events.txt`
+when its count grows, and **Needs attention** is raised for any swallowed error, 3+ failed model requests, a tool-call timeout or a second-guess
+cap hit (a "tool not available" on its own is only counted - it happens whenever a tool is stopped). Counts restart at 0 with every olli start.
+Test: `source/tests/health_test.cpp` (command at the top of the file).
 
 ---
 

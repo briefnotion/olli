@@ -163,6 +163,7 @@ add_executable(olli
     ../source/sidetrack.cpp
     ../source/threading.cpp
     ../source/fled_time.cpp
+    ../source/health.cpp
 )
 
 # 4. Include directories.

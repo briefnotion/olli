@@ -2,7 +2,10 @@
 #define SIDETRACK_CPP
 
 #include "sidetrack.h"
+#include "health.h"
+#include "subcon_note.h"
 #include "tool_worker.h" // TOOL_WORKER_CLASS::get_pending_result()
+#include <algorithm>
 #include <fstream>
 
 // Small helper for building the "(Took action on review: ...)" fallback
@@ -224,6 +227,7 @@ void SIDETRACK_CLASS::run_second_guess(IO_WORKER_CLASS& io_worker, ai_root& main
             }
             else
             {
+                olli_health::note(olli_health::ERROR_KIND::SECOND_GUESS_CAP);
                 DEBUG_LOG_CLASS::instance().log_event("sidetrack-second-guess",
                     "chain limit (" + std::to_string(SECOND_GUESS_MAX_CHAIN) + ") reached - parked until a real user turn");
             }
@@ -833,10 +837,10 @@ void SIDETRACK_CLASS::run_clear_context(ai_root& main_instance)
 // so the next real request carries it. Consolidation and the context clear
 // both skip negative levels, so it survives them. Runs again after the next
 // bit of activity plus another idle wait; the wording may differ slightly
-// each time, which is fine. A blank or missing file, an interrupted call or
+// each time, which is fine. Parked at 100 it also starts over after ABOUT_USER_REPEAT_INTERVAL (30 minutes), so a notes file edited while nothing is typed is picked up (still after the 5-minute idle wait). A blank or missing file, an interrupted call or
 // an empty answer leaves whatever -2 is there alone.
 //   0 arm the idle timer   1 wait for it   2 read the file, start the call
-//   3 wait for the call    4 install      100 done (until activity)
+//   3 wait for the call    4 install      100 done (until activity, or the 30-minute repeat)
 //   5 aborted by activity: wait for the call to end, then back to 0
 void SIDETRACK_CLASS::run_about_user(ai_root& main_instance)
 {
@@ -857,6 +861,25 @@ void SIDETRACK_CLASS::run_about_user(ai_root& main_instance)
         {
             about_user_stage = 0;
         }
+    }
+
+    // Parked at 100: start over after ABOUT_USER_REPEAT_INTERVAL (the idle wait below still applies first).
+    if (about_user_stage == 100)
+    {
+        if (!about_user_repeat_armed)
+        {
+            ABOUT_USER_REPEAT_TIMER.set(ABOUT_USER_REPEAT_INTERVAL);
+            about_user_repeat_armed = true;
+        }
+        else if (ABOUT_USER_REPEAT_TIMER.is_ready())
+        {
+            about_user_repeat_armed = false;
+            about_user_stage = 0;
+        }
+    }
+    else
+    {
+        about_user_repeat_armed = false;
     }
 
     if (about_user_stage == 0)
@@ -953,6 +976,180 @@ void SIDETRACK_CLASS::run_about_user(ai_root& main_instance)
 
 
 
+// Subcon's quick note: history slot -3. While subcon has notes waiting for the user, this slot says so and nudges the
+// model to deliver them at a natural moment; when none are waiting the slot is removed. Nothing is sent or spoken: it
+// only changes history, so the next real request carries it. The levels are IDs, not positions (protected_slots.h) -
+// this slot works with or without the -2 "about the user" slot.
+//
+// How it learns: it calls subcon's peek_subcon_notes through tool_worker - the same path the model's own remote tool
+// calls take - and reads the JSON answer ({"pending": N, "notes": [{"label", "urgency", ...}]}). Subcon never pushes
+// anything to olli; the peek marks nothing delivered. The nudge carries only topics (task labels), never the facts: the
+// facts reach the user only through get_subcon_notes, word for word, which also clears the count and so, at the next
+// check, removes this slot. No subcon connected -> no call is made (a call for a missing tool would only be an error)
+// and any old slot is removed, since get_subcon_notes would not work either. A failed or garbled answer changes nothing.
+//
+// A stage machine like the other sidetrack routines: any change to history is activity and starts it over from 0.
+//   0 arm the poll timer       1 wait for it (and for no reply to be in progress)
+//   2 is subcon connected? send the peek call (no subcon: remove any old slot, go to 100)
+//   3 wait for the answer (20 s limit)    4 apply: install, update or remove slot -3
+//   100 done - parked until the chat changes (activity puts it back to 0), or until the 30-minute repeat
+// After stage 4 this PARKS at 100 like the other routines. Unlike second-guess, consolidation and the context clear,
+// it repeats: 30 minutes after parking it starts over at 0, so a note that arrived while nothing was typed still gets
+// its slot (the same repeat the -2 paragraph has). Activity restarts it sooner.
+void SIDETRACK_CLASS::run_subcon_note(ai_root& main_instance, TOOL_WORKER_CLASS* tool_worker)
+{
+    if (tool_worker == nullptr) return;
+
+    // Any change to history is activity: start over, and drop a call that is still out (its answer would be stale).
+    // Our own insert/removal below updates this baseline so it is not mistaken for activity.
+    if (main_instance.history.size() != SUBCON_NOTE_PREVIOUS_HISTORY_SIZE)
+    {
+        SUBCON_NOTE_PREVIOUS_HISTORY_SIZE = main_instance.history.size();
+        if (subcon_note_stage == 3) tool_worker->abandon_call(subcon_note_call_id);
+        subcon_note_stage = 0;
+    }
+
+    // Parked at 100: check again after SUBCON_NOTE_REPEAT_INTERVAL (so a note that arrived while nothing was typed
+    // still gets its slot), going through the normal short wait first.
+    if (subcon_note_stage == 100)
+    {
+        if (!subcon_note_repeat_armed)
+        {
+            SUBCON_NOTE_REPEAT_TIMER.set(SUBCON_NOTE_REPEAT_INTERVAL);
+            subcon_note_repeat_armed = true;
+        }
+        else if (SUBCON_NOTE_REPEAT_TIMER.is_ready())
+        {
+            subcon_note_repeat_armed = false;
+            subcon_note_stage = 0;
+        }
+    }
+    else
+    {
+        subcon_note_repeat_armed = false;
+    }
+
+    if (subcon_note_stage == 0)
+    {
+        SUBCON_NOTE_POLL_TIMER.set(SUBCON_NOTE_POLL_INTERVAL);
+        subcon_note_stage = 1;
+    }
+    else if (subcon_note_stage == 1)
+    {
+        if (SUBCON_NOTE_POLL_TIMER.is_ready()) subcon_note_stage = 2;
+    }
+    else if (subcon_note_stage == 2)
+    {
+        if (main_instance.is_processing) return; // a reply is being written: wait, do not touch the prompt now
+
+        const bool subcon_connected = subcon_note::tool_offered(tool_worker->get_registered_tool_defs(), "peek_subcon_notes");
+        if (!subcon_note_tool_state_known || subcon_connected != subcon_note_tool_was_offered)
+        {
+            // Said once per change (and once at the first look), so "never calls subcon" can never again be a silent state.
+            subcon_note_tool_state_known = true;
+            subcon_note_tool_was_offered = subcon_connected;
+            DEBUG_LOG_CLASS::instance().log_event("sidetrack-subcon-note", subcon_connected ? "peek_subcon_notes is offered - checking subcon for waiting notes" : "peek_subcon_notes is not offered (subcon not connected, or an older subcon)");
+        }
+        if (!subcon_connected)
+        {
+            if (main_instance.clear_protected_slot(-3))
+            {
+                subcon_note_installed_text.clear();
+                main_instance.save_history();
+                std::lock_guard<std::mutex> lock(history_mutex);
+                SUBCON_NOTE_PREVIOUS_HISTORY_SIZE = main_instance.history.size();
+                ABOUT_USER_PREVIOUS_HISTORY_SIZE = main_instance.history.size();
+                SECOND_GUESS_PREVIOUS_HISTORY_SIZE = main_instance.history.size();
+                DEBUG_LOG_CLASS::instance().log_event("sidetrack-subcon-note", "subcon is not connected - removed slot -3");
+            }
+            subcon_note_stage = 100;
+            return;
+        }
+
+        ToolCall call;
+        call.id = "sidetrack_subcon_peek_" + std::to_string(++subcon_note_call_counter) + "_" +
+                  std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+        call.name = "peek_subcon_notes";
+        call.arguments = json::object();
+        subcon_note_call_id = call.id;
+        subcon_note_call_started = std::chrono::steady_clock::now();
+        tool_worker->put_pending_call(call);
+        subcon_note_stage = 3;
+    }
+    else if (subcon_note_stage == 3)
+    {
+        TOOL_RESULT result;
+        if (tool_worker->get_pending_result(subcon_note_call_id, result))
+        {
+            subcon_note_result = result.response;
+            subcon_note_stage = 4;
+        }
+        else if (std::chrono::duration<double>(std::chrono::steady_clock::now() - subcon_note_call_started).count() > SUBCON_NOTE_CALL_TIMEOUT)
+        {
+            tool_worker->abandon_call(subcon_note_call_id); // its late answer, if any, is dropped
+            DEBUG_LOG_CLASS::instance().log_event("sidetrack-subcon-note", "no answer from subcon in time - leaving slot -3 as it is");
+            subcon_note_stage = 100;
+        }
+    }
+    else if (subcon_note_stage == 4)
+    {
+        // A reply started while the answer was on its way: changing history now would also change the start of the
+        // prompt in the middle of it. Throw the answer away and start over (activity would do the same).
+        if (main_instance.is_processing)
+        {
+            subcon_note_stage = 0;
+            return;
+        }
+
+        const subcon_note::PEEK peek = subcon_note::parse_peek(subcon_note_result);
+        if (peek.pending < 0)
+        {
+            // An error text ("Error: ...") or something unreadable: say so in the debug log, change nothing.
+            DEBUG_LOG_CLASS::instance().log_event("sidetrack-subcon-note", "could not read subcon's answer - leaving slot -3 as it is: " + subcon_note_result.substr(0, 200));
+            subcon_note_stage = 100;
+            return;
+        }
+
+        bool changed = false;
+        std::string text;
+        if (peek.pending == 0)
+        {
+            changed = main_instance.clear_protected_slot(-3);
+            subcon_note_installed_text.clear();
+            if (changed) text = "removed (nothing waiting)";
+        }
+        else
+        {
+            Message note;
+            note.role = "system";
+            note.content = subcon_note::build_nudge(peek);
+            if (note.content != subcon_note_installed_text)
+            {
+                main_instance.set_protected_slot(-3, note);
+                subcon_note_installed_text = note.content;
+                changed = true;
+                text = "installed slot -3: " + note.content;
+            }
+        }
+
+        if (changed)
+        {
+            main_instance.save_history();
+            // An insert or a removal changes history's length. Tell the other watchers of history's size that this is
+            // not activity (second-guess would otherwise re-review the last reply, the about-user wait would restart).
+            std::lock_guard<std::mutex> lock(history_mutex);
+            SUBCON_NOTE_PREVIOUS_HISTORY_SIZE = main_instance.history.size();
+            ABOUT_USER_PREVIOUS_HISTORY_SIZE = main_instance.history.size();
+            SECOND_GUESS_PREVIOUS_HISTORY_SIZE = main_instance.history.size();
+            DEBUG_LOG_CLASS::instance().log_event("sidetrack-subcon-note", text);
+        }
+
+        subcon_note_stage = 100; // parked: activity or the 30-minute repeat starts it over
+    }
+}
+
+
+
 void SIDETRACK_CLASS::create(const ai_root& main_instance)
 {
     // Same backend as the main chat, with a copy of its properties (open()
@@ -1026,6 +1223,11 @@ void SIDETRACK_CLASS::check(IO_WORKER_CLASS& io_worker, ai_root& main_instance, 
     // PREVIOUS_HISTORY_SIZE update below, so its own insert isn't seen as
     // activity next tick.
     run_about_user(main_instance);
+
+
+    // Subcon's quick note (history slot -3) - same rule as above: before the
+    // PREVIOUS_HISTORY_SIZE update, so its own insert/removal is not activity.
+    run_subcon_note(main_instance, tool_worker);
 
 
     // if all stages at 100, do not reset until something happens in main.

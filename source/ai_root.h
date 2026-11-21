@@ -267,13 +267,19 @@ class ai_root {
         // clear_history_keep_protected() don't support.
         void replace_history(std::vector<Message> new_history);
 
-        // Puts message into the reserved slot for a negative consolidation
-        // level, in memory only - caller decides whether/when to
-        // save_history() after. The slot is fixed by the level: -1 is entry 0
-        // (the persona), -2 is entry 1, -3 is entry 2. If that entry already
-        // has this level it is replaced, otherwise the message is inserted
-        // there. message.consolidation_level is set to level here.
+        // Puts message into the protected slot with this negative consolidation
+        // level, in memory only - caller decides whether/when to save_history()
+        // after. The level is the slot's ID, not a position: -1 is the persona,
+        // -2 "about the user", -3 subcon's quick note. They sit together at the
+        // top of history in that order, but any may be missing (with no -2, a -3
+        // simply follows the -1). If a slot with this level is already there it
+        // is replaced, otherwise the message is inserted in order. See
+        // protected_slots.h. message.consolidation_level is set to level here.
         void set_protected_slot(int level, Message message);
+
+        // Removes the protected slot with this level, in memory only (same
+        // caller-saves rule). Returns false if there was none.
+        bool clear_protected_slot(int level);
 
         // Asks the backend to free PROPS.model from memory immediately, for
         // a backend that holds one locally (Ollama - see ollama_system.cpp;

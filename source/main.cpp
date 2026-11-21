@@ -4,6 +4,7 @@
 #include "main.h"
 #include "ai_factory.h"
 #include "remote_tools.h"
+#include "health.h"
 #include <atomic>
 #include <thread>
 #include <filesystem>
@@ -338,6 +339,7 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         SIDETRACK_CLASS sidetrack;
         IO_WORKER_CLASS io_worker; // keyboard input + screen display - see io_worker.h
         TOOL_WORKER_CLASS tool_worker; // remote-tool communications - see tool_worker.h
+        HEALTH_CLASS health; // quiet self-report into collection/Olli_Health/ - see health.h
 
         // The main chat's real tools_list - the 4 built-ins. Declared here,
         // not owned by 'chat' itself - see process()'s comment in ai_root.h for
@@ -449,6 +451,10 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         tool_worker.set_identity(comms.user);
 
         tool_worker.thread_start();
+
+        // Writes status.txt / events.txt into the profile's collection/Olli_Health/ once a minute. Isolated: it
+        // touches nothing else in olli (health.h).
+        health.thread_start(settings_path, profile_name, crash_restart);
 
         // No separate priming call needed here (there used to be one - a
         // one-off get_response()+display() to flush chat.open()'s startup
@@ -585,6 +591,7 @@ int main_process(const std::string& profile_name, bool crash_restart, bool debug
         // See IO_WORKER_CLASS's class comment (io_worker.h).
         io_worker.thread_stop();
         tool_worker.thread_stop();
+        health.thread_stop(); // records "olli stopped normally" - after a crash that line is missing, on purpose
 
         // Hand the real terminal screen back before printing any of the
         // shutdown messages below - otherwise they'd print while ncurses'

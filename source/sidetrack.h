@@ -104,6 +104,31 @@ class SIDETRACK_CLASS
         size_t ABOUT_USER_PREVIOUS_HISTORY_SIZE = 0;
         double IDLE_WAIT_TIME_FOR_ABOUT_USER = 5.0 * 60.0 * 1000.0; // ms
         TIMED_IS_READY_SIMPLE IDLE_WAIT_TIMER_FOR_ABOUT_USER;
+        // Repeat: once parked at stage 100, run again after this long (activity restarts it sooner anyway). Only the
+        // -2 paragraph and the -3 quick note repeat - a changed notes file or a note that arrived while nothing was
+        // typed would otherwise wait for the next interaction. Second-guess, consolidation and the context clear are
+        // deliberately one-shot per interaction and do not repeat.
+        double ABOUT_USER_REPEAT_INTERVAL = 30.0 * 60.0 * 1000.0; // ms
+        TIMED_IS_READY_SIMPLE ABOUT_USER_REPEAT_TIMER;
+        bool about_user_repeat_armed = false;
+
+        // Subcon's quick note (history slot -3) - see run_subcon_note(), which lists the stages. No chat instance of its
+        // own: it asks subcon's peek_subcon_notes tool (through tool_worker) and builds the message in code.
+        int subcon_note_stage = 0;
+        size_t SUBCON_NOTE_PREVIOUS_HISTORY_SIZE = 0;
+        double SUBCON_NOTE_POLL_INTERVAL = 60.0 * 1000.0; // ms - wait after activity before asking subcon
+        double SUBCON_NOTE_CALL_TIMEOUT = 20.0;           // seconds
+        TIMED_IS_READY_SIMPLE SUBCON_NOTE_POLL_TIMER;
+        double SUBCON_NOTE_REPEAT_INTERVAL = 30.0 * 60.0 * 1000.0; // ms - parked at 100, check again after this long
+        TIMED_IS_READY_SIMPLE SUBCON_NOTE_REPEAT_TIMER;
+        bool subcon_note_repeat_armed = false;
+        std::string subcon_note_call_id;
+        std::chrono::steady_clock::time_point subcon_note_call_started;
+        unsigned subcon_note_call_counter = 0;
+        std::string subcon_note_result;         // subcon's answer, between stage 3 and stage 4
+        std::string subcon_note_installed_text; // what -3 says now ("" = unknown or none)
+        bool subcon_note_tool_state_known = false; // so the first state seen (offered or not) is logged, then every change
+        bool subcon_note_tool_was_offered = false;
 
         // Runs every PERSISTENT_CHECK_INTERVAL regardless of activity -
         // see persistent_time_checks()'s own comment.
@@ -116,6 +141,7 @@ class SIDETRACK_CLASS
         void run_consolidation(ai_root& main_instance);
         void run_clear_context(ai_root& main_instance);
         void run_about_user(ai_root& main_instance);
+        void run_subcon_note(ai_root& main_instance, TOOL_WORKER_CLASS* tool_worker);
 
     public:
         // main_instance: sidetrack's own instance is made from it with

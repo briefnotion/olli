@@ -1,6 +1,7 @@
 #include "ollama_system.h"
 #include "tool_worker.h"
 #include "helper_olli.h"
+#include "health.h"
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -278,7 +279,7 @@ void ollama_system::backend_generate(TOOL_WORKER_CLASS* tool_worker, COMMS& comm
                             for (const auto& entry : j_chunk["logprobs"]) generated_call_text += entry.value("token", "");
                         }
                     }
-                } catch (...) {}
+                } catch (...) { olli_health::note(olli_health::ERROR_KIND::OLLAMA_STREAM_EXCEPTION); }
                 }
                 return true;
             }
@@ -287,6 +288,7 @@ void ollama_system::backend_generate(TOOL_WORKER_CLASS* tool_worker, COMMS& comm
         if (status.interrupt_signal.load()) {
             //log("\n[System: Response Interrupted by User]\n");
         } else if (!res || res->status != 200) {
+            olli_health::note(olli_health::ERROR_KIND::OLLAMA_REQUEST_FAILED);
             std::cerr << "\n[Error] Stream failed: " << (res ? std::to_string(res->status) : "Connection error") << std::endl;
         }
 
@@ -332,6 +334,7 @@ void ollama_system::backend_generate(TOOL_WORKER_CLASS* tool_worker, COMMS& comm
             }
         } else {
             last_received.complete = false;
+            olli_health::note(olli_health::ERROR_KIND::OLLAMA_REQUEST_FAILED);
             std::cerr << "[Error] Request failed in send: " 
                       << (res ? std::to_string(res->status) : "Connection error") << std::endl;
         }

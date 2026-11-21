@@ -1,4 +1,5 @@
 #include "tool_worker.h"
+#include "health.h"
 
 #include <algorithm>
 #include <chrono>
@@ -26,11 +27,17 @@ namespace
     constexpr int UNAVAILABLE_TOOL_GRACE_SECONDS = 3;
 
     // Same wording tools.cpp's failure_instruction uses for a failed web search / Hue call / note save.
+    // The last sentence is aimed at the "Let me try another way..." promise a small model tends to make and then never
+    // keep, which the second-guess pass then flags every round (a 10-round loop was seen on ron, 2026-11-20): if another
+    // tool could answer the question (a web search for a time the clock tool could not give), the model should use it NOW,
+    // not promise to; otherwise it should say so and stop. Deliberately does not forbid looking elsewhere.
     const std::string UNAVAILABLE_TOOL_INSTRUCTION =
         "This attempt did NOT succeed - it is an error, not real data. Tell "
         "the user plainly, in your own words, that it failed and what "
         "likely went wrong. Do not present this as a real answer to their "
-        "question.";
+        "question. If another tool you have could still get the answer a "
+        "different way (a web search, for example), use it now instead of "
+        "only saying you will; if not, say so and stop.";
 }
 
 void TOOL_WORKER_CLASS::thread_main()
@@ -140,6 +147,7 @@ void TOOL_WORKER_CLASS::thread_main()
                 timeout_result.response = "Error: no response within "
                     + std::to_string(CALL_TIMEOUT_SECONDS) + " seconds.";
                 pending_results.push_back(std::move(timeout_result));
+                olli_health::note(olli_health::ERROR_KIND::TOOL_CALL_TIMEOUT);
 
                 it = call_deadlines.erase(it);
             }
@@ -228,6 +236,7 @@ void TOOL_WORKER_CLASS::thread_main()
                     unavailable.response = "Error: the tool '" + shown_name + "' is not available right now - nothing that is connected offers it.";
                     unavailable.special_instruction = UNAVAILABLE_TOOL_INSTRUCTION;
                     pending_results.push_back(std::move(unavailable));
+                    olli_health::note(olli_health::ERROR_KIND::TOOL_NOT_AVAILABLE);
 
                     call_deadlines.erase(waiting);
                     call = pending_calls.erase(call);

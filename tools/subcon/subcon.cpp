@@ -353,6 +353,15 @@ namespace {
                     {"parameters", {{"type", "object"}, {"properties", json::object()}, {"required", json::array()}}}
                 },
                 {
+                    {"name", "peek_subcon_notes"},
+                    {"description", "A quick look at the background notes waiting for the user - how many, and for each one which kind of check it came "
+                                     "from, how urgent it is, how old it is and the start of what it says - WITHOUT using them up: nothing is marked as told, "
+                                     "so get_subcon_notes still has them afterwards. Call it only when the user asks whether you have anything waiting and "
+                                     "wants a hint of what, before hearing it. To actually tell the user what the notes say, call get_subcon_notes instead. "
+                                     "It answers instantly."},
+                    {"parameters", {{"type", "object"}, {"properties", json::object()}, {"required", json::array()}}}
+                },
+                {
                     {"name", "list_subcon_tasks"},
                     {"description", "What your subconscious is set up to keep an eye on for the user, and how it is going: each background task "
                                      "with what it checks, how often it may run, when it last ran, and whether it is waiting for a tool that is not "
@@ -525,6 +534,12 @@ int main(int argc, char* argv[])
                 size_t waiting = reasoner.state_loaded() ? reasoner.count_notes() : 0;
                 link.send_result(call_id, "There " + std::string(waiting == 1 ? "is 1 subcon note" : "are " + std::to_string(waiting) + " subcon notes") + " waiting.",
                                  "Tell the user that number briefly, in your own voice. Do not add or guess at anything else. Begin speaking now:");
+            } else if (name == "peek_subcon_notes") {
+                // Before olli's identity arrives there is no queue: the same "nothing" count_subcon_notes gives.
+                const std::string peek = reasoner.state_loaded() ? reasoner.peek_notes() : std::string("{\"pending\":0,\"notes\":[]}");
+                link.send_result(call_id, peek,
+                                 "This is only a short preview of what is waiting - nothing has been told to the user yet. Mention it briefly, "
+                                 "exactly as given, and if they want to hear it, call get_subcon_notes. Do not add or guess at anything.");
             } else if (name == "list_subcon_tasks") {
                 if (!reasoner.state_loaded()) {
                     link.send_result(call_id, "The background tasks are not loaded yet.");

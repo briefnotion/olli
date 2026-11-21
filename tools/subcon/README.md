@@ -39,6 +39,15 @@ it is now its own program, and it is both a **remote tool of olli** and a
   list and saved state (`describe_tasks()`), no model involved, nothing changed or marked
   delivered. It deliberately does not show the `how_to` prompt text, and tasks are still
   edited only in `tasks.json`.
+  A fourth tool, `peek_subcon_notes` (added 2026-11-21), is a quick look that uses nothing up:
+  it returns the pending notes as a small JSON object - `{"pending": 2, "notes": [{"label":
+  "Timers", "urgency": "urgent", "age_minutes": 10, "summary": "<first 140 bytes>"}, ...]}`, in the
+  order a pull would use - and marks nothing delivered (`peek_notes()`, `subcon_build_peek()`).
+  Built fresh from the queue on every call, so it can never be stale; notes that went unheard too
+  long are dropped first, so its count always matches a pull's. Olli's `run_subcon_note()` calls
+  it once a minute to keep the history slot `-3` ("subcon quick note") in step; the facts reach
+  the user only through `get_subcon_notes`. Tests: `tests/peek_test.cpp` (builder),
+  `tests/test_peek_tool.py` (the real subcon against a fake olli).
 - **As a server for tools**: listens on 127.0.0.1:47603 and speaks olli's own
   protocol ([`../PROTOCOL.md`](../PROTOCOL.md), "Two servers"). The other
   tools register their tools with it, and subcon calls them during think
@@ -181,6 +190,10 @@ Write tools (`set_hue_light`, `manage_hue_scenes`, `set_timer`,
 call to anything not offered is refused, logged `[SAFETY]`, and that cycle's
 finding discarded. The allowlist already matched the tools' actual registered
 names; nothing needed adding.
+
+Since 2026-11-21 the allowlist also has three of the MCP bridge's file tools - `mcp_files_read_text_file`, `mcp_files_list_directory`,
+`mcp_files_list_allowed_directories` - by name (not "every `mcp_` tool": a write tool someone later allows in the bridge for olli must not reach
+this background model). They read the profile's `collection/` folder, where olli writes its own health report (`collection/Olli_Health/`).
 
 ## How the old in-olli subcon maps to this
 

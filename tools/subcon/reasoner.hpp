@@ -111,6 +111,12 @@ class SUBCON_REASONER {
         // number is the same one a pull would then give.
         size_t count_notes();
 
+        // What a peek_subcon_notes call answers with: the pending notes as a small JSON object (count, and for each its
+        // task label, urgency, age and the start of its text - subcon_build_peek()). Read-only like count_notes(): nothing
+        // is marked delivered, and notes that went unheard too long are dropped first so the count matches a pull.
+        // Built fresh from the queue on every call, so it can never be stale. Instant: no model, no worker.
+        std::string peek_notes();
+
         // What a list_subcon_tasks call answers with. Read-only and built in
         // code from the task list and its saved state - never touches the
         // model or the worker, changes nothing, marks nothing delivered.

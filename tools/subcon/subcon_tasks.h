@@ -656,4 +656,45 @@ inline std::string subcon_build_digest(std::vector<SUBCON_NOTE>& notes)
     return digest;
 }
 
+// ---------------------------------------------------------------------
+// The quick look (peek_subcon_notes)
+// ---------------------------------------------------------------------
+
+// At most max_bytes, never cutting a UTF-8 character in half, "..." added when something was cut.
+inline std::string subcon_short_text(const std::string& text, size_t max_bytes)
+{
+    if (text.size() <= max_bytes) return text;
+    size_t cut = max_bytes;
+    while (cut > 0 && (static_cast<unsigned char>(text[cut]) & 0xC0) == 0x80) --cut;   // do not stop inside a character
+    return text.substr(0, cut) + "...";
+}
+
+// What a peek_subcon_notes call answers: everything pending (the same notes a get_subcon_notes would hand over, in
+// the same order - urgent first, then oldest first) as a small JSON object, WITHOUT marking anything delivered:
+//   {"pending": 2, "notes": [{"label": "Weather", "urgency": "normal", "age_minutes": 95, "summary": "..."}, ...]}
+// It is JSON so olli's own code can read the count and the topics reliably; the summary is only the start of each
+// note (the facts the user is told always come from get_subcon_notes, word for word).
+inline std::string subcon_build_peek(const std::vector<SUBCON_NOTE>& notes, int64_t now_unix_seconds)
+{
+    std::vector<const SUBCON_NOTE*> pending;
+    for (const SUBCON_NOTE& note : notes)
+        if (!note.delivered) pending.push_back(&note);
+
+    std::stable_sort(pending.begin(), pending.end(), [](const SUBCON_NOTE* a, const SUBCON_NOTE* b)
+    {
+        bool a_urgent = (a->urgency == "urgent"), b_urgent = (b->urgency == "urgent");
+        if (a_urgent != b_urgent) return a_urgent;
+        return a->created_unix < b->created_unix;
+    });
+
+    json out = {{"pending", pending.size()}, {"notes", json::array()}};
+    for (const SUBCON_NOTE* note : pending)
+    {
+        int64_t age_minutes = (note->created_unix > 0 && now_unix_seconds > note->created_unix) ? (now_unix_seconds - note->created_unix) / 60 : 0;
+        out["notes"].push_back({{"label", note->label}, {"urgency", note->urgency}, {"age_minutes", age_minutes},
+                                {"summary", subcon_short_text(note->content, 140)}});
+    }
+    return out.dump(-1, ' ', false, json::error_handler_t::replace);
+}
+
 #endif

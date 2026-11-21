@@ -32,12 +32,18 @@ namespace {
     // (list_hue_lights - set_hue_light and manage_hue_scenes write and are
     // NOT here), tools/presence (check_presence), tools/rag (rag_*), and this
     // tool's own internal ones (web_search, fetch_website_content,
-    // get_clock_time).
+    // get_clock_time). Added 2026-11-21: three of the MCP bridge's file tools
+    // (tools/mcp_bridge, the file server's read-only tools) - by NAME, not "every
+    // mcp_ tool": a write tool someone later allows in the bridge's config for olli
+    // must not silently reach a background model. They read the profile's
+    // collection folder, which is where olli writes its own health report
+    // (collection/Olli_Health/).
     bool is_read_only_tool(const std::string& name)
     {
         static const char* const allowed[] = {
             "web_search", "fetch_website_content", "rag_list_collections", "rag_search", "rag_search_documents",
-            "rag_get_document", "rag_find_text", "list_hue_lights", "check_presence", "list_timers", "check_timer", "get_clock_time"
+            "rag_get_document", "rag_find_text", "list_hue_lights", "check_presence", "list_timers", "check_timer", "get_clock_time",
+            "mcp_files_read_text_file", "mcp_files_list_directory", "mcp_files_list_allowed_directories"
         };
         for (const char* a : allowed)
             if (name == a) return true;
@@ -312,6 +318,18 @@ size_t SUBCON_REASONER::count_notes()
         save_queue();
     }
     return subcon_count_pending(queue);
+}
+
+std::string SUBCON_REASONER::peek_notes()
+{
+    const int64_t now = unix_now();
+    int expired = subcon_expire_old_notes(queue, now);
+    if (expired > 0)
+    {
+        log("dropped " + std::to_string(expired) + " note(s) that went unheard too long");
+        save_queue();
+    }
+    return subcon_build_peek(queue, now);
 }
 
 // "in 45 minutes" / "in 3 hours" / "now" for a moment in the future.

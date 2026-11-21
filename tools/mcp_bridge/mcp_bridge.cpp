@@ -15,7 +15,8 @@
 //
 // Config: <profile folder>/mcp_bridge.json (see README.md). Servers are only ever added
 // by editing that file - never by a tool the model can call, because a server is a command
-// that gets run on this machine.
+// that gets run on this machine. The profile folder is learned from olli's identity message
+// (vacant, with every server stopped, whenever olli is not connected); --profile / --dir pin it.
 //
 // Shape of the program: one thread, one select() loop over both olli links and every MCP
 // server's pipes (exactly the "one loop, all fds" rule of ../PROTOCOL.md). A slow MCP call
@@ -92,12 +93,28 @@ namespace {
         int subcon_port = SUBCON_TOOL_PORT;
     };
 
+    // Profile names become part of a folder name, so only plain characters are accepted. "" is allowed (olli's
+    // shared default profile, ~/olli_files).
+    bool profile_name_ok(const std::string& name)
+    {
+        if (name.size() > 64) return false;
+        for (char c : name) {
+            if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-')) return false;
+        }
+        return true;
+    }
+
+    fs::path profile_dir_for_name(const std::string& name)
+    {
+        const char* home = std::getenv("HOME");
+        fs::path base = (home != nullptr && *home != '\0') ? fs::path(home) : fs::path("/tmp");
+        return base / (name.empty() ? "olli_files" : "olli_files_" + name);
+    }
+
     fs::path profile_dir_for(const Options& opt)
     {
         if (!opt.dir_override.empty()) return fs::path(opt.dir_override);
-        const char* home = std::getenv("HOME");
-        fs::path base = (home != nullptr && *home != '\0') ? fs::path(home) : fs::path("/tmp");
-        return base / (opt.profile.empty() ? "olli_files" : "olli_files_" + opt.profile);
+        return profile_dir_for_name(opt.profile);
     }
 
     // The register entries for the bridge's own two tools.
@@ -212,24 +229,56 @@ namespace {
     class BRIDGE
     {
         public:
-            BRIDGE(const Options& options, const fs::path& dir, MCP_BRIDGE_CONFIG config)
-                : opt(options), profile_dir(dir), config_path(dir / "mcp_bridge.json"), cfg(std::move(config))
+            // The bridge starts EMPTY: no profile, no MCP servers, only its own two tools registered. Which folder
+            // it works from comes from olli, exactly like the other tools: olli's "identity" message names the
+            // profile, the bridge loads that profile's mcp_bridge.json and starts its servers; when olli goes away
+            // the profile is vacant again and every MCP server is stopped. --profile / --dir PIN a folder instead
+            // (loaded by main() before run(); olli's identity and disconnects are then ignored).
+            explicit BRIDGE(const Options& options)
+                : opt(options), pinned(!options.profile.empty() || !options.dir_override.empty())
             {
+                current_register = register_message_for(json::array());
+            }
+
+            bool is_pinned() const { return pinned; }
+
+            // Loads <dir>/mcp_bridge.json and starts that profile's servers. false (and why) if the file can't be
+            // used; the bridge then stays vacant.
+            bool activate_profile(const fs::path& dir, const std::string& label, std::string& problem)
+            {
+                json raw_config;
+                if (!load_config_file(dir / "mcp_bridge.json", raw_config, problem)) return false;
+
+                cfg = parse_config(raw_config);
+                profile_dir = dir;
+                config_path = dir / "mcp_bridge.json";
+                profile_label = label;
+                profile_active = true;
+                say("profile: " + label + " (" + dir.string() + ")");
+
                 for (const auto& w : cfg.warnings) say("config: " + w);
                 for (const auto& server_cfg : cfg.servers) {
                     servers.push_back(std::make_unique<MCP_SERVER>(server_cfg, dir / "mcp_bridge", [](const std::string& line) { say(line); }));
                 }
                 startup_at = Clock::now();
+                initial_pending = true;
+                links_held = pinned;   // a pinned bridge keeps the old behaviour: olli hears the full list once, not a bare one first
+                change_pending = false;
+                checked_generation = 0;
+                model_may_start.clear();
                 for (auto& server : servers) {
                     if (server->config().enabled) model_may_start.insert(server->config().name);
                     if (server->config().enabled) server->start();
                     else say("[" + server->config().name + "] disabled in the config - not started");
                 }
                 say("mcp_bridge: " + std::to_string(servers.size()) + (servers.size() == 1 ? " server" : " servers") + " configured");
+                return true;
             }
 
             void run(OLLI_LINK& olli, OLLI_LINK& subcon)
             {
+                olli_link = &olli;
+                subcon_link = &subcon;
                 std::string last_olli_status;
 
                 while (!quit_requested.load()) {
@@ -243,7 +292,7 @@ namespace {
                         auto watch_read = [&](int fd) { if (fd >= 0) { FD_SET(fd, &read_fds); max_fd = std::max(max_fd, fd); } };
                         auto watch_write = [&](int fd) { if (fd >= 0) { FD_SET(fd, &write_fds); max_fd = std::max(max_fd, fd); } };
 
-                        if (links_active) { watch_read(olli.fd()); watch_read(subcon.fd()); }
+                        if (!links_held) { watch_read(olli.fd()); watch_read(subcon.fd()); }
                         for (auto& server : servers) { watch_read(server->read_fd()); watch_write(server->write_fd()); }
 
                         timeval tv{};
@@ -260,9 +309,9 @@ namespace {
 
                         answer_finished_calls();
                         expire_calls();
-                        update_registration(olli, subcon);
+                        update_registration();
 
-                        if (links_active) {
+                        if (!links_held) {
                             service_link(olli, olli.fd() >= 0 && FD_ISSET(olli.fd(), &read_fds), true, last_olli_status);
                             service_link(subcon, subcon.fd() >= 0 && FD_ISSET(subcon.fd(), &read_fds), false, last_olli_status);
                         }
@@ -283,17 +332,84 @@ namespace {
             void service_link(OLLI_LINK& link, bool readable, bool is_olli, std::string& last_status)
             {
                 link.service(readable);
+                // Read BEFORE the messages are handled: handling one may re-register on purpose (which drops the
+                // connection and sets this same flag, see set_registration()).
+                const bool dropped = link.consume_disconnected();
                 json message;
                 while (link.next_message(message)) {
-                    if (message.value("type", "") == "call") handle_call(link, message);
-                    // "identity" needs nothing: this tool's settings do not depend on who is logged in
-                    // (its profile folder is chosen when it is started).
+                    const std::string type = message.value("type", "");
+                    if (type == "call") handle_call(link, message);
+                    else if (type == "identity" && is_olli) handle_identity(message);   // subcon's identity is not who is logged in
                 }
                 if (is_olli && !link.status().empty() && link.status() != last_status) {
                     last_status = link.status();
                     say(last_status);
                 }
-                link.consume_disconnected();
+                // olli went away: nobody is logged in, so nothing stays loaded. (Not for a pinned bridge.)
+                if (is_olli && dropped && !pinned && profile_active) deactivate_profile("olli is no longer connected - profile vacant, stopping the MCP servers");
+            }
+
+            // The profile name olli sent. A bad value (wrong type, odd characters) is ignored, never an error.
+            void handle_identity(const json& message)
+            {
+                if (pinned) return;
+                if (!message.contains("name") || !message["name"].is_string()) return;
+                const std::string name = message["name"].get<std::string>();
+                if (!profile_name_ok(name)) {
+                    say("olli sent a profile name this bridge will not use - ignoring it");
+                    return;
+                }
+                if (profile_active && name == current_profile_name) return;   // e.g. olli reconnecting after our own re-registration
+                if (profile_active) deactivate_profile("profile changed - stopping the MCP servers of the old one");
+
+                std::string problem;
+                const std::string label = name.empty() ? "(shared default)" : name;
+                if (!activate_profile(profile_dir_for_name(name), label, problem)) {
+                    say("cannot use profile " + label + ": " + problem + " - no MCP servers loaded");
+                    return;
+                }
+                current_profile_name = name;
+            }
+
+            // Unloads everything: pending calls get an error, every server is stopped (and its process group
+            // cleaned up), and both links go back to offering only the bridge's own two tools.
+            void deactivate_profile(const std::string& reason)
+            {
+                if (!profile_active) return;
+                say(reason);
+                for (auto& call : calls) {
+                    if (call.link->is_connected()) call.link->send_error(call.call_id, "The MCP servers were unloaded before this answered, so the call was cancelled.");
+                }
+                calls.clear();
+                for (auto& server : servers) server->stop();
+                for (auto& server : servers) server->shutdown_blocking();
+                servers.clear();
+                exposed.clear();
+                cfg = MCP_BRIDGE_CONFIG{};
+                model_may_start.clear();
+                profile_dir.clear();
+                config_path.clear();
+                profile_label.clear();
+                current_profile_name.clear();
+                profile_active = false;
+                initial_pending = false;
+                links_held = false;
+                change_pending = false;
+                checked_generation = 0;
+                current_register = register_message_for(json::array());
+                set_registration(current_register);
+            }
+
+            // Announces a new tool list on both links. If a link is up this drops it on purpose (that is how a
+            // changed list is announced, see OLLI_LINK::set_register_message()) - the drop is not "olli went away",
+            // so its flag is cleared here.
+            void set_registration(const json& message)
+            {
+                if (olli_link == nullptr || subcon_link == nullptr) return;
+                olli_link->set_register_message(message);
+                olli_link->consume_disconnected();
+                subcon_link->set_register_message(message);
+                subcon_link->consume_disconnected();
             }
 
             void handle_call(OLLI_LINK& link, const json& message)
@@ -441,30 +557,31 @@ namespace {
                 return desired;
             }
 
-            void apply(DESIRED& desired, OLLI_LINK& olli, OLLI_LINK& subcon)
+            void apply(DESIRED& desired)
             {
                 for (const auto& note : desired.notes) say(note);
                 current_register = desired.register_message;
                 exposed = std::move(desired.exposed);
                 last_registration_at = Clock::now();
-                olli.set_register_message(current_register);
-                subcon.set_register_message(current_register);
+                set_registration(current_register);
                 say("offering " + std::to_string(exposed.size()) + (exposed.size() == 1 ? " MCP tool" : " MCP tools") + " to olli");
             }
 
-            void update_registration(OLLI_LINK& olli, OLLI_LINK& subcon)
+            void update_registration()
             {
+                if (!profile_active) return;   // vacant: only the bridge's own two tools are offered
                 const auto now = Clock::now();
 
-                if (!links_active) {
-                    // First registration: wait for the servers that are still starting, so olli hears about
-                    // everything once instead of in several pieces.
+                if (initial_pending) {
+                    // First registration of this profile: wait for the servers that are still starting, so olli
+                    // hears about everything once instead of in several pieces.
                     bool any_starting = false;
                     for (const auto& server : servers) any_starting = any_starting || server->state() == MCP_SERVER::State::STARTING;
                     if (any_starting && now - startup_at < std::chrono::seconds(STARTUP_SETTLE_SECONDS)) return;
                     DESIRED desired = compute_desired();
-                    apply(desired, olli, subcon);
-                    links_active = true;
+                    apply(desired);
+                    initial_pending = false;
+                    links_held = false;
                     return;
                 }
 
@@ -486,7 +603,7 @@ namespace {
                 if (std::chrono::duration<double>(now - change_seen_at).count() < REGISTER_SETTLE_SECONDS) return;
                 if (std::chrono::duration<double>(now - last_registration_at).count() < MIN_SECONDS_BETWEEN_REGISTRATIONS) return;
 
-                apply(desired, olli, subcon);
+                apply(desired);
                 change_pending = false;
             }
 
@@ -494,7 +611,8 @@ namespace {
 
             std::string status_text() const
             {
-                std::string out = "MCP bridge: " + std::to_string(servers.size()) + (servers.size() == 1 ? " server" : " servers") + " set up.\n";
+                if (!profile_active) return "MCP bridge: no profile is loaded right now (olli is not connected to it), so no MCP servers are running.\n";
+                std::string out = "MCP bridge (profile " + profile_label + "): " + std::to_string(servers.size()) + (servers.size() == 1 ? " server" : " servers") + " set up.\n";
                 if (servers.empty()) out += "None yet - servers are added by editing " + config_path.string() + ".\n";
 
                 for (const auto& server : servers) {
@@ -530,6 +648,7 @@ namespace {
             std::string set_server_enabled(const json& arguments, bool& is_error)
             {
                 is_error = true;
+                if (!profile_active) return "No profile is loaded in the MCP bridge right now, so there are no MCP servers to turn on or off.";
                 if (!arguments.contains("server") || !arguments["server"].is_string()) return "Missing 'server' (the name of the MCP server).";
                 if (!arguments.contains("enabled") || !arguments["enabled"].is_boolean()) return "Missing 'enabled' (true or false).";
                 const std::string name = arguments["server"].get<std::string>();
@@ -570,16 +689,24 @@ namespace {
             }
 
             Options opt;
-            fs::path profile_dir;
+            const bool pinned;                  // --profile / --dir: the folder is fixed, olli's identity and drops are ignored
+            fs::path profile_dir;               // empty while vacant
             fs::path config_path;
+            std::string profile_label;          // for messages ("ron", "(shared default)")
+            std::string current_profile_name;   // as olli named it
+            bool profile_active = false;
             MCP_BRIDGE_CONFIG cfg;
+
+            OLLI_LINK* olli_link = nullptr;     // set by run()
+            OLLI_LINK* subcon_link = nullptr;
 
             std::vector<std::unique_ptr<MCP_SERVER>> servers;
             std::vector<PENDING_CALL> calls;
             std::map<std::string, EXPOSED_TOOL> exposed;
             json current_register;
 
-            bool links_active = false;
+            bool initial_pending = false;       // this profile's first tool list has not been announced yet
+            bool links_held = false;            // pinned startup only: the links stay quiet until that first announcement
             Clock::time_point startup_at{};
             bool change_pending = false;
             json pending_register;
@@ -600,12 +727,15 @@ namespace {
         std::cout << "Usage: " << prog << " [host] [--profile NAME] [-h|--help]\n\n"
                      "  host            IP address of the machine running olli. Defaults to\n"
                      "                  127.0.0.1 (olli running on this same machine).\n\n"
-                     "  --profile NAME  Use ~/olli_files_NAME/ (the folder of olli's profile NAME)\n"
-                     "                  for the settings file mcp_bridge.json. Without it, the\n"
-                     "                  shared ~/olli_files/ is used.\n\n"
+                     "  --profile NAME  Pin the profile: use ~/olli_files_NAME/ no matter which\n"
+                     "                  profile olli runs, and keep the MCP servers loaded when\n"
+                     "                  olli is not connected. Without it (the normal way) the\n"
+                     "                  bridge learns the profile from olli, like the other tools:\n"
+                     "                  it loads that profile's settings when olli connects and\n"
+                     "                  stops every MCP server when olli goes away.\n\n"
                      "  -h, --help      Show this help and exit.\n\n"
                      "MCP servers are set up in <profile folder>/mcp_bridge.json - see README.md.\n"
-                     "The settings are read when the bridge starts.\n";
+                     "The settings are read when a profile is loaded.\n";
     }
 }
 
@@ -634,11 +764,9 @@ int main(int argc, char* argv[])
         print_usage(argv[0]);
         return 1;
     }
-    for (char c : opt.profile) {
-        if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-')) {
-            std::cerr << "Not a valid profile name: " << opt.profile << "\n";
-            return 1;
-        }
+    if (!profile_name_ok(opt.profile)) {
+        std::cerr << "Not a valid profile name: " << opt.profile << "\n";
+        return 1;
     }
 
     std::signal(SIGINT, handle_signal);
@@ -655,16 +783,17 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    const fs::path dir = profile_dir_for(opt);
-    json raw_config;
-    std::string problem;
-    if (!load_config_file(dir / "mcp_bridge.json", raw_config, problem)) {
-        std::cerr << "mcp_bridge: " << problem << "\n";
-        return 1;
+    BRIDGE bridge(opt);
+    if (bridge.is_pinned()) {
+        // --profile / --dir: the folder is fixed from the start. (Without them the bridge starts empty and waits
+        // for olli's identity message, like every other tool.)
+        const fs::path dir = profile_dir_for(opt);
+        std::string problem;
+        if (!bridge.activate_profile(dir, opt.dir_override.empty() ? opt.profile : dir.string(), problem)) {
+            std::cerr << "mcp_bridge: " << problem << "\n";
+            return 1;
+        }
     }
-    MCP_BRIDGE_CONFIG config = parse_config(raw_config);
-
-    BRIDGE bridge(opt, dir, std::move(config));
     bridge.run(olli, subcon);
     return 0;
 }

@@ -18,14 +18,30 @@ so the MCP tools can be used from both. It does not need olli to be running when
 ```bash
 cd tools/mcp_bridge
 make
-./mcp_bridge                    # settings in ~/olli_files/mcp_bridge.json
-./mcp_bridge --profile ron      # settings in ~/olli_files_ron/mcp_bridge.json (the folder of olli's profile "ron")
+./mcp_bridge                     # normal: learns the profile from olli, like the other tools
+./mcp_bridge --profile ron      # pinned: always ~/olli_files_ron/mcp_bridge.json, whatever profile olli runs
 ./mcp_bridge 192.168.1.20       # olli on another machine
 ```
 
-Run it next to olli, like the other tools (it prints a short timestamped log). The profile is chosen when it starts, because the list of
-tools has to be known when it registers with olli - so give it the same profile name you give olli. The first start writes an empty
-`mcp_bridge.json` (owner-only, mode 600) and tells you where it is.
+Run it next to olli, like the other tools (it prints a short timestamped log).
+
+**The profile follows olli** (changed 2026-11-21; before that it was fixed by `--profile` at start, so a bridge started for `ron` kept serving
+ron's servers even when olli ran `./olli claude`). Started plainly, the bridge begins **empty** - no profile, no MCP servers, only its own two
+tools - and waits for olli's `identity` message, which names the profile:
+
+- olli connects as `ron` -> the bridge loads `~/olli_files_ron/mcp_bridge.json` and starts that profile's servers, then announces their tools
+  (olli's shared default profile, name `""`, uses `~/olli_files/`);
+- olli goes away (stopped, crashed, or the link times out) -> the profile is vacant again: every MCP server is stopped, calls still waiting get
+  an error, and the tool list shrinks back to the two own tools;
+- olli comes back as another profile -> that profile's servers load, nothing of the old one is left. Coming back as the *same* profile reloads
+  it too, because the servers were stopped (a few seconds when `npx`/`uvx` already have the package cached);
+- only olli's identity counts - subcon's link is not asked who is logged in;
+- a bad profile name from olli (odd characters, wrong type) is ignored; a profile whose `mcp_bridge.json` is unusable (world-writable, invalid
+  JSON) is reported in the log and the bridge stays empty until olli names a good one.
+
+`--profile NAME` or `--dir PATH` **pin** the folder instead (what the tests use): it is loaded at start, olli's identity is ignored, and the
+servers stay loaded while olli is away. The first time a profile is loaded its `mcp_bridge.json` is created empty (owner-only, mode 600) and
+the log says where it is.
 
 ## Setting up an MCP server
 
@@ -64,7 +80,7 @@ model can call - because a server is a command that gets run on this machine as 
 | `startup_timeout_seconds` | How long to wait for the server to become ready (the first `npx`/`uvx` run downloads the package). Default 120. |
 | `max_result_chars` / `call_timeout_seconds` | Longest answer passed on (longer is cut off, with a note) / longest wait for one call. Defaults 12000 / 120. |
 
-The settings are read when the bridge starts. Problems in the file (a bad server name, a command that is not a list) are skipped and
+The settings are read when a profile is loaded (see above). Problems in the file (a bad server name, a command that is not a list) are skipped and
 listed on start-up. The file is refused outright if it is writable by anyone but you, or owned by someone else.
 
 Server names are lower-case letters, digits and underscores (at most 24).
@@ -118,7 +134,7 @@ untrusted:
 - **While the bridge (or one server) is down, the model may still try to use its tools** - it remembers using them. olli answers such a call within a few
   seconds with "that tool is not available right now", and the model explains it in its own words (with both Gemini and the local Ollama model). Asking
   again once the bridge is back works. (See TODO.md, 2026-11-20 night.)
-- **No live reload** of `mcp_bridge.json`: restart the bridge to pick up edits.
+- **No live reload** of `mcp_bridge.json`: it is read when a profile is loaded, so edits apply the next time olli (re)connects - or restart the bridge.
 - If the bridge is killed hard (SIGKILL) or crashes, a server's grandchildren (the `node` behind an `npx`) can outlive it - only the
   direct child is ended automatically. A normal stop or Ctrl+C cleans everything up. (`pgrep -af mcp-server` finds strays.)
 - Tools only - not MCP "resources" or "prompts".
